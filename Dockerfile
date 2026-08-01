@@ -13,5 +13,5 @@ WORKDIR /app
 COPY --from=build /out/ /app/
 COPY docker/entrypoint.sh /entrypoint.sh
 
-EXPOSE 9001
+EXPOSE 8999
 ENTRYPOINT ["/entrypoint.sh"]

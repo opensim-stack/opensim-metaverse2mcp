@@ -16,7 +16,7 @@ esac
 set -- \
   --mcp-transport "$transport_lc" \
   --mcp-host "${MCP_HOST:-0.0.0.0}" \
-  --mcp-port "${MCP_PORT:-9001}" \
+  --mcp-port "${MCP_PORT:-8999}" \
   --mcp-http-endpoint "${MCP_HTTP_ENDPOINT:-/mcp}" \
   --first-name "${OPENSIM_LOGIN_FIRSTNAME:-}" \
   --last-name "${OPENSIM_LOGIN_LASTNAME:-}" \

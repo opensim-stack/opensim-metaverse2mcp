@@ -20,7 +20,7 @@ internal static class ConfigLoader
             BotLoginTimeoutSeconds = ParseInt(FirstDefined("BOT_LOGIN_TIMEOUT_SECONDS", "OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30)
         };
 
-        options.McpPort = ParseInt(Env("MCP_PORT"), 9001);
+        options.McpPort = ParseInt(Env("MCP_PORT"), 8999);
         ApplyCliOverrides(options, args);
         options.McpHttpEndpoint = NormalizeEndpoint(options.McpHttpEndpoint);
         options.McpTransport = (options.McpTransport ?? "http").Trim().ToLowerInvariant();
@@ -52,7 +52,7 @@ internal static class ConfigLoader
             "MCP HTTP options:",
             "  --mcp-transport <http|sse>     Transport (env: MCP_TRANSPORT, default: http)",
             "  --mcp-host <host>              Bind host (env: MCP_HOST, default: 0.0.0.0)",
-            "  --mcp-port <port>              Bind port (env: MCP_PORT, default: 9001)",
+            "  --mcp-port <port>              Bind port (env: MCP_PORT, default: 8999)",
             "  --mcp-http-endpoint <path>     Endpoint path (env: MCP_HTTP_ENDPOINT, default: /mcp)",
             "  --mcp-http-bearer-token <tok>  Bearer auth token (env: MCP_HTTP_BEARER_TOKEN)",
             "  --mcp-http-disallow-delete     Reject DELETE on MCP endpoint (env: MCP_HTTP_DISALLOW_DELETE)",

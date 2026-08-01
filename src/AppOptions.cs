@@ -6,7 +6,7 @@ internal sealed class AppOptions
 {
     public string McpTransport { get; set; } = "http";
     public string McpHost { get; set; } = "0.0.0.0";
-    public int McpPort { get; set; } = 9001;
+    public int McpPort { get; set; } = 8999;
     public string McpHttpEndpoint { get; set; } = "/mcp";
     public bool McpHttpDisallowDelete { get; set; }
     public string? McpHttpBearerToken { get; set; }

@@ -1,5 +1,7 @@
 # opensim-metaverse2mcp
 
+[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-bithatch%2Fopensim--metaverse2mcp-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/repository/docker/bithatch/opensim-metaverse2mcp)
+
 `opensim-metaverse2mcp` is a LibreMetaverse-based OpenSim bot that exposes bot actions as MCP tools over **Streamable HTTP**.
 
 The server logs in the bot on startup (no separate login tool), then serves MCP at a configurable HTTP endpoint.
@@ -40,7 +42,7 @@ export OPENSIM_LOGIN_URI="http://localhost:9000"
 
 export MCP_TRANSPORT="http"
 export MCP_HOST="0.0.0.0"
-export MCP_PORT="9001"
+export MCP_PORT="8999"
 export MCP_HTTP_ENDPOINT="/mcp"
 
 dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release
@@ -55,7 +57,7 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
   --password BotPassword \
   --login-uri http://localhost:9000 \
   --mcp-host 0.0.0.0 \
-  --mcp-port 9001 \
+  --mcp-port 8999 \
   --mcp-http-endpoint /mcp
 ```
 
@@ -77,7 +79,7 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 
 - `MCP_TRANSPORT` (`http` or `sse`; default: `http`)
 - `MCP_HOST` (default: `0.0.0.0`)
-- `MCP_PORT` (default: `9001`)
+- `MCP_PORT` (default: `8999`)
 - `MCP_HTTP_ENDPOINT` (default: `/mcp`)
 - `MCP_HTTP_BEARER_TOKEN` (optional)
 - `MCP_HTTP_DISALLOW_DELETE` (`true`/`false`, default: `false`)
@@ -398,8 +400,28 @@ docker run --rm \
   -e OPENSIM_LOGIN_URI=http://host.docker.internal:9000 \
   -e MCP_TRANSPORT=http \
   -e MCP_HOST=0.0.0.0 \
-  -e MCP_PORT=9001 \
+  -e MCP_PORT=8999 \
   -e MCP_HTTP_ENDPOINT=/mcp \
-  -p 9001:9001 \
+  -p 8999:8999 \
   opensim-metaverse2mcp:local
+```
+
+### Build and publish multiarch image
+
+Create/use a buildx builder once:
+
+```bash
+docker buildx create --name multiarch --use
+docker buildx inspect --bootstrap
+```
+
+Build and push Linux AMD64 + ARM64:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t bithatch/opensim-metaverse2mcp:latest \
+  -t bithatch/opensim-metaverse2mcp:$(date +%Y%m%d) \
+  --push \
+  .
 ```
