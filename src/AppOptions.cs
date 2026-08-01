@@ -22,6 +22,14 @@ internal sealed class AppOptions
     public string BotStartLocation { get; set; } = "last";
     public int BotLoginTimeoutSeconds { get; set; } = 30;
 
+    public bool OpencodeChatEnabled { get; set; } = true;
+    public string OpencodeScheme { get; set; } = "http";
+    public string OpencodeHost { get; set; } = "opensim-opencode";
+    public int OpencodePort { get; set; } = 8998;
+    public string? OpencodeUsername { get; set; }
+    public string? OpencodePassword { get; set; }
+    public int OpencodeRequestTimeoutSeconds { get; set; } = 60;
+
     public bool ShowHelp { get; set; }
 
     public bool UseLegacySseCompatibility => string.Equals(McpTransport, "sse", StringComparison.OrdinalIgnoreCase);
@@ -58,6 +66,30 @@ internal sealed class AppOptions
         if (BotLoginTimeoutSeconds < 1)
         {
             errors.Add("Bot login timeout must be at least 1 second.");
+        }
+
+        if (OpencodeChatEnabled)
+        {
+            var scheme = (OpencodeScheme ?? string.Empty).Trim().ToLowerInvariant();
+            if (scheme != "http" && scheme != "https")
+            {
+                errors.Add("Opencode scheme must be 'http' or 'https'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(OpencodeHost))
+            {
+                errors.Add("Opencode host is required when chat bridge is enabled.");
+            }
+
+            if (OpencodePort < 1 || OpencodePort > 65535)
+            {
+                errors.Add("Opencode port must be in range 1..65535.");
+            }
+
+            if (OpencodeRequestTimeoutSeconds < 1)
+            {
+                errors.Add("Opencode timeout must be at least 1 second.");
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(InventoryOfferPolicyFile))

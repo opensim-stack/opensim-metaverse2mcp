@@ -19,14 +19,6 @@ internal sealed class BotMcpTools
         return _bot.GetStatus();
     }
 
-    [McpServerTool, Description("Run the built-in SimpleBot command parser (help, where, sit, stand, dance, fly, walk, jump).")]
-    public Task<BotToolResult> RunSimpleCommand(
-        [Description("SimpleBot command text.")] string command,
-        CancellationToken cancellationToken)
-    {
-        return _bot.ExecuteSimpleBotCommandAsync(command, cancellationToken);
-    }
-
     [McpServerTool, Description("Sit on the ground.")]
     public Task<BotToolResult> Sit(CancellationToken cancellationToken)
     {

@@ -8,7 +8,7 @@ internal sealed partial class BotSession : IDisposable
 {
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
-    private readonly Random _random = new();
+    private readonly IOpencodeChatClient? _opencodeChat;
 
     private GridClient? _client;
     private bool _connected;
@@ -17,6 +17,10 @@ internal sealed partial class BotSession : IDisposable
     public BotSession(AppOptions options)
     {
         _options = options;
+        if (_options.OpencodeChatEnabled)
+        {
+            _opencodeChat = new OpencodeChatClient(_options);
+        }
     }
 
     public string LastLoginMessage => _lastLoginMessage;
@@ -1420,28 +1424,6 @@ internal sealed partial class BotSession : IDisposable
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> ExecuteSimpleBotCommandAsync(string command, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(command))
-        {
-            return BotToolResult.Fail("command is required.");
-        }
-
-        var normalized = command.Trim().ToLowerInvariant();
-        return normalized switch
-        {
-            "help" or "?" => BotToolResult.OkResult("Commands: help, where, sit, stand, dance, fly, walk, jump"),
-            "where" or "location" => BotToolResult.OkResult(FormatWhereText(EnsureClient())),
-            "sit" => await SitAsync(cancellationToken),
-            "stand" => await StandAsync(cancellationToken),
-            "dance" => await DanceAsync(true, cancellationToken),
-            "fly" => await FlyAsync(true, cancellationToken),
-            "walk" => await FlyAsync(false, cancellationToken),
-            "jump" => await JumpAsync(cancellationToken),
-            _ => BotToolResult.Fail("Unknown command. Try: help, where, sit, stand, dance, fly, walk, jump")
-        };
-    }
-
     public void Dispose()
     {
         var client = _client;
@@ -1469,6 +1451,11 @@ internal sealed partial class BotSession : IDisposable
         }
 
         client.Dispose();
+        if (_opencodeChat is IDisposable disposableOpencodeChat)
+        {
+            disposableOpencodeChat.Dispose();
+        }
+
         _actionGate.Dispose();
     }
 
@@ -2020,17 +2007,49 @@ internal sealed partial class BotSession : IDisposable
         var text = e.IM.Message?.Trim() ?? string.Empty;
         Console.WriteLine($"[im] {from}: {text}");
 
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
         _ = Task.Run(async () =>
         {
-            var reply = await ExecuteSimpleBotCommandAsync(text, CancellationToken.None).ConfigureAwait(false);
             try
             {
-                client.Self.InstantMessage(e.IM.FromAgentID, reply.Message);
-                Console.WriteLine($"[im] -> {from}: {reply.Message}");
+                if (_opencodeChat == null)
+                {
+                    client.Self.InstantMessage(e.IM.FromAgentID, "AI chat is currently disabled by configuration.");
+                    return;
+                }
+
+                // TODO(security): enforce who the AI is allowed to talk to (allowlist, roles, or parcel/group checks).
+                var reply = await _opencodeChat.SendMessageAsync(
+                    conversationKey: $"im:{e.IM.FromAgentID}",
+                    title: $"OpenSim IM with {from}",
+                    message: text,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+
+                var responseText = reply.IsConfirmationPrompt
+                    ? reply.Text + "\n\nReply with yes or no to continue."
+                    : reply.Text;
+
+                foreach (var chunk in SplitForInstantMessage(responseText, 900))
+                {
+                    client.Self.InstantMessage(e.IM.FromAgentID, chunk);
+                    Console.WriteLine($"[im] -> {from}: {chunk}");
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[im] failed to reply: {ex.Message}");
+                Console.WriteLine($"[im] failed to route to opencode: {ex.Message}");
+                try
+                {
+                    client.Self.InstantMessage(e.IM.FromAgentID, "Sorry, I could not reach the AI service right now.");
+                }
+                catch
+                {
+                    // Ignore failures while trying to report backend errors.
+                }
             }
         });
     }
@@ -2043,22 +2062,56 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        var msg = e.Message?.ToLowerInvariant() ?? string.Empty;
-        if (msg.Contains("hello") || msg.Contains("hi "))
+        // TODO(ai-chat): route local chat to Opencode after conversation UX and anti-spam policies are finalized.
+        // TODO(ai-chat): add group chat routing once we define session mapping semantics for groups.
+    }
+
+    private static IReadOnlyList<string> SplitForInstantMessage(string message, int maxChunkLength)
+    {
+        if (string.IsNullOrWhiteSpace(message))
         {
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(_random.Next(500, 1500)).ConfigureAwait(false);
-                try
-                {
-                    client.Self.Chat($"Hello, {e.FromName}!", 0, ChatType.Normal);
-                }
-                catch
-                {
-                    // Best effort response.
-                }
-            });
+            return new[] { "(No reply text.)" };
         }
+
+        if (message.Length <= maxChunkLength)
+        {
+            return new[] { message };
+        }
+
+        var chunks = new List<string>();
+        var start = 0;
+        while (start < message.Length)
+        {
+            var remaining = message.Length - start;
+            if (remaining <= maxChunkLength)
+            {
+                chunks.Add(message[start..]);
+                break;
+            }
+
+            var span = message.AsSpan(start, maxChunkLength);
+            var cut = span.LastIndexOf('\n');
+            if (cut <= 0)
+            {
+                cut = span.LastIndexOf(' ');
+            }
+
+            if (cut <= 0)
+            {
+                cut = maxChunkLength;
+            }
+
+            var end = start + cut;
+            chunks.Add(message[start..end].Trim());
+            start = end;
+
+            while (start < message.Length && char.IsWhiteSpace(message[start]))
+            {
+                start++;
+            }
+        }
+
+        return chunks;
     }
 
     private void OnLoginProgress(object? sender, LoginProgressEventArgs e)

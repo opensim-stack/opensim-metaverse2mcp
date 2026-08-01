@@ -9,10 +9,8 @@ The server logs in the bot on startup (no separate login tool), then serves MCP 
 ## What it does
 
 - Uses `LibreMetaverse` (`3.1.3`) to connect to OpenSim/SL-compatible grids.
-- Implements the `SimpleBot` behavior:
-  - IM command parsing (`help`, `where`, `sit`, `stand`, `dance`, `fly`, `walk`, `jump`)
-  - local chat greeting responses
-  - movement and animation actions
+- Routes avatar IM conversations to Opencode server sessions with [NOpenCode](https://github.com/ylvict/NOpenCode).
+- Uses MCP tools for avatar actions that the AI can invoke via Opencode.
 - Exposes MCP tools with the official C# MCP libraries:
   - `ModelContextProtocol`
   - `ModelContextProtocol.AspNetCore`
@@ -44,6 +42,14 @@ export MCP_TRANSPORT="http"
 export MCP_HOST="0.0.0.0"
 export MCP_PORT="8999"
 export MCP_HTTP_ENDPOINT="/mcp"
+
+export OPENCODE_CHAT_ENABLED="true"
+export OPENCODE_SCHEME="http"
+export OPENCODE_HOST="localhost"
+export OPENCODE_PORT="8998"
+# optional Basic auth:
+# export OPENCODE_USERNAME="opencode"
+# export OPENCODE_PASSWORD="change-me"
 
 dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release
 ```
@@ -87,6 +93,17 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `INVENTORY_OFFER_POLICY_FILE` (optional JSON file path)
 - `INVENTORY_OFFER_POLICY_AUTOSAVE` (`true`/`false`, default: `true`)
 
+### Opencode chat bridge
+
+- `OPENCODE_CHAT_ENABLED` (`true`/`false`, default: `true`)
+- `OPENCODE_SCHEME` (`http` or `https`, default: `http`)
+- `OPENCODE_HOST` (default: `opensim-opencode`)
+- `OPENCODE_PORT` (default: `8998`)
+- `OPENCODE_USERNAME` (optional Basic auth username)
+- `OPENCODE_PASSWORD` (optional Basic auth password)
+- `OPENCODE_SERVER_PASSWORD` (optional fallback alias for `OPENCODE_PASSWORD`)
+- `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `60`)
+
 Notes:
 - `MCP_TRANSPORT=sse` enables legacy SSE compatibility in the MCP HTTP transport.
 - This server always runs MCP over HTTP (streamable transport), not stdio.
@@ -96,7 +113,6 @@ Notes:
 The server publishes tools including:
 
 - `GetStatus`
-- `RunSimpleCommand`
 - `Sit`
 - `Stand`
 - `Fly`
@@ -165,6 +181,11 @@ The server publishes tools including:
 - `EnvGetLegacy`
 - `EnvSetLegacyRaw`
 - `EnvResetLegacy`
+
+Chat notes:
+- In this stage, only avatar-to-bot IM is routed to Opencode.
+- TODO: add local chat and group chat routing.
+- TODO: add a security policy to control which users the AI may respond to.
 
 UV preset notes:
 - `PrimApplyUvPreset` supports: `fit`, `reset`, `tile2x2`, `tile4x4`, `flipU`, `flipV`, `rotate90`, `rotate180`, `rotate270`, `center`.

@@ -23,7 +23,22 @@ set -- \
   --password "${OPENSIM_LOGIN_PASSWORD:-}" \
   --login-uri "${OPENSIM_LOGIN_URI:-http://opensim:9000}" \
   --start-location "${OPENSIM_LOGIN_START:-last}" \
-  --login-timeout-seconds "${BOT_LOGIN_TIMEOUT_SECONDS:-30}"
+  --login-timeout-seconds "${BOT_LOGIN_TIMEOUT_SECONDS:-30}" \
+  --opencode-chat-enabled "${OPENCODE_CHAT_ENABLED:-true}" \
+  --opencode-scheme "${OPENCODE_SCHEME:-http}" \
+  --opencode-host "${OPENCODE_HOST:-opensim-opencode}" \
+  --opencode-port "${OPENCODE_PORT:-8998}" \
+  --opencode-timeout-seconds "${OPENCODE_REQUEST_TIMEOUT_SECONDS:-60}"
+
+if [ -n "${OPENCODE_USERNAME:-}" ]; then
+  set -- "$@" --opencode-username "${OPENCODE_USERNAME}"
+fi
+
+if [ -n "${OPENCODE_PASSWORD:-}" ]; then
+  set -- "$@" --opencode-password "${OPENCODE_PASSWORD}"
+elif [ -n "${OPENCODE_SERVER_PASSWORD:-}" ]; then
+  set -- "$@" --opencode-password "${OPENCODE_SERVER_PASSWORD}"
+fi
 
 if [ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]; then
   set -- "$@" --mcp-http-bearer-token "${MCP_HTTP_BEARER_TOKEN}"

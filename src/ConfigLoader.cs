@@ -19,7 +19,14 @@ internal static class ConfigLoader
             BotPassword = FirstDefined("OPENSIM_LOGIN_PASSWORD", "BOT_PASSWORD"),
             BotLoginUri = FirstDefined("OPENSIM_LOGIN_URI", "BOT_LOGIN_URI") ?? "http://opensim:9000",
             BotStartLocation = FirstDefined("OPENSIM_LOGIN_START", "BOT_LOGIN_START") ?? "last",
-            BotLoginTimeoutSeconds = ParseInt(FirstDefined("BOT_LOGIN_TIMEOUT_SECONDS", "OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30)
+            BotLoginTimeoutSeconds = ParseInt(FirstDefined("BOT_LOGIN_TIMEOUT_SECONDS", "OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30),
+            OpencodeChatEnabled = ParseBool(Env("OPENCODE_CHAT_ENABLED"), true),
+            OpencodeScheme = Env("OPENCODE_SCHEME") ?? "http",
+            OpencodeHost = Env("OPENCODE_HOST") ?? "opensim-opencode",
+            OpencodePort = ParseInt(Env("OPENCODE_PORT"), 8998),
+            OpencodeUsername = Env("OPENCODE_USERNAME"),
+            OpencodePassword = FirstDefined("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
+            OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60)
         };
 
         options.McpPort = ParseInt(Env("MCP_PORT"), 8999);
@@ -50,6 +57,16 @@ internal static class ConfigLoader
             "  --login-uri <url>              Login URI (env: OPENSIM_LOGIN_URI, default: http://opensim:9000)",
             "  --start-location <value>       Start location (env: OPENSIM_LOGIN_START, default: last)",
             "  --login-timeout-seconds <int>  Login timeout (env: BOT_LOGIN_TIMEOUT_SECONDS, default: 30)",
+            string.Empty,
+            "Opencode chat bridge:",
+            "  --opencode-chat-enabled <bool> Enable IM -> Opencode chat bridge (env: OPENCODE_CHAT_ENABLED, default: true)",
+            "  --opencode-scheme <http|https> Opencode URL scheme (env: OPENCODE_SCHEME, default: http)",
+            "  --opencode-host <host>         Opencode server host (env: OPENCODE_HOST, default: opensim-opencode)",
+            "  --opencode-port <port>         Opencode server port (env: OPENCODE_PORT, default: 8998)",
+            "  --opencode-username <value>    Optional Basic auth username (env: OPENCODE_USERNAME, default: opencode when password set)",
+            "  --opencode-password <value>    Optional Basic auth password (env: OPENCODE_PASSWORD/OPENCODE_SERVER_PASSWORD)",
+            "  --opencode-timeout-seconds <int>",
+            "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
             string.Empty,
             "MCP HTTP options:",
             "  --mcp-transport <http|sse>     Transport (env: MCP_TRANSPORT, default: http)",
@@ -98,6 +115,27 @@ internal static class ConfigLoader
                     break;
                 case "--login-timeout-seconds":
                     options.BotLoginTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.BotLoginTimeoutSeconds);
+                    break;
+                case "--opencode-chat-enabled":
+                    options.OpencodeChatEnabled = ParseBool(RequireValue(args, ref i, arg), options.OpencodeChatEnabled);
+                    break;
+                case "--opencode-scheme":
+                    options.OpencodeScheme = RequireValue(args, ref i, arg);
+                    break;
+                case "--opencode-host":
+                    options.OpencodeHost = RequireValue(args, ref i, arg);
+                    break;
+                case "--opencode-port":
+                    options.OpencodePort = ParseInt(RequireValue(args, ref i, arg), options.OpencodePort);
+                    break;
+                case "--opencode-username":
+                    options.OpencodeUsername = RequireValue(args, ref i, arg);
+                    break;
+                case "--opencode-password":
+                    options.OpencodePassword = RequireValue(args, ref i, arg);
+                    break;
+                case "--opencode-timeout-seconds":
+                    options.OpencodeRequestTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.OpencodeRequestTimeoutSeconds);
                     break;
                 case "--mcp-transport":
                     options.McpTransport = RequireValue(args, ref i, arg);
