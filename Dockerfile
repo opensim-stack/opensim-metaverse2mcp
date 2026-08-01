@@ -7,7 +7,7 @@ RUN dotnet restore src/opensim-metaverse2mcp.csproj
 COPY src/ src/
 RUN dotnet publish src/opensim-metaverse2mcp.csproj -c Release -o /out /p:UseAppHost=false
 
-FROM mcr.microsoft.com/dotnet/runtime:8.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
 
 COPY --from=build /out/ /app/

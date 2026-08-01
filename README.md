@@ -21,7 +21,7 @@ The server logs in the bot on startup (no separate login tool), then serves MCP 
 ## Requirements
 
 - .NET SDK 8.0+ to build
-- Runtime: .NET 8 (`mcr.microsoft.com/dotnet/runtime:8.0` for container)
+- Runtime: .NET 8 (`mcr.microsoft.com/dotnet/aspnet:8.0` for container)
 
 ## Build
 
@@ -84,6 +84,8 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `MCP_HTTP_BEARER_TOKEN` (optional)
 - `MCP_HTTP_DISALLOW_DELETE` (`true`/`false`, default: `false`)
 - `MCP_DIAGNOSTICS` (`true`/`false`, default: `false`)
+- `INVENTORY_OFFER_POLICY_FILE` (optional JSON file path)
+- `INVENTORY_OFFER_POLICY_AUTOSAVE` (`true`/`false`, default: `true`)
 
 Notes:
 - `MCP_TRANSPORT=sse` enables legacy SSE compatibility in the MCP HTTP transport.
@@ -130,6 +132,30 @@ The server publishes tools including:
 - `PrimDeselect`
 - `PrimDelete`
 - `PrimDeleteMany`
+- `InventoryList`
+- `InventoryGiveItem`
+- `InventoryGiveFolder`
+- `TaskInventoryList`
+- `TaskInventoryTake`
+- `AssetUploadInventory`
+- `AssetDownload`
+- `TextureDownload`
+- `InventoryOfferPolicyRuleAdd`
+- `InventoryOfferPolicyRulesList`
+- `InventoryOfferPolicyRulesClear`
+- `InventoryOfferHistoryList`
+- `InventoryOfferPolicyRulesSave`
+- `InventoryOfferPolicyRulesLoad`
+- `AppearanceListWorn`
+- `AppearanceWearFolder`
+- `AppearanceAttachItem`
+- `AppearanceDetachItem`
+- `AppearanceRebake`
+- `ScriptUploadAgent`
+- `ScriptUploadTask`
+- `ScriptCopyInventoryToTask`
+- `ScriptGetTaskRunning`
+- `ScriptSetTaskRunning`
 - `EnvGetRegion`
 - `EnvGetParcel`
 - `EnvResetRegion`
@@ -154,6 +180,86 @@ Environment notes:
 - `EnvSetRegionRaw`/`EnvSetParcelRaw` accept `payloadFormat` of `auto`, `json`, or `xml`.
 - For EEP raw set, payload can be either a direct `EnvironmentData` map or a wrapper object containing `environment`.
 - `EnvSetLegacyRaw` expects a legacy `EnvironmentSettings` LLSD map payload.
+
+Inventory and asset notes:
+- `AssetUploadInventory` accepts either a local file path or an `http/https` URL as `source`.
+- `AssetDownload` and `TextureDownload` use `outputMode`: `both` (default), `base64`, or `tempfile`.
+- Incoming inventory offers are policy-driven: first matching rule decides `accept` or `decline`; unmatched offers are declined by default.
+- `TaskInventoryTake` requests transfer from object (task) inventory into avatar inventory; server permissions determine copy-vs-move behavior.
+- Cross-avatar "take/copy" is offer-based: you can receive what another avatar offers, but cannot arbitrarily pull from another avatar inventory.
+- `InventoryOfferPolicyRulesSave`/`InventoryOfferPolicyRulesLoad` persist policy rules as JSON; startup auto-load occurs when `INVENTORY_OFFER_POLICY_FILE` exists.
+
+Appearance and script notes:
+- `AppearanceWearFolder` expects a folder containing wearable/attachment items (or links to them) and delegates to `Appearance.WearOutfitAsync`.
+- `AppearanceAttachItem` can use an explicit `attachmentPoint`, or falls back to the item's default point when available.
+- `ScriptUploadAgent`/`ScriptUploadTask` return compile status and compiler messages when the grid reports them.
+- `ScriptSetTaskRunning` can verify state by requesting `ScriptRunningReply` after sending the state change.
+
+## Common workflows
+
+Use these as practical MCP call sequences when building assistants/agents on top of this server.
+
+### 1) Wear an outfit folder and adjust attachments
+
+1. Find the folder UUID for your outfit with `InventoryList`.
+2. Apply the outfit with `AppearanceWearFolder(folderId, replaceItems=true)`.
+3. Check current state with `AppearanceListWorn`.
+4. Optionally attach/detach specific items with `AppearanceAttachItem` / `AppearanceDetachItem`.
+5. If the grid needs it, request final update with `AppearanceRebake(forceRebake=true)`.
+
+Suggested tool flow:
+
+```text
+InventoryList(folderId="", recursive=true, maxResults=500)
+AppearanceWearFolder(folderId="<outfit-folder-uuid>", replaceItems=true)
+AppearanceListWorn()
+AppearanceAttachItem(itemId="<attachment-item-uuid>", attachmentPoint="RightHand", replace=true)
+AppearanceDetachItem(itemId="<attachment-item-uuid>")
+AppearanceRebake(forceRebake=true)
+```
+
+### 2) Upload script, push to object, and verify running state
+
+1. Update an existing agent script item from local path/URL with `ScriptUploadAgent`.
+2. Copy that script into object task inventory with `ScriptCopyInventoryToTask`.
+3. List task inventory (`TaskInventoryList`) to confirm script item IDs on the object.
+4. Start/stop and verify script state using `ScriptSetTaskRunning(..., verifyAfterSet=true)`.
+5. Query at any time with `ScriptGetTaskRunning`.
+
+Suggested tool flow:
+
+```text
+ScriptUploadAgent(source="https://example.invalid/MyScript.lsl", itemId="<agent-script-item-uuid>", mono=true)
+ScriptCopyInventoryToTask(objectLocalId=123456, inventoryScriptItemId="<agent-script-item-uuid>", enableScript=true)
+TaskInventoryList(objectLocalId=123456, objectId="<object-uuid>", maxResults=200)
+ScriptSetTaskRunning(objectId="<object-uuid>", scriptItemId="<task-script-item-uuid>", running=true, verifyAfterSet=true)
+ScriptGetTaskRunning(objectId="<object-uuid>", scriptItemId="<task-script-item-uuid>")
+```
+
+### 3) Manage inventory-offer policy rules with persistence
+
+1. Optionally configure policy persistence file via env/CLI.
+2. Add rules with `InventoryOfferPolicyRuleAdd` (first match wins).
+3. Inspect active rules and decisions with `InventoryOfferPolicyRulesList` and `InventoryOfferHistoryList`.
+4. Save/load explicitly with `InventoryOfferPolicyRulesSave` and `InventoryOfferPolicyRulesLoad`.
+
+Policy file configuration example:
+
+```bash
+export INVENTORY_OFFER_POLICY_FILE="./inventory-offer-policy.json"
+export INVENTORY_OFFER_POLICY_AUTOSAVE="true"
+```
+
+Suggested tool flow:
+
+```text
+InventoryOfferPolicyRuleAdd(name="accept-textures-from-builder", action="accept", senderAgentId="<avatar-uuid>", senderNameContains="", assetType="Texture", fromTask=null, destinationFolderId="<textures-folder-uuid>")
+InventoryOfferPolicyRuleAdd(name="decline-task-offers", action="decline", senderAgentId="", senderNameContains="", assetType="", fromTask=true, destinationFolderId="")
+InventoryOfferPolicyRulesList()
+InventoryOfferHistoryList(maxResults=50)
+InventoryOfferPolicyRulesSave(filePath="")
+InventoryOfferPolicyRulesLoad(filePath="", replaceExisting=true)
+```
 
 ## Environment payload templates
 

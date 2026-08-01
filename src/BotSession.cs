@@ -4,7 +4,7 @@ using LibreMetaverse.StructuredData;
 
 namespace Opensim.Metaverse2Mcp;
 
-internal sealed class BotSession : IDisposable
+internal sealed partial class BotSession : IDisposable
 {
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
@@ -33,6 +33,7 @@ internal sealed class BotSession : IDisposable
         client.Network.Disconnected += OnDisconnected;
         client.Self.IM += OnInstantMessage;
         client.Self.ChatFromSimulator += OnChatFromSimulator;
+        client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
 
         var login = client.Network.DefaultLoginParams(
             _options.BotFirstName!,
@@ -54,6 +55,7 @@ internal sealed class BotSession : IDisposable
             client.Network.Logout();
             client.Self.IM -= OnInstantMessage;
             client.Self.ChatFromSimulator -= OnChatFromSimulator;
+            client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
             client.Network.Disconnected -= OnDisconnected;
             client.Network.LoginProgress -= OnLoginProgress;
             client.Dispose();
@@ -62,6 +64,8 @@ internal sealed class BotSession : IDisposable
 
         _client = client;
         _connected = true;
+
+        await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
         return true;
     }
 
@@ -1451,6 +1455,7 @@ internal sealed class BotSession : IDisposable
 
         client.Self.IM -= OnInstantMessage;
         client.Self.ChatFromSimulator -= OnChatFromSimulator;
+        client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
         client.Network.Disconnected -= OnDisconnected;
         client.Network.LoginProgress -= OnLoginProgress;
 

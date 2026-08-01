@@ -12,6 +12,9 @@ internal sealed class AppOptions
     public string? McpHttpBearerToken { get; set; }
     public bool McpDiagnostics { get; set; }
 
+    public string? InventoryOfferPolicyFile { get; set; }
+    public bool InventoryOfferPolicyAutoSave { get; set; } = true;
+
     public string? BotFirstName { get; set; }
     public string? BotLastName { get; set; }
     public string? BotPassword { get; set; }
@@ -55,6 +58,18 @@ internal sealed class AppOptions
         if (BotLoginTimeoutSeconds < 1)
         {
             errors.Add("Bot login timeout must be at least 1 second.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(InventoryOfferPolicyFile))
+        {
+            try
+            {
+                _ = Path.GetFullPath(InventoryOfferPolicyFile);
+            }
+            catch
+            {
+                errors.Add("Inventory offer policy file path is invalid.");
+            }
         }
 
         if (string.IsNullOrWhiteSpace(BotFirstName))

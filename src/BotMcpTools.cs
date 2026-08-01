@@ -485,4 +485,231 @@ internal sealed class BotMcpTools
     {
         return _bot.ListNearbyPrimsAsync(radiusMeters, maxResults, cancellationToken);
     }
+
+    [McpServerTool, Description("List inventory entries under a folder UUID (or root if omitted).")]
+    public Task<InventoryQueryResult> InventoryList(
+        [Description("Optional folder UUID. Leave empty for inventory root.")] string? folderId,
+        [Description("True to recurse into subfolders.")] bool recursive,
+        [Description("Maximum number of results (1..2000).") ] int maxResults,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryListAsync(folderId, recursive, maxResults, cancellationToken);
+    }
+
+    [McpServerTool, Description("Give one inventory item to another avatar UUID.")]
+    public Task<BotToolResult> InventoryGiveItem(
+        [Description("Inventory item UUID to send.")] string itemId,
+        [Description("Recipient avatar UUID.")] string recipientAgentId,
+        [Description("True to show transfer beam effect.")] bool withBeamEffect,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryGiveItemAsync(itemId, recipientAgentId, withBeamEffect, cancellationToken);
+    }
+
+    [McpServerTool, Description("Give an inventory folder to another avatar UUID.")]
+    public Task<BotToolResult> InventoryGiveFolder(
+        [Description("Inventory folder UUID to send.")] string folderId,
+        [Description("Recipient avatar UUID.")] string recipientAgentId,
+        [Description("True to show transfer beam effect.")] bool withBeamEffect,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryGiveFolderAsync(folderId, recipientAgentId, withBeamEffect, cancellationToken);
+    }
+
+    [McpServerTool, Description("List task inventory (contents) for an in-world object local ID.")]
+    public Task<InventoryQueryResult> TaskInventoryList(
+        [Description("Object local ID in current simulator.")] uint objectLocalId,
+        [Description("Optional object UUID; if omitted, resolves from simulator cache by local ID.")] string? objectId,
+        [Description("Maximum number of results (1..2000).") ] int maxResults,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TaskInventoryListAsync(objectLocalId, objectId, maxResults, cancellationToken);
+    }
+
+    [McpServerTool, Description("Request moving/copying a task-inventory item from an object into agent inventory.")]
+    public Task<BotToolResult> TaskInventoryTake(
+        [Description("Object local ID in current simulator.")] uint objectLocalId,
+        [Description("Task-inventory item UUID on the object.")] string taskItemId,
+        [Description("Optional destination folder UUID. If omitted, uses default folder for item asset type.")] string? destinationFolderId,
+        [Description("Optional object UUID; if omitted, resolves from simulator cache by local ID.")] string? objectId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TaskInventoryTakeAsync(objectLocalId, taskItemId, destinationFolderId, objectId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Upload a local file path or HTTP/HTTPS URL as a new inventory item asset.")]
+    public Task<AssetTransferResult> AssetUploadInventory(
+        [Description("Source path or URL.")] string source,
+        [Description("Asset type (e.g. texture, notecard, lsltext, animation, sound).") ] string assetType,
+        [Description("Inventory type (e.g. texture, notecard, lsl, animation, sound).") ] string inventoryType,
+        [Description("New inventory item name.")] string name,
+        [Description("New inventory item description (empty allowed).") ] string description,
+        [Description("Optional destination folder UUID.")] string? folderId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AssetUploadInventoryAsync(source, assetType, inventoryType, name, description, folderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Download an asset by UUID and type. outputMode supports: both, base64, tempfile.")]
+    public Task<AssetDownloadResult> AssetDownload(
+        [Description("Asset UUID.")] string assetId,
+        [Description("Asset type name.")] string assetType,
+        [Description("Output mode: both, base64, tempfile.")] string outputMode,
+        [Description("Optional filename hint when output includes tempfile.")] string? fileNameHint,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AssetDownloadAsync(assetId, assetType, outputMode, fileNameHint, cancellationToken);
+    }
+
+    [McpServerTool, Description("Download a texture by UUID. outputMode supports: both, base64, tempfile.")]
+    public Task<AssetDownloadResult> TextureDownload(
+        [Description("Texture UUID.")] string textureId,
+        [Description("Output mode: both, base64, tempfile.")] string outputMode,
+        [Description("Optional filename hint when output includes tempfile.")] string? fileNameHint,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TextureDownloadAsync(textureId, outputMode, fileNameHint, cancellationToken);
+    }
+
+    [McpServerTool, Description("Add a policy rule for incoming inventory offers. First matching rule decides accept/decline.")]
+    public BotToolResult InventoryOfferPolicyRuleAdd(
+        [Description("Rule name.")] string name,
+        [Description("Action: accept or decline.")] string action,
+        [Description("Optional exact sender avatar UUID match.")] string? senderAgentId,
+        [Description("Optional sender name substring match (case-insensitive).") ] string? senderNameContains,
+        [Description("Optional exact asset type match.")] string? assetType,
+        [Description("Optional match on task-origin offers (true/false).") ] bool? fromTask,
+        [Description("Optional destination folder UUID override for accepted offers.")] string? destinationFolderId)
+    {
+        return _bot.InventoryOfferPolicyRuleAdd(name, action, senderAgentId, senderNameContains, assetType, fromTask, destinationFolderId);
+    }
+
+    [McpServerTool, Description("List all inventory-offer policy rules.")]
+    public InventoryOfferPolicyResult InventoryOfferPolicyRulesList()
+    {
+        return _bot.InventoryOfferPolicyRulesList();
+    }
+
+    [McpServerTool, Description("Clear all inventory-offer policy rules.")]
+    public BotToolResult InventoryOfferPolicyRulesClear()
+    {
+        return _bot.InventoryOfferPolicyRulesClear();
+    }
+
+    [McpServerTool, Description("List recent incoming inventory-offer events and decisions.")]
+    public InventoryOfferHistoryResult InventoryOfferHistoryList(
+        [Description("Maximum entries to return (1..200).") ] int maxResults)
+    {
+        return _bot.InventoryOfferHistoryList(maxResults);
+    }
+
+    [McpServerTool, Description("Persist inventory-offer policy rules to JSON file.")]
+    public Task<InventoryOfferPolicyResult> InventoryOfferPolicyRulesSave(
+        [Description("Optional target JSON file path; defaults to configured policy file.")] string? filePath,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryOfferPolicyRulesSaveAsync(filePath, cancellationToken);
+    }
+
+    [McpServerTool, Description("Load inventory-offer policy rules from JSON file.")]
+    public Task<InventoryOfferPolicyResult> InventoryOfferPolicyRulesLoad(
+        [Description("Optional source JSON file path; defaults to configured policy file.")] string? filePath,
+        [Description("If true, replaces existing in-memory rules before loading.")] bool replaceExisting,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryOfferPolicyRulesLoadAsync(filePath, replaceExisting, cancellationToken);
+    }
+
+    [McpServerTool, Description("List currently worn wearables and attachments.")]
+    public Task<AppearanceStateResult> AppearanceListWorn(CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceListWornAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Wear outfit items from an inventory folder UUID.")]
+    public Task<BotToolResult> AppearanceWearFolder(
+        [Description("Folder UUID containing outfit items/links.")] string folderId,
+        [Description("True to replace current outfit, false to add.")] bool replaceItems,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceWearFolderAsync(folderId, replaceItems, cancellationToken);
+    }
+
+    [McpServerTool, Description("Attach an inventory attachment/object item.")]
+    public Task<BotToolResult> AppearanceAttachItem(
+        [Description("Inventory item UUID.")] string itemId,
+        [Description("Optional attachment point enum name (e.g. Chest, RightHand).") ] string? attachmentPoint,
+        [Description("True to replace existing item on the point.")] bool replace,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceAttachItemAsync(itemId, attachmentPoint, replace, cancellationToken);
+    }
+
+    [McpServerTool, Description("Detach a currently worn attachment item by inventory item UUID.")]
+    public Task<BotToolResult> AppearanceDetachItem(
+        [Description("Inventory item UUID.")] string itemId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceDetachItemAsync(itemId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Request appearance rebake/update.")]
+    public Task<BotToolResult> AppearanceRebake(
+        [Description("True to force a rebake, false for normal update.")] bool forceRebake,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceRebakeAsync(forceRebake, cancellationToken);
+    }
+
+    [McpServerTool, Description("Upload script source (path or URL) to an existing agent inventory script item.")]
+    public Task<ScriptUpdateResult> ScriptUploadAgent(
+        [Description("Source path or URL containing script text.")] string source,
+        [Description("Script inventory item UUID.")] string itemId,
+        [Description("True for mono target, false for lsl2 target.")] bool mono,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ScriptUploadAgentAsync(source, itemId, mono, cancellationToken);
+    }
+
+    [McpServerTool, Description("Upload script source (path or URL) to an existing task/object inventory script item.")]
+    public Task<ScriptUpdateResult> ScriptUploadTask(
+        [Description("Source path or URL containing script text.")] string source,
+        [Description("Script task-inventory item UUID.")] string itemId,
+        [Description("Object UUID that contains the task script item.")] string objectId,
+        [Description("True for mono target, false for lsl2 target.")] bool mono,
+        [Description("Desired running state after upload.")] bool running,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ScriptUploadTaskAsync(source, itemId, objectId, mono, running, cancellationToken);
+    }
+
+    [McpServerTool, Description("Copy a script from agent inventory into an object's task inventory.")]
+    public Task<BotToolResult> ScriptCopyInventoryToTask(
+        [Description("Target object local ID.")] uint objectLocalId,
+        [Description("Agent inventory script item UUID.")] string inventoryScriptItemId,
+        [Description("True to run script after copy.")] bool enableScript,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ScriptCopyInventoryToTaskAsync(objectLocalId, inventoryScriptItemId, enableScript, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get running state for a script item in task inventory.")]
+    public Task<ScriptRunningResult> ScriptGetTaskRunning(
+        [Description("Object UUID containing the script.")] string objectId,
+        [Description("Script item UUID.")] string scriptItemId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ScriptGetTaskRunningAsync(objectId, scriptItemId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set running state for a script item in task inventory and optionally verify.")]
+    public Task<ScriptRunningResult> ScriptSetTaskRunning(
+        [Description("Object UUID containing the script.")] string objectId,
+        [Description("Script item UUID.")] string scriptItemId,
+        [Description("Desired running state.")] bool running,
+        [Description("If true, requests and waits for status verification reply.")] bool verifyAfterSet,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ScriptSetTaskRunningAsync(objectId, scriptItemId, running, verifyAfterSet, cancellationToken);
+    }
 }

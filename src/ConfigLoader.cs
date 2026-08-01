@@ -12,6 +12,8 @@ internal static class ConfigLoader
             McpHttpBearerToken = Env("MCP_HTTP_BEARER_TOKEN"),
             McpDiagnostics = ParseBool(Env("MCP_DIAGNOSTICS"), false),
             McpHttpDisallowDelete = ParseBool(Env("MCP_HTTP_DISALLOW_DELETE"), false),
+            InventoryOfferPolicyFile = FirstDefined("INVENTORY_OFFER_POLICY_FILE", "OPENSIM_INVENTORY_OFFER_POLICY_FILE"),
+            InventoryOfferPolicyAutoSave = ParseBool(FirstDefined("INVENTORY_OFFER_POLICY_AUTOSAVE", "OPENSIM_INVENTORY_OFFER_POLICY_AUTOSAVE"), true),
             BotFirstName = FirstDefined("OPENSIM_LOGIN_FIRSTNAME", "BOT_FIRSTNAME"),
             BotLastName = FirstDefined("OPENSIM_LOGIN_LASTNAME", "BOT_LASTNAME"),
             BotPassword = FirstDefined("OPENSIM_LOGIN_PASSWORD", "BOT_PASSWORD"),
@@ -57,6 +59,11 @@ internal static class ConfigLoader
             "  --mcp-http-bearer-token <tok>  Bearer auth token (env: MCP_HTTP_BEARER_TOKEN)",
             "  --mcp-http-disallow-delete     Reject DELETE on MCP endpoint (env: MCP_HTTP_DISALLOW_DELETE)",
             "  --mcp-diagnostics              Extra bot/MCP diagnostics (env: MCP_DIAGNOSTICS)",
+            "  --inventory-offer-policy-file <path>",
+            "                                JSON file for inventory-offer policy rules",
+            "                                (env: INVENTORY_OFFER_POLICY_FILE)",
+            "  --inventory-offer-policy-autosave <bool>",
+            "                                Auto-save policy changes (env: INVENTORY_OFFER_POLICY_AUTOSAVE, default: true)",
             string.Empty,
             "General:",
             "  -h, --help                     Show help"
@@ -112,6 +119,12 @@ internal static class ConfigLoader
                     break;
                 case "--mcp-diagnostics":
                     options.McpDiagnostics = true;
+                    break;
+                case "--inventory-offer-policy-file":
+                    options.InventoryOfferPolicyFile = RequireValue(args, ref i, arg);
+                    break;
+                case "--inventory-offer-policy-autosave":
+                    options.InventoryOfferPolicyAutoSave = ParseBool(RequireValue(args, ref i, arg), options.InventoryOfferPolicyAutoSave);
                     break;
                 default:
                     throw new ArgumentException($"Unknown argument: {arg}");
