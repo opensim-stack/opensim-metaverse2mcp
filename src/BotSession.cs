@@ -1,0 +1,2153 @@
+using LibreMetaverse;
+using LibreMetaverse.Messages.Linden;
+using LibreMetaverse.StructuredData;
+
+namespace Opensim.Metaverse2Mcp;
+
+internal sealed class BotSession : IDisposable
+{
+    private readonly AppOptions _options;
+    private readonly SemaphoreSlim _actionGate = new(1, 1);
+    private readonly Random _random = new();
+
+    private GridClient? _client;
+    private bool _connected;
+    private string _lastLoginMessage = string.Empty;
+
+    public BotSession(AppOptions options)
+    {
+        _options = options;
+    }
+
+    public string LastLoginMessage => _lastLoginMessage;
+
+    public async Task<bool> ConnectAsync(CancellationToken cancellationToken)
+    {
+        if (_connected)
+        {
+            return true;
+        }
+
+        var client = new GridClient();
+        client.Network.LoginProgress += OnLoginProgress;
+        client.Network.Disconnected += OnDisconnected;
+        client.Self.IM += OnInstantMessage;
+        client.Self.ChatFromSimulator += OnChatFromSimulator;
+
+        var login = client.Network.DefaultLoginParams(
+            _options.BotFirstName!,
+            _options.BotLastName!,
+            _options.BotPassword!,
+            "opensim-metaverse2mcp",
+            "0.1.0");
+
+        login.URI = _options.BotLoginUri;
+        login.Start = _options.BotStartLocation;
+
+        Console.WriteLine($"[bot] logging in as {_options.BotFirstName} {_options.BotLastName} ...");
+
+        var success = await client.Network.LoginAsync(login, cancellationToken).ConfigureAwait(false);
+        _lastLoginMessage = client.Network.LoginMessage ?? string.Empty;
+
+        if (!success)
+        {
+            client.Network.Logout();
+            client.Self.IM -= OnInstantMessage;
+            client.Self.ChatFromSimulator -= OnChatFromSimulator;
+            client.Network.Disconnected -= OnDisconnected;
+            client.Network.LoginProgress -= OnLoginProgress;
+            client.Dispose();
+            return false;
+        }
+
+        _client = client;
+        _connected = true;
+        return true;
+    }
+
+    public BotStatus GetStatus()
+    {
+        var client = EnsureClient();
+        var sim = client.Network.CurrentSim;
+        var pos = client.Self.SimPosition;
+
+        return new BotStatus(
+            _connected,
+            sim?.Name ?? "unknown",
+            pos.X,
+            pos.Y,
+            pos.Z,
+            client.Self.AgentID.ToString(),
+            _lastLoginMessage);
+    }
+
+    public async Task<BotToolResult> SitAsync(CancellationToken cancellationToken)
+    {
+        return await RunActionAsync("Sitting down...", c => c.Self.SitOnGround(), cancellationToken);
+    }
+
+    public async Task<BotToolResult> StandAsync(CancellationToken cancellationToken)
+    {
+        return await RunActionAsync("Standing up.", c => c.Self.Stand(), cancellationToken);
+    }
+
+    public async Task<BotToolResult> FlyAsync(bool enabled, CancellationToken cancellationToken)
+    {
+        return await RunActionAsync(enabled ? "Taking off." : "Walking now.", c => c.Self.Fly(enabled), cancellationToken);
+    }
+
+    public async Task<BotToolResult> JumpAsync(CancellationToken cancellationToken)
+    {
+        var result = await RunActionAsync("Jumping.", c => c.Self.Jump(true), cancellationToken);
+        if (!result.Ok)
+        {
+            return result;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(500).ConfigureAwait(false);
+            try
+            {
+                var cl = _client;
+                if (cl != null)
+                {
+                    cl.Self.Jump(false);
+                }
+            }
+            catch
+            {
+                // Ignored: this is a best-effort reset.
+            }
+        });
+
+        return result;
+    }
+
+    public async Task<BotToolResult> DanceAsync(bool enabled, CancellationToken cancellationToken)
+    {
+        var message = enabled ? "Started dancing." : "Stopped dancing.";
+        return await RunActionAsync(
+            message,
+            c =>
+            {
+                if (enabled)
+                {
+                    c.Self.AnimationStart(Animations.DANCE1, true);
+                }
+                else
+                {
+                    c.Self.AnimationStop(Animations.DANCE1, true);
+                }
+            },
+            cancellationToken);
+    }
+
+    public async Task<BotToolResult> SayChatAsync(string message, int channel, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return BotToolResult.Fail("message is required.");
+        }
+
+        return await RunActionAsync(
+            $"Sent chat message on channel {channel}.",
+            c => c.Self.Chat(message, channel, ChatType.Normal),
+            cancellationToken);
+    }
+
+    public async Task<BotToolResult> SendImAsync(string agentId, string message, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(agentId))
+        {
+            return BotToolResult.Fail("agentId is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return BotToolResult.Fail("message is required.");
+        }
+
+        if (!UUID.TryParse(agentId, out var recipient))
+        {
+            return BotToolResult.Fail("agentId is not a valid UUID.");
+        }
+
+        return await RunActionAsync(
+            $"Sent IM to {agentId}.",
+            c => c.Self.InstantMessage(recipient, message),
+            cancellationToken);
+    }
+
+    public async Task<EnvironmentToolResult> GetRegionEnvironmentAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var environment = await client.Environment.GetRegionEnvironmentAsync(token).ConfigureAwait(false);
+            if (environment == null)
+            {
+                return EnvironmentToolResult.FailResult("Unable to fetch region environment (capability unavailable or request failed).");
+            }
+
+            var payloadJson = OSDParser.SerializeJsonString(environment.Serialize(), preserveDefaults: true);
+            return EnvironmentToolResult.OkResult("Fetched region environment.", payloadJson);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<EnvironmentToolResult> GetParcelEnvironmentAsync(int parcelId, CancellationToken cancellationToken)
+    {
+        if (parcelId < 0)
+        {
+            return EnvironmentToolResult.FailResult("parcelId must be >= 0.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var environment = await client.Environment.GetParcelEnvironmentAsync(parcelId, token).ConfigureAwait(false);
+            if (environment == null)
+            {
+                return EnvironmentToolResult.FailResult($"Unable to fetch parcel environment for parcelId={parcelId} (capability unavailable or request failed).");
+            }
+
+            var payloadJson = OSDParser.SerializeJsonString(environment.Serialize(), preserveDefaults: true);
+            return EnvironmentToolResult.OkResult($"Fetched parcel environment for parcelId={parcelId}.", payloadJson);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ResetRegionEnvironmentAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var ok = await client.Environment.ResetRegionEnvironmentAsync(token).ConfigureAwait(false);
+            if (!ok)
+            {
+                return BotToolResult.Fail("Region environment reset failed or was rejected.");
+            }
+
+            return BotToolResult.OkResult("Region environment reset requested successfully.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ResetParcelEnvironmentAsync(int parcelId, CancellationToken cancellationToken)
+    {
+        if (parcelId < 0)
+        {
+            return BotToolResult.Fail("parcelId must be >= 0.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var ok = await client.Environment.ResetParcelEnvironmentAsync(parcelId, token).ConfigureAwait(false);
+            if (!ok)
+            {
+                return BotToolResult.Fail($"Parcel environment reset failed or was rejected for parcelId={parcelId}.");
+            }
+
+            return BotToolResult.OkResult($"Parcel environment reset requested for parcelId={parcelId}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<EnvironmentToolResult> GetLegacyEnvironmentAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var environment = await client.Environment.GetLegacyEnvironmentAsync(token).ConfigureAwait(false);
+            if (environment == null)
+            {
+                return EnvironmentToolResult.FailResult("Unable to fetch legacy environment (capability unavailable or request failed).");
+            }
+
+            var payloadJson = OSDParser.SerializeJsonString(environment.Serialize(), preserveDefaults: true);
+            return EnvironmentToolResult.OkResult("Fetched legacy environment.", payloadJson);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetLegacyEnvironmentRawAsync(string payload, string payloadFormat, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return BotToolResult.Fail("payload is required.");
+        }
+
+        if (!TryParseLlsdPayload(payload, payloadFormat, out var parsed, out var parseError))
+        {
+            return BotToolResult.Fail(parseError);
+        }
+
+        if (parsed is not OSDMap map)
+        {
+            return BotToolResult.Fail("payload must deserialize to an LLSD map/object at the root.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var ok = await client.Environment.SetLegacyEnvironmentAsync(map, token).ConfigureAwait(false);
+            if (!ok)
+            {
+                return BotToolResult.Fail("Legacy environment set failed or was rejected.");
+            }
+
+            return BotToolResult.OkResult("Legacy environment update posted successfully.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetRegionEnvironmentRawAsync(string payload, string payloadFormat, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return BotToolResult.Fail("payload is required.");
+        }
+
+        if (!TryParseLlsdPayload(payload, payloadFormat, out var parsed, out var parseError))
+        {
+            return BotToolResult.Fail(parseError);
+        }
+
+        if (parsed is not OSDMap map)
+        {
+            return BotToolResult.Fail("payload must deserialize to an LLSD map/object at the root.");
+        }
+
+        if (!TryBuildEnvironmentDataFromPayloadMap(map, out var environment, out var environmentError))
+        {
+            return BotToolResult.Fail(environmentError);
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var response = await client.Environment.SetRegionEnvironmentAsync(environment, token).ConfigureAwait(false);
+            if (response == null)
+            {
+                return BotToolResult.Fail("Region environment update failed (capability unavailable or request failed).");
+            }
+
+            if (!response.Success)
+            {
+                var detail = string.IsNullOrWhiteSpace(response.Message) ? string.Empty : $" Detail: {response.Message}";
+                return BotToolResult.Fail($"Region environment update was rejected.{detail}");
+            }
+
+            return BotToolResult.OkResult($"Region environment updated successfully (version={response.Version}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetParcelEnvironmentRawAsync(int parcelId, string payload, string payloadFormat, CancellationToken cancellationToken)
+    {
+        if (parcelId < 0)
+        {
+            return BotToolResult.Fail("parcelId must be >= 0.");
+        }
+
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return BotToolResult.Fail("payload is required.");
+        }
+
+        if (!TryParseLlsdPayload(payload, payloadFormat, out var parsed, out var parseError))
+        {
+            return BotToolResult.Fail(parseError);
+        }
+
+        if (parsed is not OSDMap map)
+        {
+            return BotToolResult.Fail("payload must deserialize to an LLSD map/object at the root.");
+        }
+
+        if (!TryBuildEnvironmentDataFromPayloadMap(map, out var environment, out var environmentError))
+        {
+            return BotToolResult.Fail(environmentError);
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var response = await client.Environment.SetParcelEnvironmentAsync(parcelId, environment, token).ConfigureAwait(false);
+            if (response == null)
+            {
+                return BotToolResult.Fail($"Parcel environment update failed for parcelId={parcelId} (capability unavailable or request failed).");
+            }
+
+            if (!response.Success)
+            {
+                var detail = string.IsNullOrWhiteSpace(response.Message) ? string.Empty : $" Detail: {response.Message}";
+                return BotToolResult.Fail($"Parcel environment update was rejected for parcelId={parcelId}.{detail}");
+            }
+
+            return BotToolResult.OkResult($"Parcel environment updated for parcelId={parcelId} (version={response.Version}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ResetLegacyEnvironmentAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var ok = await client.Environment.SetLegacyEnvironmentAsync(new OSDMap(), token).ConfigureAwait(false);
+            if (!ok)
+            {
+                return BotToolResult.Fail("Legacy environment reset failed or was rejected.");
+            }
+
+            return BotToolResult.OkResult("Legacy environment reset posted using an empty LLSD map.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PrimCreateResult> CreatePrimAsync(
+        string shape,
+        float x,
+        float y,
+        float z,
+        float scaleX,
+        float scaleY,
+        float scaleZ,
+        float rollDegrees,
+        float pitchDegrees,
+        float yawDegrees,
+        string material,
+        string? name,
+        string? description,
+        CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return PrimCreateResult.FailResult("No current simulator available.");
+            }
+
+            if (!TryBuildConstructionData(shape, material, out var primData, out var shapeError))
+            {
+                return PrimCreateResult.FailResult(shapeError);
+            }
+
+            var position = ClampLocalPosition(new Vector3(x, y, z));
+            var scale = ClampScale(new Vector3(scaleX, scaleY, scaleZ));
+            var rotation = Quaternion.CreateFromEulers(
+                rollDegrees * Utils.DEG_TO_RAD,
+                pitchDegrees * Utils.DEG_TO_RAD,
+                yawDegrees * Utils.DEG_TO_RAD);
+
+            var createdPrimTask = WaitForCreatedPrimAsync(client, sim, position, token);
+            client.Objects.AddPrim(sim, primData, client.Self.ActiveGroup, position, scale, rotation);
+
+            var created = await createdPrimTask.ConfigureAwait(false);
+            if (created == null)
+            {
+                return PrimCreateResult.FailResult("Timed out waiting for created prim confirmation.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                client.Objects.SetName(sim, created.LocalID, name);
+            }
+
+            if (!string.IsNullOrWhiteSpace(description))
+            {
+                client.Objects.SetDescription(sim, created.LocalID, description);
+            }
+
+            return PrimCreateResult.OkResult(
+                created.LocalID,
+                $"Created {shape} prim localId={created.LocalID} at {FormatVector(created.Position)}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetPrimPositionAsync(uint localId, float x, float y, float z, bool childOnly, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            var position = ClampLocalPosition(new Vector3(x, y, z));
+            client.Objects.SetPosition(sim, localId, position, childOnly);
+            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} position to {FormatVector(position)}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetPrimScaleAsync(uint localId, float x, float y, float z, bool childOnly, bool uniform, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            var scale = ClampScale(new Vector3(x, y, z));
+            client.Objects.SetScale(sim, localId, scale, childOnly, uniform);
+            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} scale to {FormatVector(scale)}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetPrimRotationEulerAsync(uint localId, float rollDegrees, float pitchDegrees, float yawDegrees, bool childOnly, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            var quat = Quaternion.CreateFromEulers(
+                rollDegrees * Utils.DEG_TO_RAD,
+                pitchDegrees * Utils.DEG_TO_RAD,
+                yawDegrees * Utils.DEG_TO_RAD);
+            client.Objects.SetRotation(sim, localId, quat, childOnly);
+            return Task.FromResult(BotToolResult.OkResult(
+                $"Set prim {localId} rotation to roll={rollDegrees:F2}, pitch={pitchDegrees:F2}, yaw={yawDegrees:F2} degrees."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetPrimTextureAsync(uint localId, string textureId, int faceIndex, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(textureId, out var textureUuid))
+        {
+            return BotToolResult.Fail("textureId must be a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            Primitive.TextureEntry te;
+            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
+            {
+                te = new Primitive.TextureEntry(prim.Textures);
+            }
+            else
+            {
+                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
+            }
+
+            if (faceIndex < 0)
+            {
+                te.DefaultTexture ??= new Primitive.TextureEntryFace(null);
+                te.DefaultTexture.TextureID = textureUuid;
+                client.Objects.SetTextures(sim, localId, te);
+                return Task.FromResult(BotToolResult.OkResult($"Set default texture on prim {localId} to {textureUuid}."));
+            }
+
+            if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
+            {
+                return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
+            }
+
+            var face = te.CreateFace((uint)faceIndex);
+            face.TextureID = textureUuid;
+            client.Objects.SetTextures(sim, localId, te);
+            return Task.FromResult(BotToolResult.OkResult($"Set texture on prim {localId} face {faceIndex} to {textureUuid}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetPrimFaceParamsAsync(
+        uint localId,
+        int faceIndex,
+        float? red,
+        float? green,
+        float? blue,
+        float? alpha,
+        float? repeatU,
+        float? repeatV,
+        float? offsetU,
+        float? offsetV,
+        float? rotationRadians,
+        float? glow,
+        bool? fullbright,
+        string? shiny,
+        string? bump,
+        CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            Primitive.TextureEntry te;
+            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
+            {
+                te = new Primitive.TextureEntry(prim.Textures);
+            }
+            else
+            {
+                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
+            }
+
+            Primitive.TextureEntryFace face;
+            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
+            if (faceIndex < 0)
+            {
+                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
+                te.DefaultTexture = face;
+            }
+            else
+            {
+                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
+                {
+                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
+                }
+
+                face = te.CreateFace((uint)faceIndex);
+            }
+
+            if (red.HasValue || green.HasValue || blue.HasValue || alpha.HasValue)
+            {
+                var rgba = face.RGBA;
+                var r = Math.Clamp(red ?? rgba.R, 0f, 1f);
+                var g = Math.Clamp(green ?? rgba.G, 0f, 1f);
+                var b = Math.Clamp(blue ?? rgba.B, 0f, 1f);
+                var a = Math.Clamp(alpha ?? rgba.A, 0f, 1f);
+                face.RGBA = new Color4(r, g, b, a);
+            }
+
+            if (repeatU.HasValue)
+            {
+                face.RepeatU = repeatU.Value;
+            }
+
+            if (repeatV.HasValue)
+            {
+                face.RepeatV = repeatV.Value;
+            }
+
+            if (offsetU.HasValue)
+            {
+                face.OffsetU = Math.Clamp(offsetU.Value, -1f, 1f);
+            }
+
+            if (offsetV.HasValue)
+            {
+                face.OffsetV = Math.Clamp(offsetV.Value, -1f, 1f);
+            }
+
+            if (rotationRadians.HasValue)
+            {
+                face.Rotation = rotationRadians.Value;
+            }
+
+            if (glow.HasValue)
+            {
+                face.Glow = Math.Clamp(glow.Value, 0f, 1f);
+            }
+
+            if (fullbright.HasValue)
+            {
+                face.Fullbright = fullbright.Value;
+            }
+
+            if (!string.IsNullOrWhiteSpace(shiny))
+            {
+                if (!Enum.TryParse<Shininess>(shiny, true, out var shinyValue))
+                {
+                    return Task.FromResult(BotToolResult.Fail("Invalid shiny value. Use: None, Low, Medium, High."));
+                }
+
+                face.Shiny = shinyValue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(bump))
+            {
+                if (!Enum.TryParse<Bumpiness>(bump, true, out var bumpValue))
+                {
+                    return Task.FromResult(BotToolResult.Fail("Invalid bump value. Use values from Bumpiness enum (e.g. None, Brightness, Darkness, Woodgrain)."));
+                }
+
+                face.Bump = bumpValue;
+            }
+
+            client.Objects.SetTextures(sim, localId, te);
+            return Task.FromResult(BotToolResult.OkResult($"Updated {faceLabel} parameters on prim {localId}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> NudgePrimFaceUvAsync(
+        uint localId,
+        int faceIndex,
+        float? deltaRepeatU,
+        float? deltaRepeatV,
+        float? deltaOffsetU,
+        float? deltaOffsetV,
+        float? deltaRotationRadians,
+        CancellationToken cancellationToken)
+    {
+        if (!deltaRepeatU.HasValue
+            && !deltaRepeatV.HasValue
+            && !deltaOffsetU.HasValue
+            && !deltaOffsetV.HasValue
+            && !deltaRotationRadians.HasValue)
+        {
+            return BotToolResult.Fail("At least one delta value is required.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            Primitive.TextureEntry te;
+            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
+            {
+                te = new Primitive.TextureEntry(prim.Textures);
+            }
+            else
+            {
+                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
+            }
+
+            Primitive.TextureEntryFace face;
+            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
+            if (faceIndex < 0)
+            {
+                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
+                te.DefaultTexture = face;
+            }
+            else
+            {
+                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
+                {
+                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
+                }
+
+                face = te.CreateFace((uint)faceIndex);
+            }
+
+            if (deltaRepeatU.HasValue)
+            {
+                face.RepeatU += deltaRepeatU.Value;
+            }
+
+            if (deltaRepeatV.HasValue)
+            {
+                face.RepeatV += deltaRepeatV.Value;
+            }
+
+            if (deltaOffsetU.HasValue)
+            {
+                face.OffsetU = Math.Clamp(face.OffsetU + deltaOffsetU.Value, -1f, 1f);
+            }
+
+            if (deltaOffsetV.HasValue)
+            {
+                face.OffsetV = Math.Clamp(face.OffsetV + deltaOffsetV.Value, -1f, 1f);
+            }
+
+            if (deltaRotationRadians.HasValue)
+            {
+                face.Rotation += deltaRotationRadians.Value;
+            }
+
+            client.Objects.SetTextures(sim, localId, te);
+            return Task.FromResult(BotToolResult.OkResult($"Nudged UV parameters on {faceLabel} of prim {localId}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ApplyPrimFaceUvPresetAsync(
+        uint localId,
+        int faceIndex,
+        string preset,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(preset))
+        {
+            return BotToolResult.Fail("preset is required. Use: fit, reset, tile2x2, tile4x4, flipU, flipV, rotate90, rotate180, rotate270, center.");
+        }
+
+        var normalized = preset.Trim().ToLowerInvariant();
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            Primitive.TextureEntry te;
+            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
+            {
+                te = new Primitive.TextureEntry(prim.Textures);
+            }
+            else
+            {
+                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
+            }
+
+            Primitive.TextureEntryFace face;
+            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
+            if (faceIndex < 0)
+            {
+                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
+                te.DefaultTexture = face;
+            }
+            else
+            {
+                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
+                {
+                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
+                }
+
+                face = te.CreateFace((uint)faceIndex);
+            }
+
+            switch (normalized)
+            {
+                case "fit":
+                case "reset":
+                    face.RepeatU = 1f;
+                    face.RepeatV = 1f;
+                    face.OffsetU = 0f;
+                    face.OffsetV = 0f;
+                    face.Rotation = 0f;
+                    break;
+                case "tile2x2":
+                    face.RepeatU = 2f;
+                    face.RepeatV = 2f;
+                    break;
+                case "tile4x4":
+                    face.RepeatU = 4f;
+                    face.RepeatV = 4f;
+                    break;
+                case "flipu":
+                    face.RepeatU = -face.RepeatU;
+                    break;
+                case "flipv":
+                    face.RepeatV = -face.RepeatV;
+                    break;
+                case "rotate90":
+                    face.Rotation += MathF.PI / 2f;
+                    break;
+                case "rotate180":
+                    face.Rotation += MathF.PI;
+                    break;
+                case "rotate270":
+                    face.Rotation += (MathF.PI * 3f) / 2f;
+                    break;
+                case "center":
+                    face.OffsetU = 0f;
+                    face.OffsetV = 0f;
+                    break;
+                default:
+                    return Task.FromResult(BotToolResult.Fail("Unknown preset. Use: fit, reset, tile2x2, tile4x4, flipU, flipV, rotate90, rotate180, rotate270, center."));
+            }
+
+            client.Objects.SetTextures(sim, localId, te);
+            return Task.FromResult(BotToolResult.OkResult($"Applied UV preset '{preset}' to {faceLabel} of prim {localId}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> TilePrimFaceUvAsync(
+        uint localId,
+        int faceIndex,
+        float repeat,
+        CancellationToken cancellationToken)
+    {
+        if (repeat <= 0f)
+        {
+            return BotToolResult.Fail("repeat must be greater than 0.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            Primitive.TextureEntry te;
+            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
+            {
+                te = new Primitive.TextureEntry(prim.Textures);
+            }
+            else
+            {
+                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
+            }
+
+            Primitive.TextureEntryFace face;
+            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
+            if (faceIndex < 0)
+            {
+                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
+                te.DefaultTexture = face;
+            }
+            else
+            {
+                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
+                {
+                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
+                }
+
+                face = te.CreateFace((uint)faceIndex);
+            }
+
+            face.RepeatU = repeat;
+            face.RepeatV = repeat;
+
+            client.Objects.SetTextures(sim, localId, te);
+            return Task.FromResult(BotToolResult.OkResult($"Set tiling to {repeat:F2}x{repeat:F2} on {faceLabel} of prim {localId}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> TilePrimFaceUvNonUniformAsync(
+        uint localId,
+        int faceIndex,
+        float repeatU,
+        float repeatV,
+        CancellationToken cancellationToken)
+    {
+        if (repeatU <= 0f || repeatV <= 0f)
+        {
+            return BotToolResult.Fail("repeatU and repeatV must both be greater than 0.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            Primitive.TextureEntry te;
+            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
+            {
+                te = new Primitive.TextureEntry(prim.Textures);
+            }
+            else
+            {
+                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
+            }
+
+            Primitive.TextureEntryFace face;
+            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
+            if (faceIndex < 0)
+            {
+                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
+                te.DefaultTexture = face;
+            }
+            else
+            {
+                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
+                {
+                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
+                }
+
+                face = te.CreateFace((uint)faceIndex);
+            }
+
+            face.RepeatU = repeatU;
+            face.RepeatV = repeatV;
+
+            client.Objects.SetTextures(sim, localId, te);
+            return Task.FromResult(BotToolResult.OkResult($"Set tiling to U={repeatU:F2}, V={repeatV:F2} on {faceLabel} of prim {localId}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PrimInspectResult> InspectPrimAsync(uint localId, bool includeFaceTextures, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(PrimInspectResult.FailResult("No current simulator available."));
+            }
+
+            if (!sim.ObjectsPrimitives.TryGetValue(localId, out var prim))
+            {
+                return Task.FromResult(PrimInspectResult.FailResult($"Prim {localId} not found in current simulator cache."));
+            }
+
+            var faceTextures = new List<PrimFaceTextureInfo>();
+            string? defaultTextureId = null;
+            if (prim.Textures?.DefaultTexture != null)
+            {
+                defaultTextureId = prim.Textures.DefaultTexture.TextureID.ToString();
+            }
+
+            if (includeFaceTextures && prim.Textures != null)
+            {
+                for (var i = 0; i < Primitive.TextureEntry.MAX_FACES; i++)
+                {
+                    var face = prim.Textures.FaceTextures[i];
+                    if (face == null)
+                    {
+                        continue;
+                    }
+
+                    faceTextures.Add(new PrimFaceTextureInfo(i, face.TextureID.ToString()));
+                }
+            }
+
+            var info = new PrimInfo(
+                prim.LocalID,
+                prim.ID.ToString(),
+                prim.ParentID,
+                prim.Type.ToString(),
+                prim.PrimData.PathCurve.ToString(),
+                prim.PrimData.ProfileCurve.ToString(),
+                prim.PrimData.Material.ToString(),
+                prim.Position.X,
+                prim.Position.Y,
+                prim.Position.Z,
+                prim.Scale.X,
+                prim.Scale.Y,
+                prim.Scale.Z,
+                prim.Rotation.X,
+                prim.Rotation.Y,
+                prim.Rotation.Z,
+                prim.Rotation.W,
+                prim.Properties?.Name,
+                prim.Properties?.Description,
+                prim.Properties?.OwnerID.ToString(),
+                prim.Properties?.CreatorID.ToString(),
+                defaultTextureId,
+                faceTextures);
+
+            return Task.FromResult(PrimInspectResult.OkResult(info));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SelectPrimAsync(uint localId, bool automaticDeselect, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            client.Objects.SelectObject(sim, localId, automaticDeselect);
+            return Task.FromResult(BotToolResult.OkResult(
+                automaticDeselect
+                    ? $"Selected prim {localId} (auto-deselect enabled)."
+                    : $"Selected prim {localId}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> DeselectPrimAsync(uint localId, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            client.Objects.DeselectObject(sim, localId);
+            return Task.FromResult(BotToolResult.OkResult($"Deselected prim {localId}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> DeletePrimAsync(uint localId, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            // DeRez to inventory; if localId is a child prim, simulator deletes the whole linkset.
+            client.Inventory.RequestDeRezToInventory(localId);
+            return Task.FromResult(BotToolResult.OkResult($"Delete request sent for prim {localId} (de-rez to inventory)."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> DeleteManyPrimsAsync(string localIdsCsv, CancellationToken cancellationToken)
+    {
+        if (!TryParseLocalIdsCsv(localIdsCsv, out var localIds, out var parseError))
+        {
+            return BotToolResult.Fail(parseError);
+        }
+
+        if (localIds.Count == 0)
+        {
+            return BotToolResult.Fail("At least one local ID is required to delete prims.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            foreach (var localId in localIds)
+            {
+                // DeRez to inventory; if localId is a child prim, simulator deletes the whole linkset.
+                client.Inventory.RequestDeRezToInventory(localId);
+            }
+
+            return Task.FromResult(BotToolResult.OkResult($"Delete request sent for {localIds.Count} prim(s): {string.Join(",", localIds)}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PrimQueryResult> FindPrimsByNameAsync(string name, int maxResults, bool caseSensitive, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return PrimQueryResult.FailResult("name is required.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(PrimQueryResult.FailResult("No current simulator available."));
+            }
+
+            var limit = Math.Clamp(maxResults, 1, 500);
+            var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+            var at = client.Self.SimPosition;
+
+            var prims = sim.ObjectsPrimitives.Values
+                .Where(p => !string.IsNullOrWhiteSpace(p.Properties?.Name)
+                    && p.Properties!.Name.Contains(name, comparison))
+                .Select(p => ToPrimSummary(p, at))
+                .OrderBy(p => p.DistanceMeters)
+                .ThenBy(p => p.LocalId)
+                .Take(limit)
+                .ToList();
+
+            return Task.FromResult(PrimQueryResult.OkResult(prims, $"Matched {prims.Count} prim(s)."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PrimQueryResult> ListNearbyPrimsAsync(float radiusMeters, int maxResults, CancellationToken cancellationToken)
+    {
+        if (radiusMeters <= 0f)
+        {
+            return PrimQueryResult.FailResult("radiusMeters must be greater than 0.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(PrimQueryResult.FailResult("No current simulator available."));
+            }
+
+            var limit = Math.Clamp(maxResults, 1, 500);
+            var radius = Math.Clamp(radiusMeters, 0.1f, 4096f);
+            var at = client.Self.SimPosition;
+
+            var prims = sim.ObjectsPrimitives.Values
+                .Select(p => ToPrimSummary(p, at))
+                .Where(p => p.DistanceMeters <= radius)
+                .OrderBy(p => p.DistanceMeters)
+                .ThenBy(p => p.LocalId)
+                .Take(limit)
+                .ToList();
+
+            return Task.FromResult(PrimQueryResult.OkResult(prims, $"Found {prims.Count} nearby prim(s) within {radius:F2}m."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetPrimNameAsync(uint localId, string name, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return BotToolResult.Fail("name is required.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            client.Objects.SetName(sim, localId, name);
+            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} name to '{name}'."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetPrimDescriptionAsync(uint localId, string description, CancellationToken cancellationToken)
+    {
+        if (description == null)
+        {
+            return BotToolResult.Fail("description is required (empty string is allowed).");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            client.Objects.SetDescription(sim, localId, description);
+            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} description."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> LinkPrimsAsync(string localIdsCsv, CancellationToken cancellationToken)
+    {
+        if (!TryParseLocalIdsCsv(localIdsCsv, out var localIds, out var parseError))
+        {
+            return BotToolResult.Fail(parseError);
+        }
+
+        if (localIds.Count < 2)
+        {
+            return BotToolResult.Fail("At least two local IDs are required to link prims.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            client.Objects.LinkPrims(sim, localIds);
+            return Task.FromResult(BotToolResult.OkResult($"Link request sent for prims: {string.Join(",", localIds)}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> UnlinkPrimsAsync(string localIdsCsv, CancellationToken cancellationToken)
+    {
+        if (!TryParseLocalIdsCsv(localIdsCsv, out var localIds, out var parseError))
+        {
+            return BotToolResult.Fail(parseError);
+        }
+
+        if (localIds.Count == 0)
+        {
+            return BotToolResult.Fail("At least one local ID is required to unlink prims.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            client.Objects.DelinkPrims(sim, localIds);
+            return Task.FromResult(BotToolResult.OkResult($"Unlink request sent for prims: {string.Join(",", localIds)}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PrimCreateResult> ClonePrimAsync(
+        uint sourceLocalId,
+        float offsetX,
+        float offsetY,
+        float offsetZ,
+        bool copyTextures,
+        bool copyName,
+        bool copyDescription,
+        CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return PrimCreateResult.FailResult("No current simulator available.");
+            }
+
+            if (!sim.ObjectsPrimitives.TryGetValue(sourceLocalId, out var sourcePrim))
+            {
+                return PrimCreateResult.FailResult($"Source prim {sourceLocalId} not found in current simulator cache.");
+            }
+
+            var newPosition = ClampLocalPosition(new Vector3(
+                sourcePrim.Position.X + offsetX,
+                sourcePrim.Position.Y + offsetY,
+                sourcePrim.Position.Z + offsetZ));
+            var newScale = ClampScale(sourcePrim.Scale);
+            var newRotation = sourcePrim.Rotation;
+            var primData = new Primitive.ConstructionData(sourcePrim.PrimData);
+
+            var createdPrimTask = WaitForCreatedPrimAsync(client, sim, newPosition, token);
+            client.Objects.AddPrim(sim, primData, client.Self.ActiveGroup, newPosition, newScale, newRotation);
+
+            var created = await createdPrimTask.ConfigureAwait(false);
+            if (created == null)
+            {
+                return PrimCreateResult.FailResult("Timed out waiting for cloned prim confirmation.");
+            }
+
+            if (copyTextures && sourcePrim.Textures != null)
+            {
+                client.Objects.SetTextures(sim, created.LocalID, new Primitive.TextureEntry(sourcePrim.Textures));
+            }
+
+            if (copyName && sourcePrim.Properties != null && !string.IsNullOrWhiteSpace(sourcePrim.Properties.Name))
+            {
+                client.Objects.SetName(sim, created.LocalID, sourcePrim.Properties.Name);
+            }
+
+            if (copyDescription && sourcePrim.Properties != null && sourcePrim.Properties.Description != null)
+            {
+                client.Objects.SetDescription(sim, created.LocalID, sourcePrim.Properties.Description);
+            }
+
+            return PrimCreateResult.OkResult(
+                created.LocalID,
+                $"Cloned prim {sourceLocalId} -> {created.LocalID} at {FormatVector(created.Position)}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> MoveByAsync(string direction, float meters, bool fly, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(direction))
+        {
+            return BotToolResult.Fail("direction is required.");
+        }
+
+        if (meters <= 0f)
+        {
+            return BotToolResult.Fail("meters must be greater than 0.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var delta = ResolveDelta(direction, meters, client);
+            var from = client.Self.SimPosition;
+            var target = ClampLocalPosition(new Vector3(from.X + delta.X, from.Y + delta.Y, from.Z + delta.Z));
+            return await MoveToLocalPositionCoreAsync(client, target, fly, token).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> MoveToAsync(float x, float y, float z, bool fly, CancellationToken cancellationToken)
+    {
+        var target = ClampLocalPosition(new Vector3(x, y, z));
+        return await ExecuteLockedAsync(
+            (client, token) => MoveToLocalPositionCoreAsync(client, target, fly, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> TeleportToAsync(float x, float y, float z, string? regionName, CancellationToken cancellationToken)
+    {
+        var target = ClampLocalPosition(new Vector3(x, y, z));
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var currentSim = client.Network.CurrentSim;
+            if (currentSim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            bool ok;
+            string destinationLabel;
+            if (string.IsNullOrWhiteSpace(regionName) || string.Equals(regionName, currentSim.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                destinationLabel = currentSim.Name;
+                ok = await client.Self.TeleportAsync(currentSim.Name, target, token).ConfigureAwait(false);
+            }
+            else
+            {
+                var region = await client.Grid.GetGridRegionAsync(regionName, GridLayerType.Objects, token).ConfigureAwait(false);
+                if (!region.HasValue)
+                {
+                    return BotToolResult.Fail($"Unable to resolve region '{regionName}' to a region handle.");
+                }
+
+                destinationLabel = $"{region.Value.Name} ({region.Value.RegionHandle})";
+                ok = await client.Self.TeleportAsync(region.Value.RegionHandle, target, token).ConfigureAwait(false);
+            }
+
+            if (!ok)
+            {
+                var message = string.IsNullOrWhiteSpace(client.Self.TeleportMessage)
+                    ? "Teleport failed."
+                    : client.Self.TeleportMessage;
+                return BotToolResult.Fail(message);
+            }
+
+            var at = client.Self.SimPosition;
+            return BotToolResult.OkResult($"Teleported to {destinationLabel} at {FormatVector(at)}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> TeleportToRegionHandleAsync(string regionHandle, float x, float y, float z, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(regionHandle))
+        {
+            return BotToolResult.Fail("regionHandle is required.");
+        }
+
+        if (!ulong.TryParse(regionHandle, out var handle))
+        {
+            return BotToolResult.Fail("regionHandle must be an unsigned 64-bit integer.");
+        }
+
+        var target = ClampLocalPosition(new Vector3(x, y, z));
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var ok = await client.Self.TeleportAsync(handle, target, token).ConfigureAwait(false);
+            if (!ok)
+            {
+                var message = string.IsNullOrWhiteSpace(client.Self.TeleportMessage)
+                    ? "Teleport failed."
+                    : client.Self.TeleportMessage;
+                return BotToolResult.Fail(message);
+            }
+
+            return BotToolResult.OkResult($"Teleported to region handle {handle} at {FormatVector(client.Self.SimPosition)}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> StopMovementAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            client.Self.AutoPilotCancel();
+            client.Self.Movement.ResetControlFlags();
+            client.Self.Movement.SendUpdate(true);
+            return Task.FromResult(BotToolResult.OkResult("Movement stopped (autopilot canceled, control flags reset)."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ExecuteSimpleBotCommandAsync(string command, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return BotToolResult.Fail("command is required.");
+        }
+
+        var normalized = command.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "help" or "?" => BotToolResult.OkResult("Commands: help, where, sit, stand, dance, fly, walk, jump"),
+            "where" or "location" => BotToolResult.OkResult(FormatWhereText(EnsureClient())),
+            "sit" => await SitAsync(cancellationToken),
+            "stand" => await StandAsync(cancellationToken),
+            "dance" => await DanceAsync(true, cancellationToken),
+            "fly" => await FlyAsync(true, cancellationToken),
+            "walk" => await FlyAsync(false, cancellationToken),
+            "jump" => await JumpAsync(cancellationToken),
+            _ => BotToolResult.Fail("Unknown command. Try: help, where, sit, stand, dance, fly, walk, jump")
+        };
+    }
+
+    public void Dispose()
+    {
+        var client = _client;
+        _client = null;
+        _connected = false;
+
+        if (client == null)
+        {
+            return;
+        }
+
+        client.Self.IM -= OnInstantMessage;
+        client.Self.ChatFromSimulator -= OnChatFromSimulator;
+        client.Network.Disconnected -= OnDisconnected;
+        client.Network.LoginProgress -= OnLoginProgress;
+
+        try
+        {
+            client.Network.Logout();
+        }
+        catch
+        {
+            // No-op during shutdown.
+        }
+
+        client.Dispose();
+        _actionGate.Dispose();
+    }
+
+    private async Task<BotToolResult> RunActionAsync(string successMessage, Action<GridClient> action, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            action(client);
+            return Task.FromResult(BotToolResult.OkResult(successMessage));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<PrimCreateResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<PrimCreateResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return PrimCreateResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<PrimInspectResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<PrimInspectResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return PrimInspectResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<PrimQueryResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<PrimQueryResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return PrimQueryResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<BotToolResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<BotToolResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return BotToolResult.Fail(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<EnvironmentToolResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<EnvironmentToolResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return EnvironmentToolResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private GridClient EnsureClient()
+    {
+        if (!_connected || _client == null)
+        {
+            throw new InvalidOperationException("Bot is not connected.");
+        }
+
+        return _client;
+    }
+
+    private static string FormatWhereText(GridClient client)
+    {
+        var sim = client.Network.CurrentSim?.Name ?? "unknown";
+        var pos = client.Self.SimPosition;
+        return $"I'm in {sim} at <{pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}>";
+    }
+
+    private static bool TryBuildConstructionData(string shape, string material, out Primitive.ConstructionData primData, out string error)
+    {
+        primData = BuildDefaultConstructionData();
+        error = string.Empty;
+
+        var normalizedShape = (shape ?? string.Empty).Trim().ToLowerInvariant();
+        switch (normalizedShape)
+        {
+            case "box":
+            case "cube":
+                primData.PathCurve = PathCurve.Line;
+                primData.ProfileCurve = ProfileCurve.Square;
+                break;
+            case "cylinder":
+                primData.PathCurve = PathCurve.Line;
+                primData.ProfileCurve = ProfileCurve.Circle;
+                break;
+            case "prism":
+                primData.PathCurve = PathCurve.Line;
+                primData.ProfileCurve = ProfileCurve.EqualTriangle;
+                break;
+            case "sphere":
+                primData.PathCurve = PathCurve.Circle;
+                primData.ProfileCurve = ProfileCurve.HalfCircle;
+                primData.PathScaleX = 1f;
+                primData.PathScaleY = 1f;
+                break;
+            case "torus":
+                primData.PathCurve = PathCurve.Circle;
+                primData.ProfileCurve = ProfileCurve.Circle;
+                primData.PathScaleX = 1f;
+                primData.PathScaleY = 0.25f;
+                break;
+            case "tube":
+                primData.PathCurve = PathCurve.Circle;
+                primData.ProfileCurve = ProfileCurve.Square;
+                primData.PathScaleX = 1f;
+                primData.PathScaleY = 0.25f;
+                break;
+            case "ring":
+                primData.PathCurve = PathCurve.Circle;
+                primData.ProfileCurve = ProfileCurve.EqualTriangle;
+                primData.PathScaleX = 1f;
+                primData.PathScaleY = 0.25f;
+                break;
+            default:
+                error = "Unsupported shape. Use: box, cylinder, prism, sphere, torus, tube, ring.";
+                return false;
+        }
+
+        if (!Enum.TryParse<Material>((material ?? string.Empty).Trim(), true, out var parsedMaterial))
+        {
+            error = "Unsupported material. Use: Stone, Metal, Glass, Wood, Flesh, Plastic, Rubber, Light.";
+            return false;
+        }
+
+        primData.Material = parsedMaterial;
+        return true;
+    }
+
+    private static Primitive.ConstructionData BuildDefaultConstructionData()
+    {
+        return new Primitive.ConstructionData
+        {
+            PCode = PCode.Prim,
+            Material = Material.Wood,
+            PathCurve = PathCurve.Line,
+            PathBegin = 0f,
+            PathEnd = 1f,
+            PathRadiusOffset = 0f,
+            PathSkew = 0f,
+            PathScaleX = 1f,
+            PathScaleY = 1f,
+            PathShearX = 0f,
+            PathShearY = 0f,
+            PathTaperX = 0f,
+            PathTaperY = 0f,
+            PathTwist = 0f,
+            PathTwistBegin = 0f,
+            PathRevolutions = 1f,
+            ProfileBegin = 0f,
+            ProfileEnd = 1f,
+            ProfileHollow = 0f,
+            ProfileCurve = ProfileCurve.Square,
+            ProfileHole = HoleType.Same
+        };
+    }
+
+    private static Vector3 ResolveDelta(string direction, float meters, GridClient client)
+    {
+        var normalized = direction.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "north" => new Vector3(0f, meters, 0f),
+            "south" => new Vector3(0f, -meters, 0f),
+            "east" => new Vector3(meters, 0f, 0f),
+            "west" => new Vector3(-meters, 0f, 0f),
+            "up" => new Vector3(0f, 0f, meters),
+            "down" => new Vector3(0f, 0f, -meters),
+            "forward" => ScaleToLength(Flatten(client.Self.Movement.Camera.AtAxis), meters),
+            "back" or "backward" => ScaleToLength(Flatten(Negate(client.Self.Movement.Camera.AtAxis)), meters),
+            "left" => ScaleToLength(Flatten(client.Self.Movement.Camera.LeftAxis), meters),
+            "right" => ScaleToLength(Flatten(Negate(client.Self.Movement.Camera.LeftAxis)), meters),
+            _ => throw new ArgumentException("Unsupported direction. Use: north, south, east, west, up, down, forward, back, left, right")
+        };
+    }
+
+    private async Task<BotToolResult> MoveToLocalPositionCoreAsync(
+        GridClient client,
+        Vector3 target,
+        bool fly,
+        CancellationToken cancellationToken)
+    {
+        var sim = client.Network.CurrentSim;
+        if (sim == null)
+        {
+            return BotToolResult.Fail("No current simulator available.");
+        }
+
+        var from = client.Self.SimPosition;
+
+        var distance = Vector3.Distance(from, target);
+        if (distance <= 1.0f)
+        {
+            return BotToolResult.OkResult($"Already at {FormatVector(from)}.");
+        }
+
+        var maxStepMeters = 48f;
+        var steps = Math.Max(1, (int)MathF.Ceiling(distance / maxStepMeters));
+
+        try
+        {
+            client.Self.Fly(fly);
+
+            for (var step = 1; step <= steps; step++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var ratio = step / (float)steps;
+                var waypoint = ClampLocalPosition(Interpolate(from, target, ratio));
+                var current = client.Self.SimPosition;
+                var legDistance = MathF.Max(1f, Vector3.Distance(current, waypoint));
+                var timeoutSeconds = Math.Clamp((int)MathF.Ceiling(legDistance * 0.9f), 10, 40);
+
+                client.Self.AutoPilotLocal(
+                    (int)MathF.Round(waypoint.X),
+                    (int)MathF.Round(waypoint.Y),
+                    waypoint.Z);
+
+                var reached = await WaitForArrivalAsync(
+                        client,
+                        waypoint,
+                        step == steps ? 1.5f : 2.5f,
+                        TimeSpan.FromSeconds(timeoutSeconds),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (!reached)
+                {
+                    var atTimeout = client.Self.SimPosition;
+                    return BotToolResult.Fail(
+                        $"Movement timed out on step {step}/{steps}. Current {FormatVector(atTimeout)}, waypoint {FormatVector(waypoint)}, final target {FormatVector(target)}.");
+                }
+            }
+        }
+        finally
+        {
+            client.Self.AutoPilotCancel();
+        }
+
+        var mode = fly ? "flying" : "walking";
+        return BotToolResult.OkResult($"Moved by {mode} from {FormatVector(from)} to {FormatVector(client.Self.SimPosition)}.");
+    }
+
+    private static async Task<bool> WaitForArrivalAsync(
+        GridClient client,
+        Vector3 target,
+        float tolerance,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = DateTime.UtcNow;
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var at = client.Self.SimPosition;
+            if (Vector3.Distance(at, target) <= tolerance)
+            {
+                return true;
+            }
+
+            if ((DateTime.UtcNow - startedAt) >= timeout)
+            {
+                return false;
+            }
+
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    private static Vector3 ClampLocalPosition(Vector3 pos)
+    {
+        return new Vector3(
+            Math.Clamp(pos.X, 1f, 255f),
+            Math.Clamp(pos.Y, 1f, 255f),
+            Math.Clamp(pos.Z, 0f, 4096f));
+    }
+
+    private static Vector3 ClampScale(Vector3 scale)
+    {
+        return new Vector3(
+            Math.Clamp(scale.X, 0.01f, 64f),
+            Math.Clamp(scale.Y, 0.01f, 64f),
+            Math.Clamp(scale.Z, 0.01f, 64f));
+    }
+
+    private static Vector3 Flatten(Vector3 source)
+    {
+        return new Vector3(source.X, source.Y, 0f);
+    }
+
+    private static Vector3 Negate(Vector3 source)
+    {
+        return new Vector3(-source.X, -source.Y, -source.Z);
+    }
+
+    private static Vector3 ScaleToLength(Vector3 source, float length)
+    {
+        var norm = source.Length();
+        if (norm <= 0.0001f)
+        {
+            return new Vector3(0f, length, 0f);
+        }
+
+        var scale = length / norm;
+        return new Vector3(source.X * scale, source.Y * scale, source.Z * scale);
+    }
+
+    private static Vector3 Interpolate(Vector3 from, Vector3 to, float ratio)
+    {
+        return new Vector3(
+            from.X + ((to.X - from.X) * ratio),
+            from.Y + ((to.Y - from.Y) * ratio),
+            from.Z + ((to.Z - from.Z) * ratio));
+    }
+
+    private static string FormatVector(Vector3 pos)
+    {
+        return $"<{pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}>";
+    }
+
+    private static PrimSummary ToPrimSummary(Primitive prim, Vector3 at)
+    {
+        return new PrimSummary(
+            prim.LocalID,
+            prim.ID.ToString(),
+            prim.ParentID,
+            prim.Properties?.Name,
+            prim.Type.ToString(),
+            prim.Position.X,
+            prim.Position.Y,
+            prim.Position.Z,
+            Vector3.Distance(at, prim.Position));
+    }
+
+    private static bool TryParseLocalIdsCsv(string localIdsCsv, out List<uint> localIds, out string error)
+    {
+        localIds = new List<uint>();
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(localIdsCsv))
+        {
+            error = "localIdsCsv is required (comma-separated local IDs).";
+            return false;
+        }
+
+        var parts = localIdsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0)
+        {
+            error = "No valid local IDs were provided.";
+            return false;
+        }
+
+        foreach (var part in parts)
+        {
+            if (!uint.TryParse(part, out var id))
+            {
+                error = $"Invalid local ID '{part}'. All IDs must be unsigned integers.";
+                return false;
+            }
+
+            if (!localIds.Contains(id))
+            {
+                localIds.Add(id);
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryParseLlsdPayload(string payload, string payloadFormat, out OSD osd, out string error)
+    {
+        osd = new OSD();
+        error = string.Empty;
+
+        var format = (payloadFormat ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(format))
+        {
+            format = "auto";
+        }
+
+        try
+        {
+            osd = format switch
+            {
+                "auto" => OSDParser.Deserialize(payload),
+                "json" => OSDParser.DeserializeJson(payload),
+                "xml" or "llsdxml" or "llsd-xml" => OSDParser.DeserializeLLSDXml(payload),
+                _ => throw new ArgumentException("payloadFormat must be one of: auto, json, xml.")
+            };
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Failed to parse LLSD payload ({format}): {ex.Message}";
+            return false;
+        }
+    }
+
+    private static bool TryBuildEnvironmentDataFromPayloadMap(OSDMap payloadMap, out EnvironmentData environment, out string error)
+    {
+        environment = new EnvironmentData();
+        error = string.Empty;
+
+        // Accept either a direct EnvironmentData map or an ExtEnvironment-style wrapper map
+        // containing an "environment" map.
+        OSDMap? environmentMap = null;
+        if (payloadMap.TryGetValue("environment", out var wrappedEnvironment))
+        {
+            environmentMap = wrappedEnvironment as OSDMap;
+            if (environmentMap == null)
+            {
+                error = "payload contains an 'environment' key, but its value is not an LLSD map/object.";
+                return false;
+            }
+        }
+        else
+        {
+            environmentMap = payloadMap;
+        }
+
+        try
+        {
+            environment.Deserialize(environmentMap);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Failed to deserialize EnvironmentData payload: {ex.Message}";
+            return false;
+        }
+    }
+
+    private static async Task<Primitive?> WaitForCreatedPrimAsync(
+        GridClient client,
+        Simulator simulator,
+        Vector3 expectedPosition,
+        CancellationToken cancellationToken)
+    {
+        var tcs = new TaskCompletionSource<Primitive>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnObjectUpdate(object? sender, PrimEventArgs e)
+        {
+            if (!ReferenceEquals(e.Simulator, simulator))
+            {
+                return;
+            }
+
+            if ((e.Prim.Flags & PrimFlags.CreateSelected) == 0)
+            {
+                return;
+            }
+
+            if (Vector3.Distance(e.Prim.Position, expectedPosition) > 24f)
+            {
+                return;
+            }
+
+            tcs.TrySetResult(e.Prim);
+        }
+
+        client.Objects.ObjectUpdate += OnObjectUpdate;
+        try
+        {
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)).ConfigureAwait(false);
+            if (completed != tcs.Task)
+            {
+                return null;
+            }
+
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            client.Objects.ObjectUpdate -= OnObjectUpdate;
+        }
+    }
+
+    private void OnInstantMessage(object? sender, InstantMessageEventArgs e)
+    {
+        var client = _client;
+        if (client == null || e.IM.FromAgentID == client.Self.AgentID)
+        {
+            return;
+        }
+
+        var from = e.IM.FromAgentName;
+        var text = e.IM.Message?.Trim() ?? string.Empty;
+        Console.WriteLine($"[im] {from}: {text}");
+
+        _ = Task.Run(async () =>
+        {
+            var reply = await ExecuteSimpleBotCommandAsync(text, CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                client.Self.InstantMessage(e.IM.FromAgentID, reply.Message);
+                Console.WriteLine($"[im] -> {from}: {reply.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[im] failed to reply: {ex.Message}");
+            }
+        });
+    }
+
+    private void OnChatFromSimulator(object? sender, ChatEventArgs e)
+    {
+        var client = _client;
+        if (client == null || e.SourceID == client.Self.AgentID)
+        {
+            return;
+        }
+
+        var msg = e.Message?.ToLowerInvariant() ?? string.Empty;
+        if (msg.Contains("hello") || msg.Contains("hi "))
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(_random.Next(500, 1500)).ConfigureAwait(false);
+                try
+                {
+                    client.Self.Chat($"Hello, {e.FromName}!", 0, ChatType.Normal);
+                }
+                catch
+                {
+                    // Best effort response.
+                }
+            });
+        }
+    }
+
+    private void OnLoginProgress(object? sender, LoginProgressEventArgs e)
+    {
+        if (e.Status == LoginStatus.Success)
+        {
+            Console.WriteLine("[bot] login successful");
+        }
+        else if (e.Status == LoginStatus.Failed)
+        {
+            Console.WriteLine($"[bot] login failed: {e.Message}");
+        }
+    }
+
+    private void OnDisconnected(object? sender, DisconnectedEventArgs e)
+    {
+        _connected = false;
+        Console.WriteLine($"[bot] disconnected: {e.Reason} - {e.Message}");
+    }
+}
+
+internal sealed record BotStatus(
+    bool Connected,
+    string Simulator,
+    float X,
+    float Y,
+    float Z,
+    string AgentId,
+    string LastLoginMessage);
+
+internal sealed record BotToolResult(bool Ok, string Message)
+{
+    public static BotToolResult OkResult(string message) => new(true, message);
+    public static BotToolResult Fail(string message) => new(false, message);
+}
+
+internal sealed record EnvironmentToolResult(bool Ok, string Message, string? PayloadJson)
+{
+    public static EnvironmentToolResult OkResult(string message, string payloadJson) => new(true, message, payloadJson);
+    public static EnvironmentToolResult FailResult(string message) => new(false, message, null);
+}
+
+internal sealed record PrimCreateResult(bool Ok, string Message, uint LocalId)
+{
+    public static PrimCreateResult OkResult(uint localId, string message) => new(true, message, localId);
+    public static PrimCreateResult FailResult(string message) => new(false, message, 0);
+}
+
+internal sealed record PrimFaceTextureInfo(int FaceIndex, string TextureId);
+
+internal sealed record PrimInfo(
+    uint LocalId,
+    string Uuid,
+    uint ParentId,
+    string PrimType,
+    string PathCurve,
+    string ProfileCurve,
+    string Material,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    float ScaleX,
+    float ScaleY,
+    float ScaleZ,
+    float RotationX,
+    float RotationY,
+    float RotationZ,
+    float RotationW,
+    string? Name,
+    string? Description,
+    string? OwnerId,
+    string? CreatorId,
+    string? DefaultTextureId,
+    IReadOnlyList<PrimFaceTextureInfo> FaceTextureOverrides);
+
+internal sealed record PrimInspectResult(bool Ok, string Message, PrimInfo? Prim)
+{
+    public static PrimInspectResult OkResult(PrimInfo prim) => new(true, "OK", prim);
+    public static PrimInspectResult FailResult(string message) => new(false, message, null);
+}
+
+internal sealed record PrimSummary(
+    uint LocalId,
+    string Uuid,
+    uint ParentId,
+    string? Name,
+    string PrimType,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    float DistanceMeters);
+
+internal sealed record PrimQueryResult(bool Ok, string Message, IReadOnlyList<PrimSummary> Prims)
+{
+    public static PrimQueryResult OkResult(IReadOnlyList<PrimSummary> prims, string message) => new(true, message, prims);
+    public static PrimQueryResult FailResult(string message) => new(false, message, Array.Empty<PrimSummary>());
+}
