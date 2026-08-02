@@ -2101,7 +2101,7 @@ internal sealed partial class BotSession : IDisposable
                     Console.WriteLine($"[im] -> {from}: {chunk}");
                 }
             }
-            catch (OperationCanceledException ex) when (!ex.CancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException ex) when (IsLikelyBackendTimeout(ex))
             {
                 startedAt.Stop();
                 Console.WriteLine($"[im] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
@@ -2120,9 +2120,27 @@ internal sealed partial class BotSession : IDisposable
             catch (Exception ex)
             {
                 startedAt.Stop();
+                if (IsLikelyBackendTimeout(ex))
+                {
+                    Console.WriteLine($"[im] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
+                    _opencodeChat?.ResetConversation(conversationKey);
+                    try
+                    {
+                        client.Self.InstantMessage(
+                            e.IM.FromAgentID,
+                            "The AI is taking longer than expected and timed out. Please try again in a moment.");
+                    }
+                    catch
+                    {
+                        // Ignore failures while trying to report backend timeout errors.
+                    }
+
+                    return;
+                }
+
                 Console.WriteLine($"[im] failed to route to opencode after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
                 _opencodeChat?.ResetConversation(conversationKey);
-                _imConversationConfigs.TryRemove(conversationKey, out _);
+                // Preserve per-IM overrides (provider/model/thinking) across transient backend failures.
                 try
                 {
                     client.Self.InstantMessage(e.IM.FromAgentID, "Sorry, I could not reach the AI service right now.");
@@ -2147,6 +2165,25 @@ internal sealed partial class BotSession : IDisposable
         }
 
         return new OpencodeSendOptions(cfg.ModelId, cfg.ThinkingLevel);
+    }
+
+    private static bool IsLikelyBackendTimeout(Exception ex)
+    {
+        if (ex is TimeoutException)
+        {
+            return true;
+        }
+
+        // HttpClient timeouts often arrive as TaskCanceledException/OperationCanceledException.
+        if (ex is TaskCanceledException)
+        {
+            return true;
+        }
+
+        var message = ex.Message ?? string.Empty;
+        return message.Contains("HttpClient.Timeout", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("timeout", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<bool> TryHandleStarCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string text)

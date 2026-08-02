@@ -54,6 +54,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             _http.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Basic", Convert.ToBase64String(bytes));
         }
+
+        // Startup marker to verify which payload strategy is active in running containers.
+        Console.WriteLine("[opencode] model payload strategy: string-first, fallback-to-object-on-schema-error");
     }
 
     public async Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
@@ -501,7 +504,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private async Task<OpencodeChatReply> SendToSessionAsync(string sessionId, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
     {
         var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel);
-        var body = new Dictionary<string, object?>
+        var baseBody = new Dictionary<string, object?>
         {
             ["parts"] = new[]
             {
@@ -509,12 +512,16 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             }
         };
 
-        if (!string.IsNullOrWhiteSpace(options?.ModelId))
+        string rawReply;
+        if (string.IsNullOrWhiteSpace(options?.ModelId))
         {
-            body["model"] = options.ModelId;
+            rawReply = await PostJsonRawAsync($"/session/{sessionId}/message", baseBody, cancellationToken).ConfigureAwait(false);
         }
-
-        var rawReply = await PostJsonRawAsync($"/session/{sessionId}/message", body, cancellationToken).ConfigureAwait(false);
+        else
+        {
+            var modelId = options!.ModelId!;
+            rawReply = await PostWithModelFallbacksAsync(sessionId, baseBody, modelId, cancellationToken).ConfigureAwait(false);
+        }
         var reply = string.IsNullOrWhiteSpace(rawReply)
             ? null
             : JsonSerializer.Deserialize<OpenCodeReply>(rawReply, _jsonOptions);
@@ -538,6 +545,55 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return new OpencodeChatReply(text, isConfirmationPrompt);
     }
 
+    private async Task<string> PostWithModelFallbacksAsync(
+        string sessionId,
+        IReadOnlyDictionary<string, object?> baseBody,
+        string modelId,
+        CancellationToken cancellationToken)
+    {
+        var variants = new (string Label, Func<object?> ValueFactory)[]
+        {
+            ("string", () => modelId),
+            ("object", () => BuildModelPayloadObject(modelId)),
+            ("none", () => null)
+        };
+
+        OpencodeHttpException? lastSchemaError = null;
+        for (var i = 0; i < variants.Length; i++)
+        {
+            var variant = variants[i];
+            var body = new Dictionary<string, object?>(baseBody);
+            var modelValue = variant.ValueFactory();
+            if (modelValue == null)
+            {
+                body.Remove("model");
+                Console.WriteLine($"[opencode] send model payload type=none (server fallback) requestedModel={modelId}");
+            }
+            else
+            {
+                body["model"] = modelValue;
+                Console.WriteLine($"[opencode] send model payload type={variant.Label} value={modelId}");
+            }
+
+            try
+            {
+                return await PostJsonRawAsync($"/session/{sessionId}/message", body, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OpencodeHttpException ex) when (ShouldTryNextModelVariant(ex, i, variants.Length))
+            {
+                lastSchemaError = ex;
+                Console.WriteLine($"[opencode] model payload type={variant.Label} rejected ({(int)ex.StatusCode} {ex.StatusCode}); trying next variant.");
+            }
+        }
+
+        if (lastSchemaError != null)
+        {
+            throw lastSchemaError;
+        }
+
+        throw new InvalidOperationException("Failed to post message with model fallbacks.");
+    }
+
     private static string BuildBaseUrl(string scheme, string host, int port)
     {
         var normalizedScheme = string.IsNullOrWhiteSpace(scheme) ? "http" : scheme.Trim().ToLowerInvariant();
@@ -554,6 +610,65 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         // Not all providers expose a first-class "reasoning effort" API; use a compact instruction prefix.
         return $"[reasoning effort: {thinkingLevel.Trim()}]\n{message}";
+    }
+
+    private static Dictionary<string, object?> BuildModelPayloadObject(string modelId)
+    {
+        var trimmed = modelId.Trim();
+        string? provider = null;
+        string? model = null;
+
+        var slash = trimmed.IndexOf('/');
+        if (slash > 0 && slash < trimmed.Length - 1)
+        {
+            provider = trimmed[..slash];
+            model = trimmed[(slash + 1)..];
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["id"] = trimmed,
+            ["name"] = trimmed
+        };
+
+        if (!string.IsNullOrWhiteSpace(provider))
+        {
+            payload["provider"] = provider;
+            payload["providerId"] = provider;
+        }
+
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            payload["model"] = model;
+            payload["modelId"] = model;
+        }
+
+        return payload;
+    }
+
+    private static bool IsModelSchemaError(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return false;
+        }
+
+        var lower = message.ToLowerInvariant();
+        return lower.Contains("model")
+            && (lower.Contains("invalid_type") || lower.Contains("expected") || lower.Contains("schema"));
+    }
+
+    private static bool ShouldTryNextModelVariant(OpencodeHttpException ex, int variantIndex, int variantCount)
+    {
+        if (variantIndex >= variantCount - 1)
+        {
+            return false;
+        }
+
+        // Different Opencode/Zod builds use different validation labels; 400/422 usually means a model-shape mismatch.
+        return ex.StatusCode == HttpStatusCode.BadRequest
+            || ex.StatusCode == HttpStatusCode.UnprocessableEntity
+            || IsModelSchemaError(ex.Message);
     }
 
     private string ExtractReplyText(OpenCodeReply? reply, string? rawReply, out bool hasUsableText)
