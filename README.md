@@ -33,9 +33,9 @@ dotnet build ./src/opensim-metaverse2mcp.csproj -c Release
 Set required bot credentials and run:
 
 ```bash
-export OPENSIM_LOGIN_FIRSTNAME="BotFirst"
-export OPENSIM_LOGIN_LASTNAME="BotLast"
-export OPENSIM_LOGIN_PASSWORD="BotPassword"
+export OPENSIM_LOGIN_FIRSTNAME="Bot"
+export OPENSIM_LOGIN_LASTNAME="User"
+export OPENSIM_LOGIN_PASSWORD="botpassword"
 export OPENSIM_LOGIN_URI="http://localhost:9000"
 
 export MCP_TRANSPORT="http"
@@ -58,9 +58,9 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release
 
 ```bash
 dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
-  --first-name BotFirst \
-  --last-name BotLast \
-  --password BotPassword \
+  --first-name Bot \
+  --last-name User \
+  --password botpassword \
   --login-uri http://localhost:9000 \
   --mcp-host 0.0.0.0 \
   --mcp-port 8999 \
@@ -521,9 +521,9 @@ Run:
 
 ```bash
 docker run --rm \
-  -e OPENSIM_LOGIN_FIRSTNAME=BotFirst \
-  -e OPENSIM_LOGIN_LASTNAME=BotLast \
-  -e OPENSIM_LOGIN_PASSWORD=BotPassword \
+  -e OPENSIM_LOGIN_FIRSTNAME=Bot \
+  -e OPENSIM_LOGIN_LASTNAME=User \
+  -e OPENSIM_LOGIN_PASSWORD=botpassword \
   -e OPENSIM_LOGIN_URI=http://host.docker.internal:9000 \
   -e MCP_TRANSPORT=http \
   -e MCP_HOST=0.0.0.0 \

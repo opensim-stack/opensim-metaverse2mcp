@@ -17,9 +17,9 @@ Run the container with your bot credentials and OpenSim login URI:
 
 ```bash
 docker run --rm \
-  -e OPENSIM_LOGIN_FIRSTNAME=BotFirst \
-  -e OPENSIM_LOGIN_LASTNAME=BotLast \
-  -e OPENSIM_LOGIN_PASSWORD=BotPassword \
+  -e OPENSIM_LOGIN_FIRSTNAME=Bot \
+  -e OPENSIM_LOGIN_LASTNAME=User \
+  -e OPENSIM_LOGIN_PASSWORD=botpassword \
   -e OPENSIM_LOGIN_URI=http://host.docker.internal:9000 \
   -e MCP_TRANSPORT=http \
   -e MCP_HOST=0.0.0.0 \

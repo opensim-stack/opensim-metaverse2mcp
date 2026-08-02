@@ -2027,7 +2027,13 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        if (IsDuplicateImEvent(e.IM.FromAgentID, e.IM.IMSessionID, text))
+        if (IsLikelyTypingIndicator(e.IM, text))
+        {
+            Console.WriteLine($"[im] typing indicator ignored for {from} ({e.IM.Dialog}).");
+            return;
+        }
+
+        if (IsDuplicateImEvent(e.IM.FromAgentID, text, e.IM.Timestamp))
         {
             Console.WriteLine($"[im] duplicate suppressed for {from} ({e.IM.Dialog}).");
             return;
@@ -2086,6 +2092,7 @@ internal sealed partial class BotSession : IDisposable
             {
                 startedAt.Stop();
                 Console.WriteLine($"[im] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
+                _opencodeChat?.ResetConversation(conversationKey);
                 try
                 {
                     client.Self.InstantMessage(
@@ -2101,6 +2108,7 @@ internal sealed partial class BotSession : IDisposable
             {
                 startedAt.Stop();
                 Console.WriteLine($"[im] failed to route to opencode after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
+                _opencodeChat?.ResetConversation(conversationKey);
                 try
                 {
                     client.Self.InstantMessage(e.IM.FromAgentID, "Sorry, I could not reach the AI service right now.");
@@ -2117,11 +2125,24 @@ internal sealed partial class BotSession : IDisposable
         });
     }
 
-    private bool IsDuplicateImEvent(UUID fromAgentId, UUID sessionId, string text)
+    private static bool IsLikelyTypingIndicator(InstantMessage message, string text)
+    {
+        if (!text.Equals("typing", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Some viewers emit IM typing state as a pseudo-message with payload metadata.
+        return message.BinaryBucket != null && message.BinaryBucket.Length > 0;
+    }
+
+    private bool IsDuplicateImEvent(UUID fromAgentId, string text, DateTime timestamp)
     {
         var now = DateTimeOffset.UtcNow;
-        var key = $"{fromAgentId}:{sessionId}:{text}";
-        var duplicateWindow = TimeSpan.FromSeconds(2);
+        var normalizedText = text.Trim();
+        var timestampKey = timestamp.Ticks > 0 ? timestamp.Ticks.ToString() : "no-ts";
+        var key = $"{fromAgentId}:{timestampKey}:{normalizedText}";
+        var duplicateWindow = TimeSpan.FromSeconds(8);
 
         if (_recentImEvents.TryGetValue(key, out var seenAt) && now - seenAt <= duplicateWindow)
         {

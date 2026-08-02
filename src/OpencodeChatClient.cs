@@ -10,6 +10,7 @@ namespace Opensim.Metaverse2Mcp;
 internal interface IOpencodeChatClient
 {
     Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, CancellationToken cancellationToken);
+    void ResetConversation(string conversationKey);
 }
 
 internal sealed record OpencodeChatReply(string Text, bool IsConfirmationPrompt);
@@ -68,6 +69,16 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             sessionId = await EnsureSessionAsync(conversationKey, title, cancellationToken).ConfigureAwait(false);
             return await SendToSessionAsync(sessionId, message, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    public void ResetConversation(string conversationKey)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return;
+        }
+
+        _sessionIds.TryRemove(conversationKey, out _);
     }
 
     private async Task<string> EnsureSessionAsync(string conversationKey, string title, CancellationToken cancellationToken)
