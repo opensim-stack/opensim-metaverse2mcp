@@ -184,6 +184,20 @@ The server publishes tools including:
 
 Chat notes:
 - In this stage, only avatar-to-bot IM is routed to Opencode.
+- IM supports "star commands" (prefixed with `*`) for live AI configuration per avatar conversation:
+  - `*help`
+  - `*status`
+  - `*providers` (all available providers from Opencode)
+  - `*providers configured` (only configured/active providers)
+  - `*models [provider]` (live list from Opencode server)
+  - `*auth methods [provider]` (list provider auth methods)
+  - `*auth <provider-id> api <api-key>` (store provider API key over Opencode HTTP API)
+  - `*auth <provider-id> oauth [method-index]` (start OAuth/device flow)
+  - `*auth <provider-id> oauth-complete [method-index] [code]` (complete OAuth flow)
+  - `*configure <provider-name-or-id>` (select provider and auto-pick a model)
+  - `*configure model <provider/model-id>`
+  - `*configure thinking <low|medium|high|off>`
+  - `*configure reset` / `*reset`
 - TODO: add local chat and group chat routing.
 - TODO: add a security policy to control which users the AI may respond to.
 
