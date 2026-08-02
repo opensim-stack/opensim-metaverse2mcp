@@ -1,6 +1,8 @@
 using LibreMetaverse;
 using LibreMetaverse.Messages.Linden;
 using LibreMetaverse.StructuredData;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -9,6 +11,8 @@ internal sealed partial class BotSession : IDisposable
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
     private readonly IOpencodeChatClient? _opencodeChat;
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _recentImEvents = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _imConversationLocks = new(StringComparer.Ordinal);
 
     private GridClient? _client;
     private bool _connected;
@@ -1456,6 +1460,11 @@ internal sealed partial class BotSession : IDisposable
             disposableOpencodeChat.Dispose();
         }
 
+        foreach (var gate in _imConversationLocks.Values)
+        {
+            gate.Dispose();
+        }
+
         _actionGate.Dispose();
     }
 
@@ -2003,17 +2012,48 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
+        if (e.IM.Dialog != InstantMessageDialog.MessageFromAgent
+            && e.IM.Dialog != InstantMessageDialog.SessionSend)
+        {
+            return;
+        }
+
         var from = e.IM.FromAgentName;
         var text = e.IM.Message?.Trim() ?? string.Empty;
-        Console.WriteLine($"[im] {from}: {text}");
+        Console.WriteLine($"[im] ({e.IM.Dialog}) {from}: {text}");
 
         if (string.IsNullOrWhiteSpace(text))
         {
             return;
         }
 
+        if (IsDuplicateImEvent(e.IM.FromAgentID, e.IM.IMSessionID, text))
+        {
+            Console.WriteLine($"[im] duplicate suppressed for {from} ({e.IM.Dialog}).");
+            return;
+        }
+
+        var conversationKey = $"im:{e.IM.FromAgentID}";
+
         _ = Task.Run(async () =>
         {
+            var gate = _imConversationLocks.GetOrAdd(conversationKey, _ => new SemaphoreSlim(1, 1));
+            if (!await gate.WaitAsync(0).ConfigureAwait(false))
+            {
+                Console.WriteLine($"[im] skipping while previous request is still in flight for {from} ({conversationKey}).");
+                try
+                {
+                    client.Self.InstantMessage(e.IM.FromAgentID, "I am still working on your previous request. Please wait a moment and try again.");
+                }
+                catch
+                {
+                    // Ignore failures while trying to report overlap state.
+                }
+
+                return;
+            }
+
+            var startedAt = Stopwatch.StartNew();
             try
             {
                 if (_opencodeChat == null)
@@ -2023,11 +2063,14 @@ internal sealed partial class BotSession : IDisposable
                 }
 
                 // TODO(security): enforce who the AI is allowed to talk to (allowlist, roles, or parcel/group checks).
+                Console.WriteLine($"[im] routing to opencode: from={from} conversation={conversationKey} textLength={text.Length}");
                 var reply = await _opencodeChat.SendMessageAsync(
-                    conversationKey: $"im:{e.IM.FromAgentID}",
+                    conversationKey: conversationKey,
                     title: $"OpenSim IM with {from}",
                     message: text,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                startedAt.Stop();
+                Console.WriteLine($"[im] opencode reply received in {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey} replyLength={reply.Text.Length}");
 
                 var responseText = reply.IsConfirmationPrompt
                     ? reply.Text + "\n\nReply with yes or no to continue."
@@ -2039,9 +2082,25 @@ internal sealed partial class BotSession : IDisposable
                     Console.WriteLine($"[im] -> {from}: {chunk}");
                 }
             }
+            catch (OperationCanceledException ex) when (!ex.CancellationToken.IsCancellationRequested)
+            {
+                startedAt.Stop();
+                Console.WriteLine($"[im] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
+                try
+                {
+                    client.Self.InstantMessage(
+                        e.IM.FromAgentID,
+                        "The AI is taking longer than expected and timed out. Please try again in a moment.");
+                }
+                catch
+                {
+                    // Ignore failures while trying to report backend timeout errors.
+                }
+            }
             catch (Exception ex)
             {
-                Console.WriteLine($"[im] failed to route to opencode: {ex.Message}");
+                startedAt.Stop();
+                Console.WriteLine($"[im] failed to route to opencode after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
                 try
                 {
                     client.Self.InstantMessage(e.IM.FromAgentID, "Sorry, I could not reach the AI service right now.");
@@ -2051,7 +2110,36 @@ internal sealed partial class BotSession : IDisposable
                     // Ignore failures while trying to report backend errors.
                 }
             }
+            finally
+            {
+                gate.Release();
+            }
         });
+    }
+
+    private bool IsDuplicateImEvent(UUID fromAgentId, UUID sessionId, string text)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var key = $"{fromAgentId}:{sessionId}:{text}";
+        var duplicateWindow = TimeSpan.FromSeconds(2);
+
+        if (_recentImEvents.TryGetValue(key, out var seenAt) && now - seenAt <= duplicateWindow)
+        {
+            return true;
+        }
+
+        _recentImEvents[key] = now;
+
+        // Opportunistic cleanup to avoid unbounded growth for long-running sessions.
+        foreach (var entry in _recentImEvents)
+        {
+            if (now - entry.Value > TimeSpan.FromMinutes(5))
+            {
+                _recentImEvents.TryRemove(entry.Key, out _);
+            }
+        }
+
+        return false;
     }
 
     private void OnChatFromSimulator(object? sender, ChatEventArgs e)

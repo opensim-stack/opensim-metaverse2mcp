@@ -102,7 +102,7 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `OPENCODE_USERNAME` (optional Basic auth username)
 - `OPENCODE_PASSWORD` (optional Basic auth password)
 - `OPENCODE_SERVER_PASSWORD` (optional fallback alias for `OPENCODE_PASSWORD`)
-- `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `60`)
+- `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `240`)
 
 Notes:
 - `MCP_TRANSPORT=sse` enables legacy SSE compatibility in the MCP HTTP transport.
