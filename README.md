@@ -218,6 +218,7 @@ Environment notes:
 
 Inventory and asset notes:
 - `AssetUploadInventory` accepts either a local file path or an `http/https` URL as `source`.
+- `AssetUploadInventory` accepts `assetType`/`inventoryType` as explicit values or `auto` (inferred from source/name extension such as `.lsl`, `.txt`, `.jp2`, `.ogg`, `.bvh`).
 - `AssetDownload` and `TextureDownload` use `outputMode`: `both` (default), `base64`, or `tempfile`.
 - Incoming inventory offers are policy-driven: first matching rule decides `accept` or `decline`; unmatched offers are declined by default.
 - `TaskInventoryTake` requests transfer from object (task) inventory into avatar inventory; server permissions determine copy-vs-move behavior.
@@ -269,6 +270,12 @@ ScriptCopyInventoryToTask(objectLocalId=123456, inventoryScriptItemId="<agent-sc
 TaskInventoryList(objectLocalId=123456, objectId="<object-uuid>", maxResults=200)
 ScriptSetTaskRunning(objectId="<object-uuid>", scriptItemId="<task-script-item-uuid>", running=true, verifyAfterSet=true)
 ScriptGetTaskRunning(objectId="<object-uuid>", scriptItemId="<task-script-item-uuid>")
+```
+
+Alternative import example when you only have a source file/URL and want the server to infer type:
+
+```text
+AssetUploadInventory(source="./go-away.lsl", assetType="auto", inventoryType="auto", name="Go Away", description="Touch says Go away!", folderId="")
 ```
 
 ### 3) Manage inventory-offer policy rules with persistence

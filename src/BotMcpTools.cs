@@ -532,8 +532,8 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Upload a local file path or HTTP/HTTPS URL as a new inventory item asset.")]
     public Task<AssetTransferResult> AssetUploadInventory(
         [Description("Source path or URL.")] string source,
-        [Description("Asset type (e.g. texture, notecard, lsltext, animation, sound).") ] string assetType,
-        [Description("Inventory type (e.g. texture, notecard, lsl, animation, sound).") ] string inventoryType,
+        [Description("Asset type (e.g. texture, notecard, lsltext, animation, sound) or 'auto' to infer from extension.") ] string assetType,
+        [Description("Inventory type (e.g. texture, notecard, lsl, animation, sound) or 'auto' to infer from extension.") ] string inventoryType,
         [Description("New inventory item name.")] string name,
         [Description("New inventory item description (empty allowed).") ] string description,
         [Description("Optional destination folder UUID.")] string? folderId,

@@ -585,14 +585,9 @@ internal sealed partial class BotSession
             return AssetTransferResult.FailResult("name is required.");
         }
 
-        if (!TryParseAssetType(assetType, out var parsedAssetType, out var assetTypeError))
+        if (!TryResolveUploadTypes(source, name, assetType, inventoryType, out var parsedAssetType, out var parsedInventoryType, out var typeError))
         {
-            return AssetTransferResult.FailResult(assetTypeError);
-        }
-
-        if (!TryParseInventoryType(inventoryType, out var parsedInventoryType, out var inventoryTypeError))
-        {
-            return AssetTransferResult.FailResult(inventoryTypeError);
+            return AssetTransferResult.FailResult(typeError);
         }
 
         return await ExecuteLockedAsync(async (client, token) =>
@@ -649,6 +644,143 @@ internal sealed partial class BotSession
                 data.Length,
                 $"Uploaded {data.Length} bytes as {parsedAssetType}/{parsedInventoryType} into folder {folderUuid}.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryResolveUploadTypes(
+        string source,
+        string name,
+        string rawAssetType,
+        string rawInventoryType,
+        out AssetType assetType,
+        out InventoryType inventoryType,
+        out string error)
+    {
+        assetType = AssetType.Unknown;
+        inventoryType = InventoryType.Unknown;
+        error = string.Empty;
+
+        var autoAssetType = string.IsNullOrWhiteSpace(rawAssetType) || string.Equals(rawAssetType.Trim(), "auto", StringComparison.OrdinalIgnoreCase);
+        var autoInventoryType = string.IsNullOrWhiteSpace(rawInventoryType) || string.Equals(rawInventoryType.Trim(), "auto", StringComparison.OrdinalIgnoreCase);
+
+        if (!autoAssetType)
+        {
+            if (!TryParseAssetType(rawAssetType, out assetType, out var assetTypeError))
+            {
+                error = assetTypeError;
+                return false;
+            }
+        }
+
+        if (!autoInventoryType)
+        {
+            if (!TryParseInventoryType(rawInventoryType, out inventoryType, out var inventoryTypeError))
+            {
+                error = inventoryTypeError;
+                return false;
+            }
+        }
+
+        if (!autoAssetType && !autoInventoryType)
+        {
+            return true;
+        }
+
+        if (!TryInferAssetAndInventoryType(source, name, out var inferredAssetType, out var inferredInventoryType))
+        {
+            error = "Could not infer asset type from source/name extension. Set assetType/inventoryType explicitly (or use extensions like .lsl, .txt, .jp2, .ogg, .bvh).";
+            return false;
+        }
+
+        if (autoAssetType)
+        {
+            assetType = inferredAssetType;
+        }
+
+        if (autoInventoryType)
+        {
+            inventoryType = inferredInventoryType;
+        }
+
+        return true;
+    }
+
+    private static bool TryInferAssetAndInventoryType(
+        string source,
+        string name,
+        out AssetType assetType,
+        out InventoryType inventoryType)
+    {
+        assetType = AssetType.Unknown;
+        inventoryType = InventoryType.Unknown;
+
+        var extension = GetSourceExtension(source);
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            extension = Path.GetExtension(name ?? string.Empty);
+        }
+
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            return false;
+        }
+
+        switch (extension.ToLowerInvariant())
+        {
+            case ".lsl":
+                assetType = AssetType.LSLText;
+                inventoryType = InventoryType.LSL;
+                return true;
+            case ".txt":
+            case ".md":
+                assetType = AssetType.Notecard;
+                inventoryType = InventoryType.Notecard;
+                return true;
+            case ".jp2":
+            case ".j2c":
+            case ".j2k":
+            case ".jpeg2000":
+            case ".png":
+            case ".jpg":
+            case ".jpeg":
+            case ".bmp":
+            case ".tga":
+                assetType = AssetType.Texture;
+                inventoryType = InventoryType.Texture;
+                return true;
+            case ".ogg":
+            case ".wav":
+            case ".mp3":
+                assetType = AssetType.Sound;
+                inventoryType = InventoryType.Sound;
+                return true;
+            case ".bvh":
+            case ".anim":
+                assetType = AssetType.Animation;
+                inventoryType = InventoryType.Animation;
+                return true;
+            case ".mesh":
+                assetType = AssetType.Mesh;
+                inventoryType = InventoryType.Mesh;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static string GetSourceExtension(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            return string.Empty;
+        }
+
+        if (Uri.TryCreate(source, UriKind.Absolute, out var uri)
+            && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+        {
+            return Path.GetExtension(uri.AbsolutePath ?? string.Empty);
+        }
+
+        return Path.GetExtension(source);
     }
 
     public async Task<AssetDownloadResult> AssetDownloadAsync(
