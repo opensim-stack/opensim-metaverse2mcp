@@ -11,6 +11,7 @@ internal interface IOpencodeChatClient
 {
     Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken);
     void ResetConversation(string conversationKey);
+    string? GetConversationSessionId(string conversationKey);
     Task<IReadOnlyList<OpencodeProviderSummary>> ListProvidersAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeProviderSummary>> ListAvailableProvidersAsync(CancellationToken cancellationToken);
     Task<IReadOnlyDictionary<string, IReadOnlyList<OpencodeProviderAuthMethod>>> ListProviderAuthMethodsAsync(CancellationToken cancellationToken);
@@ -32,6 +33,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private readonly HttpClient _http;
     private readonly ConcurrentDictionary<string, string> _sessionIds = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OpencodeOAuthPendingState> _oauthPendingStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _modelOverrideGate = new(1, 1);
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -55,8 +57,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 new AuthenticationHeaderValue("Basic", Convert.ToBase64String(bytes));
         }
 
-        // Startup marker to verify which payload strategy is active in running containers.
-        Console.WriteLine("[opencode] model payload strategy: string-first, fallback-to-object-on-schema-error");
+        Console.WriteLine("[opencode] model payload strategy: session-only (no per-message model override)");
     }
 
     public async Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
@@ -66,7 +67,53 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             throw new ArgumentException("conversationKey is required.", nameof(conversationKey));
         }
 
-        var sessionId = await EnsureSessionAsync(conversationKey, title, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(options?.ModelId))
+        {
+            return await SendMessageCoreAsync(conversationKey, title, message, options, cancellationToken).ConfigureAwait(false);
+        }
+
+        var requestedModel = options!.ModelId!.Trim();
+        await _modelOverrideGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        string? previousModel = null;
+        var overrideApplied = false;
+        try
+        {
+            var currentConfig = await GetJsonAsync<OpencodeRuntimeConfig>("/config", cancellationToken).ConfigureAwait(false);
+            previousModel = string.IsNullOrWhiteSpace(currentConfig?.Model) ? null : currentConfig!.Model!.Trim();
+            if (!string.Equals(previousModel, requestedModel, StringComparison.OrdinalIgnoreCase))
+            {
+                await PatchConfigModelAsync(requestedModel, cancellationToken).ConfigureAwait(false);
+                overrideApplied = true;
+            }
+
+            return await SendMessageCoreAsync(conversationKey, title, message, options, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (overrideApplied && !string.IsNullOrWhiteSpace(previousModel))
+            {
+                try
+                {
+                    await PatchConfigModelAsync(previousModel, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[opencode] warning: failed to restore /config model to '{previousModel}': {ex.Message}");
+                }
+            }
+
+            _modelOverrideGate.Release();
+        }
+    }
+
+    private async Task<OpencodeChatReply> SendMessageCoreAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            throw new ArgumentException("conversationKey is required.", nameof(conversationKey));
+        }
+
+        var sessionId = await EnsureSessionAsync(conversationKey, title, options, cancellationToken).ConfigureAwait(false);
         try
         {
             return await SendToSessionAsync(sessionId, message, options, cancellationToken).ConfigureAwait(false);
@@ -75,16 +122,27 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         {
             // Session may have expired on server restart; create a new one and retry once.
             _sessionIds.TryRemove(conversationKey, out _);
-            sessionId = await EnsureSessionAsync(conversationKey, title, cancellationToken).ConfigureAwait(false);
+            sessionId = await EnsureSessionAsync(conversationKey, title, options, cancellationToken).ConfigureAwait(false);
             return await SendToSessionAsync(sessionId, message, options, cancellationToken).ConfigureAwait(false);
         }
         catch (OpencodeEmbeddedErrorException ex) when (ex.ShouldResetSession)
         {
             // Some providers return API errors inside a 200 response; rebuild the session and retry once.
             _sessionIds.TryRemove(conversationKey, out _);
-            sessionId = await EnsureSessionAsync(conversationKey, title, cancellationToken).ConfigureAwait(false);
+            sessionId = await EnsureSessionAsync(conversationKey, title, options, cancellationToken).ConfigureAwait(false);
             return await SendToSessionAsync(sessionId, message, options, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private async Task PatchConfigModelAsync(string modelId, CancellationToken cancellationToken)
+    {
+        var patch = new
+        {
+            model = modelId
+        };
+
+        Console.WriteLine($"[opencode] PATCH /config model={modelId}");
+        _ = await PatchJsonRawAsync("/config", patch, cancellationToken).ConfigureAwait(false);
     }
 
     public void ResetConversation(string conversationKey)
@@ -95,6 +153,16 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         _sessionIds.TryRemove(conversationKey, out _);
+    }
+
+    public string? GetConversationSessionId(string conversationKey)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return null;
+        }
+
+        return _sessionIds.TryGetValue(conversationKey, out var sessionId) ? sessionId : null;
     }
 
     public async Task<IReadOnlyList<OpencodeProviderSummary>> ListProvidersAsync(CancellationToken cancellationToken)
@@ -288,60 +356,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     {
         var normalizedProviderId = NormalizeProviderQuery(providerId);
 
-        // Probe multiple model endpoints because Opencode server variants expose different paths.
-        var endpointCandidates = new List<string>
-        {
-            "/model",
-            "/models"
-        };
+        var response = await GetJsonAsync<OpencodeProvidersResponse>("/config/providers", cancellationToken).ConfigureAwait(false);
+        var providers = response?.Providers ?? new List<OpencodeProviderEntry>();
 
-        if (!string.IsNullOrWhiteSpace(normalizedProviderId))
-        {
-            var escapedProvider = Uri.EscapeDataString(normalizedProviderId);
-            endpointCandidates.Add($"/provider/{escapedProvider}/model");
-            endpointCandidates.Add($"/provider/{escapedProvider}/models");
-        }
-
-        var liveModels = new Dictionary<string, OpencodeModelSummary>(StringComparer.OrdinalIgnoreCase);
-        foreach (var path in endpointCandidates)
-        {
-            var fromEndpoint = await TryListModelsFromEndpointAsync(path, cancellationToken).ConfigureAwait(false);
-            foreach (var model in fromEndpoint)
-            {
-                if (!liveModels.ContainsKey(model.Id))
-                {
-                    liveModels[model.Id] = model;
-                }
-            }
-        }
-
-        var filteredLive = liveModels.Values.ToList();
-        if (!string.IsNullOrWhiteSpace(normalizedProviderId))
-        {
-            filteredLive = filteredLive
-                .Where(m => string.Equals(m.Provider, normalizedProviderId, StringComparison.OrdinalIgnoreCase)
-                    || m.Id.StartsWith(normalizedProviderId + "/", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-        }
-
-        if (filteredLive.Count > 0)
-        {
-            return filteredLive
-                .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
-        OpencodeProvidersResponse? configuredResponse;
-        try
-        {
-            configuredResponse = await GetJsonAsync<OpencodeProvidersResponse>("/config/providers", cancellationToken).ConfigureAwait(false);
-        }
-        catch (JsonException)
-        {
-            configuredResponse = null;
-        }
-
-        var providers = configuredResponse?.Providers ?? new List<OpencodeProviderEntry>();
         if (!string.IsNullOrWhiteSpace(normalizedProviderId))
         {
             providers = providers
@@ -350,20 +367,47 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 .ToList();
         }
 
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var models = new List<OpencodeModelSummary>();
         foreach (var provider in providers)
         {
-            foreach (var model in provider.Models?.Values ?? Enumerable.Empty<OpencodeModelEntry>())
+            var providerKey = provider.Id?.Trim();
+            foreach (var modelEntry in provider.Models ?? new Dictionary<string, OpencodeModelEntry>())
             {
-                if (string.IsNullOrWhiteSpace(model.Id))
+                var model = modelEntry.Value;
+                var modelId = !string.IsNullOrWhiteSpace(model.Id)
+                    ? model.Id!.Trim()
+                    : modelEntry.Key.Trim();
+                if (string.IsNullOrWhiteSpace(modelId))
                 {
                     continue;
                 }
 
-                models.Add(new OpencodeModelSummary(
-                    model.Id!,
-                    string.IsNullOrWhiteSpace(model.Name) ? model.Id! : model.Name!,
-                    provider.Id));
+                var canonicalId = !string.IsNullOrWhiteSpace(providerKey) && !modelId.Contains('/')
+                    ? $"{providerKey}/{modelId}"
+                    : modelId;
+
+                if (!seenIds.Add(canonicalId))
+                {
+                    continue;
+                }
+
+                var name = string.IsNullOrWhiteSpace(model.Name) ? canonicalId : model.Name.Trim();
+                models.Add(new OpencodeModelSummary(canonicalId, name, providerKey));
+            }
+
+            foreach (var defaultModel in EnumerateProviderDefaultModelIds(provider))
+            {
+                var modelId = defaultModel.Trim();
+                var canonicalId = !string.IsNullOrWhiteSpace(providerKey) && !modelId.Contains('/')
+                    ? $"{providerKey}/{modelId}"
+                    : modelId;
+                if (!seenIds.Add(canonicalId))
+                {
+                    continue;
+                }
+
+                models.Add(new OpencodeModelSummary(canonicalId, canonicalId, providerKey));
             }
         }
 
@@ -372,22 +416,45 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             .ToList();
     }
 
+    private static IEnumerable<string> EnumerateProviderDefaultModelIds(OpencodeProviderEntry provider)
+    {
+        var candidates = new[]
+        {
+            provider.Model,
+            provider.ModelId,
+            provider.DefaultModel,
+            provider.DefaultModelId
+        };
+
+        foreach (var value in candidates)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                yield return value;
+            }
+        }
+    }
+
     private async Task<IReadOnlyList<OpencodeModelSummary>> TryListModelsFromEndpointAsync(string path, CancellationToken cancellationToken)
     {
         try
         {
             using var response = await _http.GetAsync(path, cancellationToken).ConfigureAwait(false);
             var raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode || string.IsNullOrWhiteSpace(raw))
+            if (!response.IsSuccessStatusCode)
             {
-                return Array.Empty<OpencodeModelSummary>();
+                throw new OpencodeHttpException(response.StatusCode, path, raw);
+            }
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                throw new InvalidOperationException($"Opencode returned an empty response for {path}.");
             }
 
             var trimmed = raw.TrimStart();
             if (trimmed.Length == 0 || trimmed[0] == '<')
             {
-                // Some server builds route unknown API paths to an HTML page with 200 status.
-                return Array.Empty<OpencodeModelSummary>();
+                throw new InvalidOperationException($"Opencode returned non-JSON content for {path}.");
             }
 
             using var doc = JsonDocument.Parse(raw);
@@ -395,13 +462,14 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             CollectModelsFromElement(doc.RootElement, null, found);
             return found;
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
-            return Array.Empty<OpencodeModelSummary>();
+            throw new InvalidOperationException($"Failed to parse Opencode model payload from {path}: {ex.Message}", ex);
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException ex)
         {
-            return Array.Empty<OpencodeModelSummary>();
+            var baseAddress = _http.BaseAddress?.ToString() ?? "(unknown)";
+            throw new InvalidOperationException($"Cannot reach Opencode at {baseAddress} while requesting {path}: {ex.Message}", ex);
         }
     }
 
@@ -420,7 +488,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             case JsonValueKind.Object:
                 if (TryBuildModelSummary(element, inheritedProvider, out var model))
                 {
-                    models.Add(model!);
+                    AddModelSummary(models, model!);
                     return;
                 }
 
@@ -433,7 +501,37 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                         nextProvider = property.Value.GetString();
                     }
 
+                    // Common /model shape: top-level provider key -> models payload.
+                    if (string.IsNullOrWhiteSpace(nextProvider) && IsLikelyProviderPropertyName(property.Name))
+                    {
+                        nextProvider = property.Name;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(nextProvider)
+                        && property.Value.ValueKind == JsonValueKind.String)
+                    {
+                        var leafModelId = property.Value.GetString();
+                        if (!string.IsNullOrWhiteSpace(leafModelId))
+                        {
+                            AddModelSummary(models, new OpencodeModelSummary(leafModelId.Trim(), leafModelId.Trim(), nextProvider));
+                        }
+
+                        continue;
+                    }
+
                     CollectModelsFromElement(property.Value, nextProvider, models);
+                }
+
+                return;
+
+            case JsonValueKind.String:
+                if (!string.IsNullOrWhiteSpace(inheritedProvider))
+                {
+                    var leafModelId = element.GetString();
+                    if (!string.IsNullOrWhiteSpace(leafModelId))
+                    {
+                        AddModelSummary(models, new OpencodeModelSummary(leafModelId.Trim(), leafModelId.Trim(), inheritedProvider));
+                    }
                 }
 
                 return;
@@ -452,11 +550,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         var idValue = id.Trim();
-        if (!idValue.Contains('/') && !TryGetStringProperty(element, "model", out _))
-        {
-            // Avoid treating unrelated objects with simple IDs as models.
-            return false;
-        }
 
         var name = TryGetStringProperty(element, "name", out var parsedName) && !string.IsNullOrWhiteSpace(parsedName)
             ? parsedName.Trim()
@@ -484,14 +577,56 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return true;
     }
 
-    private async Task<string> EnsureSessionAsync(string conversationKey, string title, CancellationToken cancellationToken)
+    private static void AddModelSummary(List<OpencodeModelSummary> models, OpencodeModelSummary candidate)
+    {
+        var id = candidate.Id.Trim();
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return;
+        }
+
+        var provider = string.IsNullOrWhiteSpace(candidate.Provider) ? null : candidate.Provider!.Trim();
+        var canonicalId = id.Contains('/') || string.IsNullOrWhiteSpace(provider)
+            ? id
+            : $"{provider}/{id}";
+        var name = string.IsNullOrWhiteSpace(candidate.Name) ? canonicalId : candidate.Name.Trim();
+
+        if (models.Any(m => m.Id.Equals(canonicalId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        models.Add(new OpencodeModelSummary(canonicalId, name, provider));
+    }
+
+    private static bool IsLikelyProviderPropertyName(string propertyName)
+    {
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            return false;
+        }
+
+        var key = propertyName.Trim();
+        return !key.Equals("all", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("data", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("items", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("models", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("provider", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("providerId", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("provider_id", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("id", StringComparison.OrdinalIgnoreCase)
+            && !key.Equals("name", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<string> EnsureSessionAsync(string conversationKey, string title, OpencodeSendOptions? options, CancellationToken cancellationToken)
     {
         if (_sessionIds.TryGetValue(conversationKey, out var existing))
         {
             return existing;
         }
 
-        var body = new { title = string.IsNullOrWhiteSpace(title) ? "OpenSim Conversation" : title };
+        var body = BuildSessionCreateBody(title, options?.ModelId);
+        Console.WriteLine($"[opencode] POST /session payload: {JsonSerializer.Serialize(body, _jsonOptions)}");
         var created = await PostJsonAsync<OpencodeSessionInfo>("/session", body, cancellationToken).ConfigureAwait(false);
         if (created == null || string.IsNullOrWhiteSpace(created.Id))
         {
@@ -504,7 +639,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private async Task<OpencodeChatReply> SendToSessionAsync(string sessionId, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
     {
         var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel);
-        var baseBody = new Dictionary<string, object?>
+        var body = new Dictionary<string, object?>
         {
             ["parts"] = new[]
             {
@@ -512,16 +647,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             }
         };
 
-        string rawReply;
-        if (string.IsNullOrWhiteSpace(options?.ModelId))
-        {
-            rawReply = await PostJsonRawAsync($"/session/{sessionId}/message", baseBody, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            var modelId = options!.ModelId!;
-            rawReply = await PostWithModelFallbacksAsync(sessionId, baseBody, modelId, cancellationToken).ConfigureAwait(false);
-        }
+        var rawReply = await PostJsonRawAsync($"/session/{sessionId}/message", body, cancellationToken).ConfigureAwait(false);
         var reply = string.IsNullOrWhiteSpace(rawReply)
             ? null
             : JsonSerializer.Deserialize<OpenCodeReply>(rawReply, _jsonOptions);
@@ -541,57 +667,62 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         var isConfirmationPrompt = IsLikelyConfirmationPrompt(text);
-
         return new OpencodeChatReply(text, isConfirmationPrompt);
     }
 
-    private async Task<string> PostWithModelFallbacksAsync(
-        string sessionId,
-        IReadOnlyDictionary<string, object?> baseBody,
-        string modelId,
-        CancellationToken cancellationToken)
+    private static Dictionary<string, object?> BuildSessionCreateBody(string title, string? configuredModelId)
     {
-        var variants = new (string Label, Func<object?> ValueFactory)[]
+        var body = new Dictionary<string, object?>
         {
-            ("string", () => modelId),
-            ("object", () => BuildModelPayloadObject(modelId)),
-            ("none", () => null)
+            ["title"] = string.IsNullOrWhiteSpace(title) ? "OpenSim Conversation" : title
         };
 
-        OpencodeHttpException? lastSchemaError = null;
-        for (var i = 0; i < variants.Length; i++)
+        var sessionBody = new Dictionary<string, object?>();
+        if (TryParseProviderAndModel(configuredModelId, out var providerId, out var modelLeaf))
         {
-            var variant = variants[i];
-            var body = new Dictionary<string, object?>(baseBody);
-            var modelValue = variant.ValueFactory();
-            if (modelValue == null)
-            {
-                body.Remove("model");
-                Console.WriteLine($"[opencode] send model payload type=none (server fallback) requestedModel={modelId}");
-            }
-            else
-            {
-                body["model"] = modelValue;
-                Console.WriteLine($"[opencode] send model payload type={variant.Label} value={modelId}");
-            }
-
-            try
-            {
-                return await PostJsonRawAsync($"/session/{sessionId}/message", body, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OpencodeHttpException ex) when (ShouldTryNextModelVariant(ex, i, variants.Length))
-            {
-                lastSchemaError = ex;
-                Console.WriteLine($"[opencode] model payload type={variant.Label} rejected ({(int)ex.StatusCode} {ex.StatusCode}); trying next variant.");
-            }
+            var canonicalModelId = configuredModelId!.Trim();
+            sessionBody["providerID"] = providerId;
+            sessionBody["providerId"] = providerId;
+            sessionBody["modelID"] = canonicalModelId;
+            sessionBody["modelId"] = canonicalModelId;
+            Console.WriteLine($"[opencode] creating session with body.providerID/body.providerId={providerId} body.modelID/body.modelId={canonicalModelId}");
+        }
+        else if (!string.IsNullOrWhiteSpace(configuredModelId))
+        {
+            var normalized = configuredModelId.Trim();
+            sessionBody["modelID"] = normalized;
+            sessionBody["modelId"] = normalized;
+            Console.WriteLine($"[opencode] creating session with body.modelID/body.modelId={normalized}");
         }
 
-        if (lastSchemaError != null)
+        if (sessionBody.Count > 0)
         {
-            throw lastSchemaError;
+            body["body"] = sessionBody;
         }
 
-        throw new InvalidOperationException("Failed to post message with model fallbacks.");
+        return body;
+    }
+
+    private static bool TryParseProviderAndModel(string? configuredModelId, out string providerId, out string modelId)
+    {
+        providerId = string.Empty;
+        modelId = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(configuredModelId))
+        {
+            return false;
+        }
+
+        var normalized = configuredModelId.Trim();
+        var slash = normalized.IndexOf('/');
+        if (slash <= 0 || slash >= normalized.Length - 1)
+        {
+            return false;
+        }
+
+        providerId = normalized[..slash].Trim();
+        modelId = normalized[(slash + 1)..].Trim();
+        return !string.IsNullOrWhiteSpace(providerId) && !string.IsNullOrWhiteSpace(modelId);
     }
 
     private static string BuildBaseUrl(string scheme, string host, int port)
@@ -610,65 +741,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         // Not all providers expose a first-class "reasoning effort" API; use a compact instruction prefix.
         return $"[reasoning effort: {thinkingLevel.Trim()}]\n{message}";
-    }
-
-    private static Dictionary<string, object?> BuildModelPayloadObject(string modelId)
-    {
-        var trimmed = modelId.Trim();
-        string? provider = null;
-        string? model = null;
-
-        var slash = trimmed.IndexOf('/');
-        if (slash > 0 && slash < trimmed.Length - 1)
-        {
-            provider = trimmed[..slash];
-            model = trimmed[(slash + 1)..];
-        }
-
-        var payload = new Dictionary<string, object?>
-        {
-            ["id"] = trimmed,
-            ["name"] = trimmed
-        };
-
-        if (!string.IsNullOrWhiteSpace(provider))
-        {
-            payload["provider"] = provider;
-            payload["providerId"] = provider;
-        }
-
-        if (!string.IsNullOrWhiteSpace(model))
-        {
-            payload["model"] = model;
-            payload["modelId"] = model;
-        }
-
-        return payload;
-    }
-
-    private static bool IsModelSchemaError(string message)
-    {
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            return false;
-        }
-
-        var lower = message.ToLowerInvariant();
-        return lower.Contains("model")
-            && (lower.Contains("invalid_type") || lower.Contains("expected") || lower.Contains("schema"));
-    }
-
-    private static bool ShouldTryNextModelVariant(OpencodeHttpException ex, int variantIndex, int variantCount)
-    {
-        if (variantIndex >= variantCount - 1)
-        {
-            return false;
-        }
-
-        // Different Opencode/Zod builds use different validation labels; 400/422 usually means a model-shape mismatch.
-        return ex.StatusCode == HttpStatusCode.BadRequest
-            || ex.StatusCode == HttpStatusCode.UnprocessableEntity
-            || IsModelSchemaError(ex.Message);
     }
 
     private string ExtractReplyText(OpenCodeReply? reply, string? rawReply, out bool hasUsableText)
@@ -970,6 +1042,25 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return raw;
     }
 
+    private async Task<string> PatchJsonRawAsync(string path, object body, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(body, _jsonOptions);
+        using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+        using var request = new HttpRequestMessage(HttpMethod.Patch, path)
+        {
+            Content = content
+        };
+        using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+        var raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new OpencodeHttpException(response.StatusCode, path, raw);
+        }
+
+        return raw;
+    }
+
     public void Dispose()
     {
         _http.Dispose();
@@ -1168,6 +1259,10 @@ internal sealed class OpencodeProviderEntry
     public string? Id { get; set; }
     public string? Name { get; set; }
     public bool? Connected { get; set; }
+    public string? Model { get; set; }
+    public string? ModelId { get; set; }
+    public string? DefaultModel { get; set; }
+    public string? DefaultModelId { get; set; }
     public Dictionary<string, OpencodeModelEntry>? Models { get; set; }
 }
 
@@ -1194,6 +1289,11 @@ internal sealed class OpencodeOAuthAuthorizeResponse
     public string? Url { get; set; }
     public string? Method { get; set; }
     public string? Instructions { get; set; }
+}
+
+internal sealed class OpencodeRuntimeConfig
+{
+    public string? Model { get; set; }
 }
 
 internal sealed record OpencodeOAuthPendingState(

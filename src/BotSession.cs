@@ -2261,9 +2261,14 @@ internal sealed partial class BotSession : IDisposable
 
     private string BuildConversationStatusText(string conversationKey)
     {
+        var currentSessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
+
         if (!_imConversationConfigs.TryGetValue(conversationKey, out var cfg))
         {
-            return "This IM conversation is using Opencode server defaults (no overrides).";
+            return string.Join(
+                "\n",
+                "This IM conversation is using Opencode server defaults (no overrides).",
+                $"sessionId: {currentSessionId}");
         }
 
         return string.Join(
@@ -2271,7 +2276,8 @@ internal sealed partial class BotSession : IDisposable
             "Current IM AI settings:",
             $"provider: {cfg.ProviderId ?? "(default)"}",
             $"model: {cfg.ModelId ?? "(default)"}",
-            $"thinking: {cfg.ThinkingLevel ?? "(default)"}");
+            $"thinking: {cfg.ThinkingLevel ?? "(default)"}",
+            $"sessionId: {currentSessionId}");
     }
 
     private async Task HandleProvidersCommandAsync(GridClient client, UUID agentId, string from, string arg = "")
@@ -2430,11 +2436,12 @@ internal sealed partial class BotSession : IDisposable
                 throw new InvalidOperationException("model id is required, e.g. *configure model github-copilot/gpt-4.1");
             }
 
-            config.ModelId = requestedModel;
-            var slash = requestedModel.IndexOf('/');
+            var resolvedModelId = await ResolvePinnedModelIdAsync(requestedModel, CancellationToken.None).ConfigureAwait(false);
+            config.ModelId = resolvedModelId;
+            var slash = resolvedModelId.IndexOf('/');
             if (slash > 0)
             {
-                config.ProviderId = requestedModel[..slash];
+                config.ProviderId = resolvedModelId[..slash];
             }
 
             _opencodeChat.ResetConversation(conversationKey);
@@ -2452,11 +2459,12 @@ internal sealed partial class BotSession : IDisposable
 
         if (providerLookup.Contains('/'))
         {
-            config.ModelId = providerLookup;
-            var slash = providerLookup.IndexOf('/');
+            var resolvedModelId = await ResolvePinnedModelIdAsync(providerLookup, CancellationToken.None).ConfigureAwait(false);
+            config.ModelId = resolvedModelId;
+            var slash = resolvedModelId.IndexOf('/');
             if (slash > 0)
             {
-                config.ProviderId = providerLookup[..slash];
+                config.ProviderId = resolvedModelId[..slash];
             }
 
             _opencodeChat.ResetConversation(conversationKey);
@@ -2488,7 +2496,9 @@ internal sealed partial class BotSession : IDisposable
             .FirstOrDefault(m => m.Id.EndsWith("-free", StringComparison.OrdinalIgnoreCase))
             ?? providerModels.FirstOrDefault();
 
-        config.ModelId = selectedModel?.Id;
+        config.ModelId = selectedModel == null
+            ? null
+            : BuildCanonicalModelId(selectedModel.Id, selectedModel.Provider, matchedProvider.Id);
         _opencodeChat.ResetConversation(conversationKey);
 
         if (selectedModel == null)
@@ -2656,6 +2666,68 @@ internal sealed partial class BotSession : IDisposable
     private static string NormalizeLooseQuery(string value)
     {
         return value.Trim().TrimEnd('.', ',', ';', ':');
+    }
+
+    private async Task<string> ResolvePinnedModelIdAsync(string requestedModel, CancellationToken cancellationToken)
+    {
+        var normalized = NormalizeLooseQuery(requestedModel);
+        var slash = normalized.IndexOf('/');
+        var providerHint = slash > 0 ? normalized[..slash] : null;
+
+        var models = await _opencodeChat!.ListModelsAsync(providerHint, cancellationToken).ConfigureAwait(false);
+        if (models.Count == 0)
+        {
+            throw new InvalidOperationException(
+                providerHint == null
+                    ? "No models are currently reported by Opencode. Try *models."
+                    : $"Provider '{providerHint}' returned no models. Try *providers configured and *models {providerHint}.");
+        }
+
+        var matched = models.FirstOrDefault(m => ModelIdMatchesRequested(m, normalized, providerHint));
+        if (matched == null)
+        {
+            var suggested = string.Join(", ",
+                models.Take(5).Select(m => BuildCanonicalModelId(m.Id, m.Provider, providerHint)));
+            var scopeHint = providerHint == null ? string.Empty : $" for provider '{providerHint}'";
+            var modelsHint = providerHint == null ? "*models" : $"*models {providerHint}";
+            var suggestionHint = string.IsNullOrWhiteSpace(suggested) ? string.Empty : $" Example IDs: {suggested}";
+            throw new InvalidOperationException($"Model '{normalized}' is not available{scopeHint}. Try {modelsHint}.{suggestionHint}");
+        }
+
+        return BuildCanonicalModelId(matched.Id, matched.Provider, providerHint);
+    }
+
+    private static bool ModelIdMatchesRequested(OpencodeModelSummary model, string requestedModel, string? providerHint)
+    {
+        var canonical = BuildCanonicalModelId(model.Id, model.Provider, providerHint);
+        if (canonical.Equals(requestedModel, StringComparison.OrdinalIgnoreCase)
+            || model.Id.Equals(requestedModel, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var slash = canonical.IndexOf('/');
+        if (slash > 0 && slash < canonical.Length - 1)
+        {
+            var leaf = canonical[(slash + 1)..];
+            return leaf.Equals(requestedModel, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
+    }
+
+    private static string BuildCanonicalModelId(string modelId, string? providerId, string? providerHint)
+    {
+        var trimmedModel = modelId.Trim();
+        if (trimmedModel.Contains('/'))
+        {
+            return trimmedModel;
+        }
+
+        var provider = !string.IsNullOrWhiteSpace(providerId)
+            ? providerId.Trim()
+            : providerHint;
+        return string.IsNullOrWhiteSpace(provider) ? trimmedModel : $"{provider}/{trimmedModel}";
     }
 
     private static string SanitizeImLogText(string text)
