@@ -11,6 +11,7 @@ internal interface IOpencodeChatClient
 {
     Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken);
     void ResetConversation(string conversationKey);
+    void SetConversationSessionId(string conversationKey, string? sessionId);
     string? GetConversationSessionId(string conversationKey);
     Task<IReadOnlyList<OpencodeProviderSummary>> ListProvidersAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeProviderSummary>> ListAvailableProvidersAsync(CancellationToken cancellationToken);
@@ -19,12 +20,36 @@ internal interface IOpencodeChatClient
     Task<OpencodeOAuthStartResult> StartProviderOAuthAsync(string providerId, int methodIndex, IReadOnlyDictionary<string, string>? inputs, CancellationToken cancellationToken);
     Task CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeModelSummary>> ListModelsAsync(string? providerId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<OpencodeSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken);
+    Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, CancellationToken cancellationToken);
+    Task<IReadOnlyDictionary<string, string>> GetSessionStatusAsync(CancellationToken cancellationToken);
+    Task<string> GetSessionDetailsJsonAsync(string sessionId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<OpencodeSessionSummary>> GetSessionChildrenAsync(string sessionId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<OpencodePendingPermission>> ListPendingPermissionsAsync(string sessionId, CancellationToken cancellationToken);
+    Task<bool> RespondToPermissionAsync(string sessionId, string permissionId, string response, bool remember, CancellationToken cancellationToken);
+    Task<IReadOnlyList<OpencodePendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken);
+    Task<bool> ReplyToQuestionAsync(string sessionId, string questionId, IReadOnlyList<string> answers, CancellationToken cancellationToken);
+    Task<bool> RejectQuestionAsync(string sessionId, string questionId, CancellationToken cancellationToken);
+    Task<OpencodeSessionSummary> UpdateSessionTitleAsync(string sessionId, string title, CancellationToken cancellationToken);
+    Task<bool> DeleteSessionAsync(string sessionId, CancellationToken cancellationToken);
+    Task<bool> SummarizeSessionAsync(string sessionId, string? providerId, string? modelId, CancellationToken cancellationToken);
+    Task<bool> AbortSessionAsync(string sessionId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<OpencodeProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken);
+    Task<OpencodeProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken);
 }
 
-internal sealed record OpencodeChatReply(string Text, bool IsConfirmationPrompt);
+internal sealed record OpencodeChatReply(
+    string Text,
+    bool IsConfirmationPrompt,
+    IReadOnlyList<OpencodePendingPermission>? PendingPermissions = null,
+    IReadOnlyList<OpencodePendingQuestion>? PendingQuestions = null);
 internal sealed record OpencodeSendOptions(string? ModelId, string? ThinkingLevel);
 internal sealed record OpencodeProviderSummary(string Id, string Name, bool? Connected);
 internal sealed record OpencodeModelSummary(string Id, string Name, string? Provider);
+internal sealed record OpencodeSessionSummary(string Id, string Title, string? Status, string? ProjectId);
+internal sealed record OpencodeProjectSummary(string Id, string Name, string? Path, bool? Current);
+internal sealed record OpencodePendingPermission(string Id, string SessionId, string Title, string? Description);
+internal sealed record OpencodePendingQuestion(string Id, string SessionId, string Header, string Question, IReadOnlyList<string> Options, bool? AllowsMultiple, bool? AllowsCustom);
 internal sealed record OpencodeProviderAuthMethod(int MethodIndex, string Type, string Label);
 internal sealed record OpencodeOAuthStartResult(string Url, string? Method, string? Instructions);
 
@@ -33,6 +58,8 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private readonly HttpClient _http;
     private readonly ConcurrentDictionary<string, string> _sessionIds = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OpencodeOAuthPendingState> _oauthPendingStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _pendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _pendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _modelOverrideGate = new(1, 1);
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -163,6 +190,22 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         return _sessionIds.TryGetValue(conversationKey, out var sessionId) ? sessionId : null;
+    }
+
+    public void SetConversationSessionId(string conversationKey, string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            _sessionIds.TryRemove(conversationKey, out _);
+            return;
+        }
+
+        _sessionIds[conversationKey] = sessionId.Trim();
     }
 
     public async Task<IReadOnlyList<OpencodeProviderSummary>> ListProvidersAsync(CancellationToken cancellationToken)
@@ -416,6 +459,357 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             .ToList();
     }
 
+    public async Task<IReadOnlyList<OpencodeSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken)
+    {
+        var root = await GetJsonAsync<JsonElement>("/session", cancellationToken).ConfigureAwait(false);
+        return ParseSessionList(root);
+    }
+
+    public async Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, CancellationToken cancellationToken)
+    {
+        var body = new Dictionary<string, object?>();
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            body["title"] = title.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(parentSessionId))
+        {
+            var parentId = parentSessionId.Trim();
+            body["parentID"] = parentId;
+            body["parentId"] = parentId;
+        }
+
+        var created = await PostJsonAsync<JsonElement>("/session", body, cancellationToken).ConfigureAwait(false);
+        if (!TryBuildSessionSummary(created, null, out var summary))
+        {
+            throw new InvalidOperationException("Opencode returned an unexpected payload while creating a session.");
+        }
+
+        return summary!;
+    }
+
+    public async Task<IReadOnlyDictionary<string, string>> GetSessionStatusAsync(CancellationToken cancellationToken)
+    {
+        var response = await GetJsonAsync<Dictionary<string, JsonElement>>("/session/status", cancellationToken).ConfigureAwait(false)
+            ?? new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+
+        return response
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key))
+            .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => JsonElementToSingleLine(pair.Value),
+                StringComparer.OrdinalIgnoreCase);
+    }
+
+    public async Task<string> GetSessionDetailsJsonAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}";
+        var details = await GetJsonAsync<JsonElement>(path, cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Serialize(details, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    public async Task<IReadOnlyList<OpencodePendingPermission>> ListPendingPermissionsAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        var allPending = await GetJsonAsync<JsonElement>("/permission", cancellationToken).ConfigureAwait(false);
+        var filtered = ParsePendingPermissions(allPending)
+            .Where(p => p.SessionId.Equals(normalizedSessionId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (filtered.Count > 0)
+        {
+            _pendingPermissionsBySession[normalizedSessionId] = filtered;
+            return filtered;
+        }
+
+        if (_pendingPermissionsBySession.TryGetValue(normalizedSessionId, out var cached))
+        {
+            return cached;
+        }
+
+        return Array.Empty<OpencodePendingPermission>();
+    }
+
+    public async Task<bool> RespondToPermissionAsync(string sessionId, string permissionId, string response, bool remember, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        if (string.IsNullOrWhiteSpace(permissionId))
+        {
+            throw new ArgumentException("permissionId is required.", nameof(permissionId));
+        }
+
+        if (string.IsNullOrWhiteSpace(response))
+        {
+            throw new ArgumentException("response is required.", nameof(response));
+        }
+
+        var sessionKey = sessionId.Trim();
+        var permissionKey = permissionId.Trim();
+        var normalizedResponse = response.Trim().ToLowerInvariant();
+        var payloads = BuildPermissionResponsePayloads(normalizedResponse, remember);
+        Exception? lastClientError = null;
+        var path = $"/permission/{Uri.EscapeDataString(permissionKey)}/reply";
+        foreach (var payload in payloads)
+        {
+            try
+            {
+                var raw = await PostJsonRawAsync(path, payload, cancellationToken).ConfigureAwait(false);
+                var accepted = TryInterpretBooleanResponse(raw, true);
+                if (accepted && _pendingPermissionsBySession.TryGetValue(sessionKey, out var existing))
+                {
+                    var remaining = existing
+                        .Where(p => !p.Id.Equals(permissionKey, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                    if (remaining.Count == 0)
+                    {
+                        _pendingPermissionsBySession.TryRemove(sessionKey, out _);
+                    }
+                    else
+                    {
+                        _pendingPermissionsBySession[sessionKey] = remaining;
+                    }
+                }
+
+                return accepted;
+            }
+            catch (OpencodeHttpException ex) when ((int)ex.StatusCode >= 400 && (int)ex.StatusCode < 500)
+            {
+                lastClientError = ex;
+            }
+        }
+
+        throw lastClientError ?? new InvalidOperationException("Permission response request failed.");
+    }
+
+    public async Task<IReadOnlyList<OpencodePendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        var allPending = await GetJsonAsync<JsonElement>("/question", cancellationToken).ConfigureAwait(false);
+        var filtered = ParsePendingQuestions(allPending)
+            .Where(q => q.SessionId.Equals(normalizedSessionId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (filtered.Count > 0)
+        {
+            _pendingQuestionsBySession[normalizedSessionId] = filtered;
+            return filtered;
+        }
+
+        if (_pendingQuestionsBySession.TryGetValue(normalizedSessionId, out var cached))
+        {
+            return cached;
+        }
+
+        return Array.Empty<OpencodePendingQuestion>();
+    }
+
+    public async Task<bool> ReplyToQuestionAsync(string sessionId, string questionId, IReadOnlyList<string> answers, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        if (string.IsNullOrWhiteSpace(questionId))
+        {
+            throw new ArgumentException("questionId is required.", nameof(questionId));
+        }
+
+        var questionKey = questionId.Trim();
+        var path = $"/question/{Uri.EscapeDataString(questionKey)}/reply";
+        var payload = new
+        {
+            answers = new[]
+            {
+                (answers ?? Array.Empty<string>()).Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => a.Trim()).ToArray()
+            }
+        };
+
+        var raw = await PostJsonRawAsync(path, payload, cancellationToken).ConfigureAwait(false);
+        var ok = TryInterpretBooleanResponse(raw, true);
+        if (ok)
+        {
+            var sessionKey = sessionId.Trim();
+            if (_pendingQuestionsBySession.TryGetValue(sessionKey, out var existing))
+            {
+                var remaining = existing
+                    .Where(q => !q.Id.Equals(questionKey, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (remaining.Count == 0)
+                {
+                    _pendingQuestionsBySession.TryRemove(sessionKey, out _);
+                }
+                else
+                {
+                    _pendingQuestionsBySession[sessionKey] = remaining;
+                }
+            }
+        }
+
+        return ok;
+    }
+
+    public async Task<bool> RejectQuestionAsync(string sessionId, string questionId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        if (string.IsNullOrWhiteSpace(questionId))
+        {
+            throw new ArgumentException("questionId is required.", nameof(questionId));
+        }
+
+        var questionKey = questionId.Trim();
+        var path = $"/question/{Uri.EscapeDataString(questionKey)}/reject";
+        var raw = await PostJsonRawAsync(path, new { }, cancellationToken).ConfigureAwait(false);
+        var ok = TryInterpretBooleanResponse(raw, true);
+        if (ok)
+        {
+            var sessionKey = sessionId.Trim();
+            if (_pendingQuestionsBySession.TryGetValue(sessionKey, out var existing))
+            {
+                var remaining = existing
+                    .Where(q => !q.Id.Equals(questionKey, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (remaining.Count == 0)
+                {
+                    _pendingQuestionsBySession.TryRemove(sessionKey, out _);
+                }
+                else
+                {
+                    _pendingQuestionsBySession[sessionKey] = remaining;
+                }
+            }
+        }
+
+        return ok;
+    }
+
+    public async Task<IReadOnlyList<OpencodeSessionSummary>> GetSessionChildrenAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}/children";
+        var root = await GetJsonAsync<JsonElement>(path, cancellationToken).ConfigureAwait(false);
+        return ParseSessionList(root);
+    }
+
+    public async Task<OpencodeSessionSummary> UpdateSessionTitleAsync(string sessionId, string title, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            throw new ArgumentException("title is required.", nameof(title));
+        }
+
+        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}";
+        var raw = await PatchJsonRawAsync(path, new { title = title.Trim() }, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            throw new InvalidOperationException("Opencode returned an empty response while updating the session title.");
+        }
+
+        var updated = JsonSerializer.Deserialize<JsonElement>(raw, _jsonOptions);
+        if (!TryBuildSessionSummary(updated, sessionId.Trim(), out var summary))
+        {
+            throw new InvalidOperationException("Opencode returned an unexpected payload while updating the session title.");
+        }
+
+        return summary!;
+    }
+
+    public async Task<bool> DeleteSessionAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}";
+        var raw = await DeleteRawAsync(path, cancellationToken).ConfigureAwait(false);
+        return TryInterpretBooleanResponse(raw, true);
+    }
+
+    public async Task<bool> SummarizeSessionAsync(string sessionId, string? providerId, string? modelId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        var body = new Dictionary<string, object?>();
+        if (!string.IsNullOrWhiteSpace(providerId))
+        {
+            var provider = providerId.Trim();
+            body["providerID"] = provider;
+            body["providerId"] = provider;
+        }
+
+        if (!string.IsNullOrWhiteSpace(modelId))
+        {
+            var model = modelId.Trim();
+            body["modelID"] = model;
+            body["modelId"] = model;
+        }
+
+        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}/summarize";
+        var raw = await PostJsonRawAsync(path, body, cancellationToken).ConfigureAwait(false);
+        return TryInterpretBooleanResponse(raw, true);
+    }
+
+    public async Task<bool> AbortSessionAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("sessionId is required.", nameof(sessionId));
+        }
+
+        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}/abort";
+        var raw = await PostJsonRawAsync(path, new { }, cancellationToken).ConfigureAwait(false);
+        return TryInterpretBooleanResponse(raw, true);
+    }
+
+    public async Task<IReadOnlyList<OpencodeProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken)
+    {
+        var root = await GetJsonAsync<JsonElement>("/project", cancellationToken).ConfigureAwait(false);
+        return ParseProjectList(root);
+    }
+
+    public async Task<OpencodeProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken)
+    {
+        var root = await GetJsonAsync<JsonElement>("/project/current", cancellationToken).ConfigureAwait(false);
+        return TryBuildProjectSummary(root, null, out var project) ? project : null;
+    }
+
     private static IEnumerable<string> EnumerateProviderDefaultModelIds(OpencodeProviderEntry provider)
     {
         var candidates = new[]
@@ -433,6 +827,198 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 yield return value;
             }
         }
+    }
+
+    private static IReadOnlyList<OpencodeSessionSummary> ParseSessionList(JsonElement root)
+    {
+        var list = new List<OpencodeSessionSummary>();
+        if (root.ValueKind == JsonValueKind.Undefined || root.ValueKind == JsonValueKind.Null)
+        {
+            return list;
+        }
+
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in root.EnumerateArray())
+            {
+                if (TryBuildSessionSummary(entry, null, out var session))
+                {
+                    list.Add(session!);
+                }
+            }
+
+            return list
+                .OrderBy(s => s.Title, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(s => s.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return list;
+        }
+
+        if (TryGetArrayPropertyAny(root, out var wrappedArray, "all", "sessions", "data", "items"))
+        {
+            return ParseSessionList(wrappedArray);
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (TryBuildSessionSummary(property.Value, property.Name, out var session))
+            {
+                list.Add(session!);
+            }
+        }
+
+        return list
+            .OrderBy(s => s.Title, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(s => s.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool TryBuildSessionSummary(JsonElement element, string? fallbackId, out OpencodeSessionSummary? summary)
+    {
+        summary = null;
+        if (element.ValueKind == JsonValueKind.Undefined || element.ValueKind == JsonValueKind.Null)
+        {
+            return false;
+        }
+
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            var rawId = element.GetString();
+            if (string.IsNullOrWhiteSpace(rawId))
+            {
+                return false;
+            }
+
+            summary = new OpencodeSessionSummary(rawId.Trim(), rawId.Trim(), null, null);
+            return true;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var id = TryGetStringPropertyAny(element, out var parsedId, "id", "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedId)
+            ? parsedId!.Trim()
+            : fallbackId?.Trim();
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return false;
+        }
+
+        var title = TryGetStringPropertyAny(element, out var parsedTitle, "title", "name") && !string.IsNullOrWhiteSpace(parsedTitle)
+            ? parsedTitle!.Trim()
+            : id;
+        var status = TryGetStringPropertyAny(element, out var parsedStatus, "status", "state") && !string.IsNullOrWhiteSpace(parsedStatus)
+            ? parsedStatus!.Trim()
+            : null;
+        var projectId = TryGetStringPropertyAny(element, out var parsedProjectId, "projectID", "projectId", "project") && !string.IsNullOrWhiteSpace(parsedProjectId)
+            ? parsedProjectId!.Trim()
+            : null;
+
+        summary = new OpencodeSessionSummary(id, title, status, projectId);
+        return true;
+    }
+
+    private static IReadOnlyList<OpencodeProjectSummary> ParseProjectList(JsonElement root)
+    {
+        var list = new List<OpencodeProjectSummary>();
+        if (root.ValueKind == JsonValueKind.Undefined || root.ValueKind == JsonValueKind.Null)
+        {
+            return list;
+        }
+
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in root.EnumerateArray())
+            {
+                if (TryBuildProjectSummary(entry, null, out var project))
+                {
+                    list.Add(project!);
+                }
+            }
+
+            return list
+                .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return list;
+        }
+
+        if (TryGetArrayPropertyAny(root, out var wrappedArray, "all", "projects", "data", "items"))
+        {
+            return ParseProjectList(wrappedArray);
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (TryBuildProjectSummary(property.Value, property.Name, out var project))
+            {
+                list.Add(project!);
+            }
+        }
+
+        return list
+            .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool TryBuildProjectSummary(JsonElement element, string? fallbackId, out OpencodeProjectSummary? summary)
+    {
+        summary = null;
+        if (element.ValueKind == JsonValueKind.Undefined || element.ValueKind == JsonValueKind.Null)
+        {
+            return false;
+        }
+
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            var rawId = element.GetString();
+            if (string.IsNullOrWhiteSpace(rawId))
+            {
+                return false;
+            }
+
+            summary = new OpencodeProjectSummary(rawId.Trim(), rawId.Trim(), null, null);
+            return true;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var id = TryGetStringPropertyAny(element, out var parsedId, "id", "projectID", "projectId") && !string.IsNullOrWhiteSpace(parsedId)
+            ? parsedId!.Trim()
+            : fallbackId?.Trim();
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return false;
+        }
+
+        var name = TryGetStringPropertyAny(element, out var parsedName, "name", "title") && !string.IsNullOrWhiteSpace(parsedName)
+            ? parsedName!.Trim()
+            : id;
+        var path = TryGetStringPropertyAny(element, out var parsedPath, "path", "root", "rootPath") && !string.IsNullOrWhiteSpace(parsedPath)
+            ? parsedPath!.Trim()
+            : null;
+        bool? current = null;
+        if (TryGetBooleanPropertyAny(element, out var parsedCurrent, "current", "isCurrent"))
+        {
+            current = parsedCurrent;
+        }
+
+        summary = new OpencodeProjectSummary(id, name, path, current);
+        return true;
     }
 
     private async Task<IReadOnlyList<OpencodeModelSummary>> TryListModelsFromEndpointAsync(string path, CancellationToken cancellationToken)
@@ -667,7 +1253,31 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         var isConfirmationPrompt = IsLikelyConfirmationPrompt(text);
-        return new OpencodeChatReply(text, isConfirmationPrompt);
+        var pendingPermissions = ParsePendingPermissions(rawReply)
+            .Where(p => p.SessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (pendingPermissions.Count > 0)
+        {
+            _pendingPermissionsBySession[sessionId] = pendingPermissions;
+        }
+        else
+        {
+            _pendingPermissionsBySession.TryRemove(sessionId, out _);
+        }
+
+        var pendingQuestions = ParsePendingQuestions(rawReply)
+            .Where(q => q.SessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (pendingQuestions.Count > 0)
+        {
+            _pendingQuestionsBySession[sessionId] = pendingQuestions;
+        }
+        else
+        {
+            _pendingQuestionsBySession.TryRemove(sessionId, out _);
+        }
+
+        return new OpencodeChatReply(text, isConfirmationPrompt, pendingPermissions, pendingQuestions);
     }
 
     private static Dictionary<string, object?> BuildSessionCreateBody(string title, string? configuredModelId)
@@ -803,6 +1413,319 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         {
             return null;
         }
+    }
+
+    private static IReadOnlyList<OpencodePendingPermission> ParsePendingPermissions(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return Array.Empty<OpencodePendingPermission>();
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            return ParsePendingPermissions(doc.RootElement);
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<OpencodePendingPermission>();
+        }
+    }
+
+    private static IReadOnlyList<OpencodePendingPermission> ParsePendingPermissions(JsonElement root)
+    {
+        var found = new List<OpencodePendingPermission>();
+        CollectPendingPermissions(root, null, found);
+        return found
+            .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(p => p.Title, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static void CollectPendingPermissions(JsonElement element, string? context, List<OpencodePendingPermission> output)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Array:
+                foreach (var child in element.EnumerateArray())
+                {
+                    CollectPendingPermissions(child, context, output);
+                }
+
+                return;
+
+            case JsonValueKind.Object:
+                if (TryBuildPendingPermission(element, context, out var permission))
+                {
+                    output.Add(permission!);
+                }
+
+                foreach (var property in element.EnumerateObject())
+                {
+                    CollectPendingPermissions(property.Value, property.Name, output);
+                }
+
+                return;
+
+            default:
+                return;
+        }
+    }
+
+    private static bool TryBuildPendingPermission(JsonElement element, string? context, out OpencodePendingPermission? permission)
+    {
+        permission = null;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var isPermissionContext = !string.IsNullOrWhiteSpace(context)
+            && context.Contains("permission", StringComparison.OrdinalIgnoreCase);
+        var hasPermissionIdField = TryGetStringPropertyAny(element, out var parsedId, "permissionID", "permissionId") && !string.IsNullOrWhiteSpace(parsedId);
+        var hasGenericId = TryGetStringProperty(element, "id", out var genericId) && !string.IsNullOrWhiteSpace(genericId);
+        if (!isPermissionContext && !hasPermissionIdField)
+        {
+            // Guard against unrelated objects that happen to have an id field.
+            var typeLooksPermission = TryGetStringProperty(element, "type", out var typeValue)
+                && !string.IsNullOrWhiteSpace(typeValue)
+                && typeValue.Contains("permission", StringComparison.OrdinalIgnoreCase);
+            if (!typeLooksPermission)
+            {
+                return false;
+            }
+        }
+
+        var id = hasPermissionIdField
+            ? parsedId!.Trim()
+            : hasGenericId
+                ? genericId!.Trim()
+                : string.Empty;
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return false;
+        }
+
+        var response = TryGetStringProperty(element, "response", out var parsedResponse) && !string.IsNullOrWhiteSpace(parsedResponse)
+            ? parsedResponse!.Trim().ToLowerInvariant()
+            : null;
+        if (response is "once" or "always" or "reject" or "allow" or "deny")
+        {
+            return false;
+        }
+
+        var title = TryGetStringPropertyAny(element, out var parsedTitle, "title", "name", "type") && !string.IsNullOrWhiteSpace(parsedTitle)
+            ? parsedTitle!.Trim()
+            : id;
+        var sessionId = TryGetStringPropertyAny(element, out var parsedSessionId, "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedSessionId)
+            ? parsedSessionId!.Trim()
+            : string.Empty;
+
+        string? description = null;
+        if (TryGetStringProperty(element, "pattern", out var parsedPattern) && !string.IsNullOrWhiteSpace(parsedPattern))
+        {
+            description = parsedPattern.Trim();
+        }
+        else if (element.TryGetProperty("pattern", out var patternArray) && patternArray.ValueKind == JsonValueKind.Array)
+        {
+            var parts = patternArray.EnumerateArray()
+                .Where(v => v.ValueKind == JsonValueKind.String)
+                .Select(v => v.GetString())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v!.Trim())
+                .ToArray();
+            if (parts.Length > 0)
+            {
+                description = string.Join(", ", parts);
+            }
+        }
+
+        permission = new OpencodePendingPermission(id, sessionId, title, description);
+        return true;
+    }
+
+    private static IReadOnlyList<OpencodePendingQuestion> ParsePendingQuestions(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return Array.Empty<OpencodePendingQuestion>();
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            return ParsePendingQuestions(doc.RootElement);
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<OpencodePendingQuestion>();
+        }
+    }
+
+    private static IReadOnlyList<OpencodePendingQuestion> ParsePendingQuestions(JsonElement root)
+    {
+        var found = new List<OpencodePendingQuestion>();
+        CollectPendingQuestions(root, found);
+        return found
+            .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(q => q.Header, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static void CollectPendingQuestions(JsonElement element, List<OpencodePendingQuestion> output)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Array:
+                foreach (var child in element.EnumerateArray())
+                {
+                    CollectPendingQuestions(child, output);
+                }
+
+                return;
+
+            case JsonValueKind.Object:
+                if (TryBuildPendingQuestion(element, out var question))
+                {
+                    output.Add(question!);
+                }
+
+                foreach (var property in element.EnumerateObject())
+                {
+                    CollectPendingQuestions(property.Value, output);
+                }
+
+                return;
+
+            default:
+                return;
+        }
+    }
+
+    private static bool TryBuildPendingQuestion(JsonElement element, out OpencodePendingQuestion? question)
+    {
+        question = null;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var hasRequestShape = TryGetStringProperty(element, "id", out var parsedId)
+            && !string.IsNullOrWhiteSpace(parsedId)
+            && (TryGetArrayPropertyAny(element, out _, "questions")
+                || TryGetStringPropertyAny(element, out _, "question", "header"));
+        if (!hasRequestShape)
+        {
+            return false;
+        }
+
+        var id = parsedId!.Trim();
+        if (!id.StartsWith("que", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var sessionId = TryGetStringPropertyAny(element, out var parsedSessionId, "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedSessionId)
+            ? parsedSessionId!.Trim()
+            : string.Empty;
+
+        var header = string.Empty;
+        var prompt = string.Empty;
+        bool? multiple = null;
+        bool? custom = null;
+        var options = new List<string>();
+
+        if (element.TryGetProperty("questions", out var questions) && questions.ValueKind == JsonValueKind.Array)
+        {
+            var first = questions.EnumerateArray().FirstOrDefault();
+            if (first.ValueKind == JsonValueKind.Object)
+            {
+                header = TryGetStringProperty(first, "header", out var parsedHeader) && !string.IsNullOrWhiteSpace(parsedHeader)
+                    ? parsedHeader!.Trim()
+                    : id;
+                prompt = TryGetStringProperty(first, "question", out var parsedQuestion) && !string.IsNullOrWhiteSpace(parsedQuestion)
+                    ? parsedQuestion!.Trim()
+                    : header;
+                if (first.TryGetProperty("multiple", out var multipleElement)
+                    && multipleElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    multiple = multipleElement.GetBoolean();
+                }
+
+                if (first.TryGetProperty("custom", out var customElement)
+                    && customElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    custom = customElement.GetBoolean();
+                }
+
+                if (first.TryGetProperty("options", out var optionElements) && optionElements.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var option in optionElements.EnumerateArray())
+                    {
+                        if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
+                        {
+                            options.Add(label.Trim());
+                        }
+                    }
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            header = id;
+        }
+
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            prompt = header;
+        }
+
+        question = new OpencodePendingQuestion(id, sessionId, header, prompt, options, multiple, custom);
+        return true;
+    }
+
+    private static IReadOnlyList<Dictionary<string, object?>> BuildPermissionResponsePayloads(string normalizedResponse, bool remember)
+    {
+        var payloads = new List<Dictionary<string, object?>>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Add(string reply)
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["reply"] = reply
+            };
+            if (remember)
+            {
+                payload["message"] = "remember";
+            }
+
+            var serialized = JsonSerializer.Serialize(payload);
+            if (seen.Add(serialized))
+            {
+                payloads.Add(payload);
+            }
+        }
+
+        if (normalizedResponse is "allow" or "approve" or "accept" or "yes" or "y")
+        {
+            Add("once");
+            Add("always");
+            return payloads;
+        }
+
+        if (normalizedResponse is "reject" or "deny" or "no" or "n")
+        {
+            Add("reject");
+            return payloads;
+        }
+
+        Add(normalizedResponse);
+        return payloads;
     }
 
     private static bool TryGetEmbeddedError(string? rawReply, out EmbeddedOpencodeError error)
@@ -961,6 +1884,103 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return true;
     }
 
+    private static bool TryGetStringPropertyAny(JsonElement element, out string? value, params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            if (TryGetStringProperty(element, name, out value))
+            {
+                return true;
+            }
+        }
+
+        value = null;
+        return false;
+    }
+
+    private static bool TryGetArrayPropertyAny(JsonElement element, out JsonElement value, params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            if (element.ValueKind == JsonValueKind.Object
+                && element.TryGetProperty(name, out var property)
+                && property.ValueKind == JsonValueKind.Array)
+            {
+                value = property;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static bool TryGetBooleanPropertyAny(JsonElement element, out bool value, params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            if (element.ValueKind == JsonValueKind.Object
+                && element.TryGetProperty(name, out var property)
+                && property.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                value = property.GetBoolean();
+                return true;
+            }
+        }
+
+        value = false;
+        return false;
+    }
+
+    private static bool TryInterpretBooleanResponse(string? raw, bool defaultWhenEmpty)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return defaultWhenEmpty;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            if (root.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                return root.GetBoolean();
+            }
+
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                if (root.TryGetProperty("ok", out var okElement)
+                    && okElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    return okElement.GetBoolean();
+                }
+
+                if (root.TryGetProperty("success", out var successElement)
+                    && successElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    return successElement.GetBoolean();
+                }
+            }
+
+            return defaultWhenEmpty;
+        }
+        catch (JsonException)
+        {
+            return defaultWhenEmpty;
+        }
+    }
+
+    private static string JsonElementToSingleLine(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            return element.GetString() ?? string.Empty;
+        }
+
+        return element.GetRawText();
+    }
+
     private static bool IsLikelyConfirmationPrompt(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -1052,6 +2072,18 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         };
         using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
+        var raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new OpencodeHttpException(response.StatusCode, path, raw);
+        }
+
+        return raw;
+    }
+
+    private async Task<string> DeleteRawAsync(string path, CancellationToken cancellationToken)
+    {
+        using var response = await _http.DeleteAsync(path, cancellationToken).ConfigureAwait(false);
         var raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {

@@ -26,7 +26,9 @@ internal static class ConfigLoader
             OpencodePort = ParseInt(Env("OPENCODE_PORT"), 8998),
             OpencodeUsername = Env("OPENCODE_USERNAME"),
             OpencodePassword = FirstDefined("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
-            OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60)
+            OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60),
+            OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
+            OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME")
         };
 
         options.McpPort = ParseInt(Env("MCP_PORT"), 8999);
@@ -67,6 +69,8 @@ internal static class ConfigLoader
             "  --opencode-password <value>    Optional Basic auth password (env: OPENCODE_PASSWORD/OPENCODE_SERVER_PASSWORD)",
             "  --opencode-timeout-seconds <int>",
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
+            "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
+            "  --handler-last-name <value>    Optional handler last name (env: OPENCODE_HANDLER_LASTNAME)",
             string.Empty,
             "MCP HTTP options:",
             "  --mcp-transport <http|sse>     Transport (env: MCP_TRANSPORT, default: http)",
@@ -136,6 +140,12 @@ internal static class ConfigLoader
                     break;
                 case "--opencode-timeout-seconds":
                     options.OpencodeRequestTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.OpencodeRequestTimeoutSeconds);
+                    break;
+                case "--handler-first-name":
+                    options.OpencodeHandlerFirstName = RequireValue(args, ref i, arg);
+                    break;
+                case "--handler-last-name":
+                    options.OpencodeHandlerLastName = RequireValue(args, ref i, arg);
                     break;
                 case "--mcp-transport":
                     options.McpTransport = RequireValue(args, ref i, arg);

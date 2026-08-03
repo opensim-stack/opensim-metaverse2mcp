@@ -47,6 +47,8 @@ export OPENCODE_CHAT_ENABLED="true"
 export OPENCODE_SCHEME="http"
 export OPENCODE_HOST="localhost"
 export OPENCODE_PORT="8998"
+export OPENCODE_HANDLER_FIRSTNAME="Admin"
+export OPENCODE_HANDLER_LASTNAME="User"
 # optional Basic auth:
 # export OPENCODE_USERNAME="opencode"
 # export OPENCODE_PASSWORD="change-me"
@@ -103,6 +105,8 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `OPENCODE_PASSWORD` (optional Basic auth password)
 - `OPENCODE_SERVER_PASSWORD` (optional fallback alias for `OPENCODE_PASSWORD`)
 - `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `240`)
+- `OPENCODE_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
+- `OPENCODE_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
 
 Notes:
 - `MCP_TRANSPORT=sse` enables legacy SSE compatibility in the MCP HTTP transport.
@@ -184,9 +188,17 @@ The server publishes tools including:
 
 Chat notes:
 - In this stage, only avatar-to-bot IM is routed to Opencode.
+- Optional handler mode: when `OPENCODE_HANDLER_FIRSTNAME` + `OPENCODE_HANDLER_LASTNAME` are set, only that avatar may control the bot; others get a friendly deny reply.
 - IM supports "star commands" (prefixed with `*`) for live AI configuration per avatar conversation:
   - `*help`
   - `*status`
+  - `*cancel` (abort the current in-flight AI request for this IM)
+  - `*permission list` (list pending policy permission requests)
+  - `*permission allow <permission-id> [remember]` (approve a pending permission)
+  - `*permission deny <permission-id> [remember]` (reject a pending permission)
+  - `*question list` (list pending question prompts from Opencode tools)
+  - `*question answer <question-id> <text>` (answer a pending question)
+  - `*question reject <question-id>` (reject a pending question)
   - `*providers` (all available providers from Opencode)
   - `*providers configured` (only configured/active providers)
   - `*models [provider]` (live list from Opencode server)
@@ -194,10 +206,32 @@ Chat notes:
   - `*auth <provider-id> api <api-key>` (store provider API key over Opencode HTTP API)
   - `*auth <provider-id> oauth [method-index]` (start OAuth/device flow)
   - `*auth <provider-id> oauth-complete [method-index] [code]` (complete OAuth flow)
+  - `*session list` (list all Opencode sessions)
+  - `*session create [title] [--no-select]` (create a new Opencode session; selected for this IM by default)
+  - `*session use <session-id>` / `*session select <session-id>` (switch this IM to an existing session)
+  - `*session status` (show session status map for all sessions)
+  - `*session current` (show the active session id mapped to this IM)
+  - `*session details <session-id|current>` (show full session JSON)
+  - `*session children <session-id|current>` (list child sessions)
+  - `*session patch-title <session-id|current> <new-title>` (rename a session)
+  - `*session summarize <session-id|current> [provider/model]` (request session summary)
+  - `*session abort <session-id|current>` (abort a running session)
+  - `*session delete <session-id|current> [--force]` (delete a session; confirmation required)
+  - `*session delete --all [--force]` (delete all sessions; confirmation required)
+  - `*projects` (list all Opencode projects)
+  - `*project current` (show the current Opencode project)
   - `*configure <provider-name-or-id>` (select provider and auto-pick a model)
   - `*configure model <provider/model-id>`
   - `*configure thinking <low|medium|high|off>`
   - `*configure reset` / `*reset`
+- Session switch behavior: `*session create` selects the created session for this IM by default; pass `--no-select` to keep the previous active session.
+- Session switch validation: `*session use`/`*session select` validates the target session exists before switching.
+- Busy-request behavior: if the bot is still processing a previous request, it will prompt you to use `*cancel`.
+- Permission-request behavior: policy prompts can be answered with `yes`/`no` (mapped to latest pending request), or explicitly with `*permission allow|deny <permission-id> [remember]`.
+- Question-request behavior: when Opencode emits question prompts (`question.asked`), the bot now auto-shows a friendly prompt in IM, and plain text replies are treated as answers when possible. You can still use `*question list`, `*question answer`, or `*question reject`.
+- Delete confirmation behavior: run `*session delete <id>` first to get a safety prompt, then rerun with `--force`.
+- Bulk delete confirmation behavior: run `*session delete --all` first to get a safety prompt, then rerun with `--force`.
+- Inventory offers from the configured handler are always accepted (policy rules are bypassed for handler offers).
 - TODO: add local chat and group chat routing.
 - TODO: add a security policy to control which users the AI may respond to.
 

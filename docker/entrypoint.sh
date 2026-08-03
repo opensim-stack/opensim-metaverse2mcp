@@ -28,7 +28,9 @@ set -- \
   --opencode-scheme "${OPENCODE_SCHEME:-http}" \
   --opencode-host "${OPENCODE_HOST:-opensim-opencode}" \
   --opencode-port "${OPENCODE_PORT:-8998}" \
-  --opencode-timeout-seconds "${OPENCODE_REQUEST_TIMEOUT_SECONDS:-60}"
+  --opencode-timeout-seconds "${OPENCODE_REQUEST_TIMEOUT_SECONDS:-60}" \
+  --handler-first-name "${OPENCODE_HANDLER_FIRSTNAME:-}" \
+  --handler-last-name "${OPENCODE_HANDLER_LASTNAME:-}"
 
 if [ -n "${OPENCODE_USERNAME:-}" ]; then
   set -- "$@" --opencode-username "${OPENCODE_USERNAME}"

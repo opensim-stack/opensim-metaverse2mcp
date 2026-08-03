@@ -14,6 +14,10 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentImEvents = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _imConversationLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ImConversationConfig> _imConversationConfigs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _latestPendingPermissionByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _announcedPendingQuestionByConversation = new(StringComparer.Ordinal);
+    private readonly string? _handlerFullName;
 
     private GridClient? _client;
     private bool _connected;
@@ -22,9 +26,15 @@ internal sealed partial class BotSession : IDisposable
     public BotSession(AppOptions options)
     {
         _options = options;
+        _handlerFullName = BuildHandlerFullName(_options.OpencodeHandlerFirstName, _options.OpencodeHandlerLastName);
         if (_options.OpencodeChatEnabled)
         {
             _opencodeChat = new OpencodeChatClient(_options);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_handlerFullName))
+        {
+            Console.WriteLine($"[bot] handler restriction enabled: {_handlerFullName}");
         }
     }
 
@@ -2040,6 +2050,21 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
+        if (IsHandlerRestricted() && !IsHandlerAvatar(from))
+        {
+            Console.WriteLine($"[im] denied non-handler IM from {from}. Handler is '{_handlerFullName}'.");
+            try
+            {
+                client.Self.InstantMessage(e.IM.FromAgentID, $"Hi! I can currently only accept instructions from my handler ({_handlerFullName}).");
+            }
+            catch
+            {
+                // Ignore failures while trying to send access-denied feedback.
+            }
+
+            return;
+        }
+
         var conversationKey = $"im:{e.IM.FromAgentID}";
 
         _ = Task.Run(async () =>
@@ -2048,9 +2073,66 @@ internal sealed partial class BotSession : IDisposable
             if (!await gate.WaitAsync(0).ConfigureAwait(false))
             {
                 Console.WriteLine($"[im] skipping while previous request is still in flight for {from} ({conversationKey}).");
+                if (text.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
+                    || text.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
+                    || text.StartsWith("*question", StringComparison.OrdinalIgnoreCase))
+                {
+                    var handledBusyCommand = await TryHandleStarCommandAsync(client, e.IM.FromAgentID, from, conversationKey, text).ConfigureAwait(false);
+                    if (handledBusyCommand)
+                    {
+                        return;
+                    }
+                }
+
+                var handledBusyQuestion = await TryHandlePendingQuestionBeforeRoutingAsync(
+                    client,
+                    e.IM.FromAgentID,
+                    from,
+                    conversationKey,
+                    text).ConfigureAwait(false);
+                if (handledBusyQuestion)
+                {
+                    return;
+                }
+
+                if (TryParseSimplePermissionResponse(text, out var busyResponse, out var busyRemember))
+                {
+                    var handledBusyResponse = await TryHandleImplicitPermissionResponseAsync(
+                        client,
+                        e.IM.FromAgentID,
+                        from,
+                        conversationKey,
+                        busyResponse,
+                        busyRemember).ConfigureAwait(false);
+                    if (handledBusyResponse)
+                    {
+                        return;
+                    }
+                }
+
+                if (TryParseSimpleQuestionResponse(text, out var busyQuestionResponse))
+                {
+                    var handledQuestion = await TryHandleImplicitQuestionResponseAsync(
+                        client,
+                        e.IM.FromAgentID,
+                        from,
+                        conversationKey,
+                        busyQuestionResponse).ConfigureAwait(false);
+                    if (handledQuestion)
+                    {
+                        return;
+                    }
+                }
+
+                if (text.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase))
+                {
+                    await HandleCancelCommandAsync(client, e.IM.FromAgentID, from, conversationKey).ConfigureAwait(false);
+                    return;
+                }
+
                 try
                 {
-                    client.Self.InstantMessage(e.IM.FromAgentID, "I am still working on your previous request. Please wait a moment and try again.");
+                    client.Self.InstantMessage(e.IM.FromAgentID, "I am still working on your previous request. You can send *cancel to abort, *permission list, or *question list while waiting.");
                 }
                 catch
                 {
@@ -2078,7 +2160,55 @@ internal sealed partial class BotSession : IDisposable
                     }
                 }
 
+                var handledQuestion = await TryHandlePendingQuestionBeforeRoutingAsync(
+                    client,
+                    e.IM.FromAgentID,
+                    from,
+                    conversationKey,
+                    text).ConfigureAwait(false);
+                if (handledQuestion)
+                {
+                    return;
+                }
+
+                if (TryParseSimplePermissionResponse(text, out var permissionResponse, out var rememberPermission))
+                {
+                    var handledPermission = await TryHandleImplicitPermissionResponseAsync(
+                        client,
+                        e.IM.FromAgentID,
+                        from,
+                        conversationKey,
+                        permissionResponse,
+                        rememberPermission).ConfigureAwait(false);
+                    if (handledPermission)
+                    {
+                        return;
+                    }
+                }
+
+                if (TryParseSimpleQuestionResponse(text, out var questionResponse))
+                {
+                    var handledQuestionReply = await TryHandleImplicitQuestionResponseAsync(
+                        client,
+                        e.IM.FromAgentID,
+                        from,
+                        conversationKey,
+                        questionResponse).ConfigureAwait(false);
+                    if (handledQuestionReply)
+                    {
+                        return;
+                    }
+                }
+
                 var sendOptions = BuildSendOptions(conversationKey);
+                using var inFlightQuestionWatchCts = new CancellationTokenSource();
+                var inFlightQuestionWatchTask = Task.Run(() =>
+                    NotifyPendingQuestionDuringInFlightRequestAsync(
+                        client,
+                        e.IM.FromAgentID,
+                        from,
+                        conversationKey,
+                        inFlightQuestionWatchCts.Token));
 
                 // TODO(security): enforce who the AI is allowed to talk to (allowlist, roles, or parcel/group checks).
                 Console.WriteLine($"[im] routing to opencode: from={from} conversation={conversationKey} textLength={text.Length} model={(sendOptions?.ModelId ?? "(default)")}");
@@ -2092,14 +2222,85 @@ internal sealed partial class BotSession : IDisposable
                 Console.WriteLine($"[im] opencode reply received in {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey} replyLength={reply.Text.Length}");
 
                 var responseText = reply.IsConfirmationPrompt
-                    ? reply.Text + "\n\nReply with yes or no to continue."
+                    ? reply.Text + "\n\nReply with yes or no to continue. If this is a policy request, you can also use *permission list and *permission allow|deny <permission-id>."
                     : reply.Text;
+
+                if (reply.PendingPermissions != null && reply.PendingPermissions.Count > 0)
+                {
+                    var latestPermission = reply.PendingPermissions
+                        .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Id));
+                    if (latestPermission != null)
+                    {
+                        _latestPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                    }
+
+                    var permissionLines = reply.PendingPermissions
+                        .Take(5)
+                        .Select(p => string.IsNullOrWhiteSpace(p.Description)
+                            ? $"- {p.Title} ({p.Id})"
+                            : $"- {p.Title} ({p.Id}) [{p.Description}]")
+                        .ToList();
+                    permissionLines.Insert(0, "Pending permission request(s):");
+                    permissionLines.Add("Use *permission allow <permission-id> [remember] or *permission deny <permission-id> [remember].");
+                    responseText += "\n\n" + string.Join("\n", permissionLines);
+                }
+
+                if (reply.PendingQuestions != null && reply.PendingQuestions.Count > 0)
+                {
+                    var latestQuestion = reply.PendingQuestions
+                        .FirstOrDefault(q => !string.IsNullOrWhiteSpace(q.Id));
+                    if (latestQuestion != null)
+                    {
+                        _latestPendingQuestionByConversation[conversationKey] = latestQuestion.Id;
+                        _announcedPendingQuestionByConversation[conversationKey] = latestQuestion.Id;
+                    }
+
+                    var questionLines = reply.PendingQuestions
+                        .Take(3)
+                        .Select(q =>
+                        {
+                            var optionText = q.Options.Count == 0 ? string.Empty : $" options: {string.Join(", ", q.Options)}";
+                            return $"- {q.Header} ({q.Id}): {q.Question}{optionText}";
+                        })
+                        .ToList();
+                    questionLines.Insert(0, "Pending question request(s):");
+                    questionLines.Add("Use *question answer <question-id> <text> or *question reject <question-id>.");
+                    responseText += "\n\n" + string.Join("\n", questionLines);
+                }
+                else
+                {
+                    // Some prompts are emitted asynchronously after the initial message response.
+                    var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                    if (!string.IsNullOrWhiteSpace(currentSessionId))
+                    {
+                        var polledQuestions = await _opencodeChat.ListPendingQuestionsAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
+                        if (polledQuestions.Count > 0)
+                        {
+                            _latestPendingQuestionByConversation[conversationKey] = polledQuestions[0].Id;
+                            _announcedPendingQuestionByConversation[conversationKey] = polledQuestions[0].Id;
+                            responseText += "\n\n" + BuildFriendlyQuestionPrompt(polledQuestions[0]);
+                        }
+                    }
+                }
 
                 foreach (var chunk in SplitForInstantMessage(responseText, 900))
                 {
                     client.Self.InstantMessage(e.IM.FromAgentID, chunk);
                     Console.WriteLine($"[im] -> {from}: {chunk}");
                 }
+
+                inFlightQuestionWatchCts.Cancel();
+                try
+                {
+                    await inFlightQuestionWatchTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Ignore watcher cancellation or transient polling errors.
+                }
+
+                // Some question prompts can arrive slightly after the first reply payload.
+                _ = Task.Run(() => NotifyPendingQuestionIfAppearsAsync(client, e.IM.FromAgentID, from, conversationKey));
             }
             catch (OperationCanceledException ex) when (IsLikelyBackendTimeout(ex))
             {
@@ -2214,8 +2415,19 @@ internal sealed partial class BotSession : IDisposable
                     _opencodeChat?.ResetConversation(conversationKey);
                     SendImText(client, agentId, from, "Conversation AI settings reset for this IM. Using server defaults.");
                     return true;
+                case "cancel":
+                    await HandleCancelCommandAsync(client, agentId, from, conversationKey).ConfigureAwait(false);
+                    return true;
                 case "providers":
                     await HandleProvidersCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    return true;
+                case "permission":
+                case "permissions":
+                    await HandlePermissionCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
+                    return true;
+                case "question":
+                case "questions":
+                    await HandleQuestionCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
                 case "models":
                     await HandleModelsCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
@@ -2225,6 +2437,14 @@ internal sealed partial class BotSession : IDisposable
                     return true;
                 case "auth":
                     await HandleAuthCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    return true;
+                case "session":
+                case "sessions":
+                    await HandleSessionCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
+                    return true;
+                case "project":
+                case "projects":
+                    await HandleProjectCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
                     return true;
                 default:
                     SendImText(client, agentId, from, $"Unknown command '*{command}'. Try *help.");
@@ -2245,12 +2465,32 @@ internal sealed partial class BotSession : IDisposable
             "Star commands:",
             "*help - Show this help",
             "*status - Show active AI settings for this IM",
+            "*cancel - Abort the current in-flight AI request for this IM",
+            "*permission list - List pending Opencode permission requests",
+            "*permission allow <permission-id> [remember] - Approve a permission request",
+            "*permission deny <permission-id> [remember] - Reject a permission request",
+            "*question list - List pending Opencode question requests",
+            "*question answer <question-id> <text> - Answer a pending question",
+            "*question reject <question-id> - Reject a pending question",
             "*providers [configured] - List providers from the live Opencode server",
             "*models [provider] - List models (optionally filtered by provider)",
             "*auth methods [provider] - List provider auth methods",
             "*auth <provider-id> api <api-key> - Save API key for a provider",
             "*auth <provider-id> oauth [method-index] - Start OAuth/device flow",
             "*auth <provider-id> oauth-complete [method-index] [code] - Complete OAuth flow",
+            "*session list - List all Opencode sessions",
+            "*session create [title] [--no-select] - Create a new Opencode session",
+            "*session use <session-id> - Set the active session for this IM",
+            "*session status - Show status for all sessions",
+            "*session details <session-id|current> - Get session details",
+            "*session children <session-id|current> - List child sessions",
+            "*session patch-title <session-id|current> <new-title> - Rename a session",
+            "*session delete <session-id|current> [--force] - Delete a session (confirmation required)",
+            "*session delete --all [--force] - Delete all sessions (confirmation required)",
+            "*session summarize <session-id|current> [provider/model] - Summarize a session",
+            "*session abort <session-id|current> - Abort a running session",
+            "*projects - List all Opencode projects",
+            "*project current - Show current Opencode project",
             "*configure <provider-name-or-id> - Set provider and auto-pick a model",
             "*configure provider <provider-name-or-id> - Same as above",
             "*configure model <provider/model-id> - Pin an exact model for this IM",
@@ -2339,6 +2579,501 @@ internal sealed partial class BotSession : IDisposable
         }
 
         SendImText(client, agentId, from, string.Join("\n", lines));
+    }
+
+    private async Task HandleCancelCommandAsync(GridClient client, UUID agentId, string from, string conversationKey)
+    {
+        if (_opencodeChat == null)
+        {
+            SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
+            return;
+        }
+
+        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            SendImText(client, agentId, from, "There is no active Opencode session for this IM yet, so there is nothing to cancel.");
+            return;
+        }
+
+        var ok = await _opencodeChat.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        SendImText(client, agentId, from, ok
+            ? $"Abort requested for the in-flight session: {sessionId}"
+            : $"Abort request sent for session {sessionId}, but Opencode did not return an explicit success flag.");
+    }
+
+    private async Task HandlePermissionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
+    {
+        if (_opencodeChat == null)
+        {
+            SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
+            return;
+        }
+
+        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            SendImText(client, agentId, from, "There is no active Opencode session for this IM yet.");
+            return;
+        }
+
+        var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0 || parts[0].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            var pending = await _opencodeChat.ListPendingPermissionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            if (pending.Count == 0)
+            {
+                SendImText(client, agentId, from, "No pending permission requests were reported for this session.");
+                return;
+            }
+
+            var lines = new List<string> { $"Pending permission requests ({pending.Count}):" };
+            foreach (var permission in pending.Take(12))
+            {
+                lines.Add(string.IsNullOrWhiteSpace(permission.Description)
+                    ? $"- {permission.Title} ({permission.Id})"
+                    : $"- {permission.Title} ({permission.Id}) [{permission.Description}]");
+            }
+
+            if (pending.Count > 12)
+            {
+                lines.Add($"... and {pending.Count - 12} more");
+            }
+
+            lines.Add("Use *permission allow <permission-id> [remember] or *permission deny <permission-id> [remember].");
+            _latestPendingPermissionByConversation[conversationKey] = pending[0].Id;
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return;
+        }
+
+        var action = parts[0].ToLowerInvariant();
+        if (action is not ("allow" or "deny" or "reject"))
+        {
+            SendImText(client, agentId, from, "Usage: *permission list | *permission allow <permission-id> [remember] | *permission deny <permission-id> [remember]");
+            return;
+        }
+
+        if (parts.Length < 2)
+        {
+            SendImText(client, agentId, from, $"Usage: *permission {action} <permission-id> [remember]");
+            return;
+        }
+
+        var permissionId = NormalizeLooseQuery(parts[1]);
+        var remember = parts.Skip(2).Any(p => p.Equals("remember", StringComparison.OrdinalIgnoreCase)
+            || p.Equals("always", StringComparison.OrdinalIgnoreCase)
+            || p.Equals("--remember", StringComparison.OrdinalIgnoreCase));
+
+        var response = action == "allow" ? "allow" : "reject";
+        var ok = await _opencodeChat.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
+        _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
+        SendImText(client, agentId, from, ok
+            ? $"Permission response sent: {response} ({permissionId}){(remember ? " [remembered]" : string.Empty)}"
+            : $"Permission response request was sent for {permissionId}, but Opencode did not return an explicit success flag.");
+    }
+
+    private async Task<bool> TryHandleImplicitPermissionResponseAsync(
+        GridClient client,
+        UUID agentId,
+        string from,
+        string conversationKey,
+        string response,
+        bool remember)
+    {
+        if (_opencodeChat == null)
+        {
+            return false;
+        }
+
+        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        if (!_latestPendingPermissionByConversation.TryGetValue(conversationKey, out var permissionId)
+            || string.IsNullOrWhiteSpace(permissionId))
+        {
+            var pending = await _opencodeChat.ListPendingPermissionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var latest = pending.FirstOrDefault();
+            if (latest == null)
+            {
+                return false;
+            }
+
+            permissionId = latest.Id;
+            _latestPendingPermissionByConversation[conversationKey] = permissionId;
+        }
+
+        var ok = await _opencodeChat.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
+        _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
+        SendImText(client, agentId, from, ok
+            ? $"Permission response sent: {response} ({permissionId}){(remember ? " [remembered]" : string.Empty)}"
+            : $"Permission response request was sent for {permissionId}, but Opencode did not return an explicit success flag.");
+        return true;
+    }
+
+    private async Task HandleQuestionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
+    {
+        if (_opencodeChat == null)
+        {
+            SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
+            return;
+        }
+
+        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            SendImText(client, agentId, from, "There is no active Opencode session for this IM yet.");
+            return;
+        }
+
+        var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0 || parts[0].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            var pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            if (pending.Count == 0)
+            {
+                SendImText(client, agentId, from, "No pending question requests were reported for this session.");
+                return;
+            }
+
+            var lines = new List<string> { $"Pending question requests ({pending.Count}):" };
+            foreach (var question in pending.Take(8))
+            {
+                var options = question.Options.Count == 0 ? string.Empty : $" options: {string.Join(", ", question.Options)}";
+                lines.Add($"- {question.Header} ({question.Id}): {question.Question}{options}");
+            }
+
+            if (pending.Count > 8)
+            {
+                lines.Add($"... and {pending.Count - 8} more");
+            }
+
+            lines.Add("Use *question answer <question-id> <text> or *question reject <question-id>.");
+            _latestPendingQuestionByConversation[conversationKey] = pending[0].Id;
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return;
+        }
+
+        var action = parts[0].ToLowerInvariant();
+        if (action == "reject" || action == "deny")
+        {
+            if (parts.Length < 2)
+            {
+                SendImText(client, agentId, from, "Usage: *question reject <question-id>");
+                return;
+            }
+
+            var questionId = NormalizeLooseQuery(parts[1]);
+            var ok = await _opencodeChat.RejectQuestionAsync(sessionId, questionId, CancellationToken.None).ConfigureAwait(false);
+            _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
+            SendImText(client, agentId, from, ok
+                ? $"Question rejected: {questionId}"
+                : $"Question reject request was sent for {questionId}, but Opencode did not return an explicit success flag.");
+            return;
+        }
+
+        if (action != "answer" && action != "reply")
+        {
+            SendImText(client, agentId, from, "Usage: *question list | *question answer <question-id> <text> | *question reject <question-id>");
+            return;
+        }
+
+        if (parts.Length < 3)
+        {
+            SendImText(client, agentId, from, "Usage: *question answer <question-id> <text>");
+            return;
+        }
+
+        var selectedQuestionId = NormalizeLooseQuery(parts[1]);
+        var answerText = arg[(arg.IndexOf(parts[1], StringComparison.Ordinal) + parts[1].Length)..].Trim();
+        if (string.IsNullOrWhiteSpace(answerText))
+        {
+            SendImText(client, agentId, from, "Usage: *question answer <question-id> <text>");
+            return;
+        }
+
+        var answered = await _opencodeChat.ReplyToQuestionAsync(
+            sessionId,
+            selectedQuestionId,
+            new[] { answerText },
+            CancellationToken.None).ConfigureAwait(false);
+        _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
+        SendImText(client, agentId, from, answered
+            ? $"Question answered: {selectedQuestionId}"
+            : $"Question answer request was sent for {selectedQuestionId}, but Opencode did not return an explicit success flag.");
+    }
+
+    private async Task<bool> TryHandleImplicitQuestionResponseAsync(
+        GridClient client,
+        UUID agentId,
+        string from,
+        string conversationKey,
+        string answer)
+    {
+        if (_opencodeChat == null)
+        {
+            return false;
+        }
+
+        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        if (!_latestPendingQuestionByConversation.TryGetValue(conversationKey, out var questionId)
+            || string.IsNullOrWhiteSpace(questionId))
+        {
+            var pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var latest = pending.FirstOrDefault();
+            if (latest == null)
+            {
+                return false;
+            }
+
+            questionId = latest.Id;
+            _latestPendingQuestionByConversation[conversationKey] = questionId;
+        }
+
+        var ok = await _opencodeChat.ReplyToQuestionAsync(sessionId, questionId, new[] { answer }, CancellationToken.None).ConfigureAwait(false);
+        _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
+        SendImText(client, agentId, from, ok
+            ? $"Question answered: {questionId}"
+            : $"Question answer request was sent for {questionId}, but Opencode did not return an explicit success flag.");
+        return true;
+    }
+
+    private async Task<bool> TryHandlePendingQuestionBeforeRoutingAsync(
+        GridClient client,
+        UUID agentId,
+        string from,
+        string conversationKey,
+        string text)
+    {
+        if (_opencodeChat == null || string.IsNullOrWhiteSpace(text) || text.StartsWith('*'))
+        {
+            return false;
+        }
+
+        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        if (pending.Count == 0)
+        {
+            return false;
+        }
+
+        var question = pending[0];
+        _latestPendingQuestionByConversation[conversationKey] = question.Id;
+
+        if (TryResolveQuestionAnswer(question, text, out var resolvedAnswer))
+        {
+            var ok = await _opencodeChat.ReplyToQuestionAsync(sessionId, question.Id, new[] { resolvedAnswer }, CancellationToken.None).ConfigureAwait(false);
+            _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
+            SendImText(client, agentId, from, ok
+                ? $"Got it - answered question {question.Id} with: {resolvedAnswer}"
+                : $"I tried to answer question {question.Id}, but Opencode did not return an explicit success flag.");
+            return true;
+        }
+
+        SendImText(client, agentId, from, BuildFriendlyQuestionPrompt(question));
+        return true;
+    }
+
+    private static bool TryResolveQuestionAnswer(OpencodePendingQuestion question, string text, out string answer)
+    {
+        answer = string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var raw = text.Trim();
+        var normalized = raw.ToLowerInvariant();
+        var options = question.Options ?? Array.Empty<string>();
+
+        if (options.Count > 0)
+        {
+            if (int.TryParse(normalized, out var optionIndex)
+                && optionIndex >= 1
+                && optionIndex <= options.Count)
+            {
+                answer = options[optionIndex - 1];
+                return true;
+            }
+
+            var exact = options.FirstOrDefault(o => o.Equals(raw, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(exact))
+            {
+                answer = exact;
+                return true;
+            }
+
+            if (normalized is "yes" or "y")
+            {
+                var yesOption = options.FirstOrDefault(o => o.Contains("yes", StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrWhiteSpace(yesOption))
+                {
+                    answer = yesOption;
+                    return true;
+                }
+            }
+
+            if (normalized is "no" or "n")
+            {
+                var noOption = options.FirstOrDefault(o => o.Contains("no", StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrWhiteSpace(noOption))
+                {
+                    answer = noOption;
+                    return true;
+                }
+            }
+        }
+
+        if (question.AllowsCustom != false)
+        {
+            answer = raw;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string BuildFriendlyQuestionPrompt(OpencodePendingQuestion question)
+    {
+        var lines = new List<string>
+        {
+            "I need your input before I can continue:",
+            $"{question.Header} ({question.Id})",
+            question.Question
+        };
+
+        if (question.Options.Count > 0)
+        {
+            for (var i = 0; i < question.Options.Count; i++)
+            {
+                lines.Add($"{i + 1}) {question.Options[i]}");
+            }
+        }
+
+        lines.Add(question.AllowsCustom == false
+            ? "Reply with one of the options above, or use *question reject <question-id>."
+            : "Reply in plain text (or option number), or use *question reject <question-id>.");
+        return string.Join("\n", lines);
+    }
+
+    private async Task NotifyPendingQuestionIfAppearsAsync(GridClient client, UUID agentId, string from, string conversationKey)
+    {
+        if (_opencodeChat == null)
+        {
+            return;
+        }
+
+        // Keep this short to avoid stale prompts, but long enough for async question.asked emission.
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            await Task.Delay(500).ConfigureAwait(false);
+
+            var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return;
+            }
+
+            IReadOnlyList<OpencodePendingQuestion> pending;
+            try
+            {
+                pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                return;
+            }
+
+            var question = pending.FirstOrDefault();
+            if (question == null || string.IsNullOrWhiteSpace(question.Id))
+            {
+                continue;
+            }
+
+            _latestPendingQuestionByConversation[conversationKey] = question.Id;
+            if (_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedId)
+                && announcedId.Equals(question.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            _announcedPendingQuestionByConversation[conversationKey] = question.Id;
+            var prompt = BuildFriendlyQuestionPrompt(question);
+            SendImText(client, agentId, from, prompt);
+            return;
+        }
+    }
+
+    private async Task NotifyPendingQuestionDuringInFlightRequestAsync(
+        GridClient client,
+        UUID agentId,
+        string from,
+        string conversationKey,
+        CancellationToken cancellationToken)
+    {
+        if (_opencodeChat == null)
+        {
+            return;
+        }
+
+        // Watch up to two minutes while the request is running.
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(2);
+        while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(500, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                continue;
+            }
+
+            IReadOnlyList<OpencodePendingQuestion> pending;
+            try
+            {
+                pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                continue;
+            }
+
+            var question = pending.FirstOrDefault();
+            if (question == null || string.IsNullOrWhiteSpace(question.Id))
+            {
+                continue;
+            }
+
+            _latestPendingQuestionByConversation[conversationKey] = question.Id;
+            if (_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedId)
+                && announcedId.Equals(question.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            _announcedPendingQuestionByConversation[conversationKey] = question.Id;
+            SendImText(client, agentId, from, BuildFriendlyQuestionPrompt(question));
+            return;
+        }
     }
 
     private async Task HandleModelsCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
@@ -2647,6 +3382,397 @@ internal sealed partial class BotSession : IDisposable
         SendImText(client, agentId, from, string.Join("\n", lines));
     }
 
+    private async Task HandleSessionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
+    {
+        if (_opencodeChat == null)
+        {
+            SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(arg))
+        {
+            SendImText(client, agentId, from, "Usage: *session list | *session create [title] [--no-select] | *session use <session-id> | *session status | *session current | *session details <session-id|current> | *session children <session-id|current> | *session patch-title <session-id|current> <new-title> | *session delete <session-id|current> [--force] | *session delete --all [--force] | *session summarize <session-id|current> [provider/model] | *session abort <session-id|current>");
+            return;
+        }
+
+        var parts = arg.Split(' ', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var verb = parts[0].ToLowerInvariant();
+        var tail = parts.Length > 1 ? parts[1].Trim() : string.Empty;
+
+        if (verb is "list" or "ls")
+        {
+            var sessions = await _opencodeChat.ListSessionsAsync(CancellationToken.None).ConfigureAwait(false);
+            if (sessions.Count == 0)
+            {
+                SendImText(client, agentId, from, "No sessions were reported by Opencode.");
+                return;
+            }
+
+            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var lines = new List<string> { $"Sessions ({sessions.Count}):" };
+            foreach (var session in sessions.Take(40))
+            {
+                var status = string.IsNullOrWhiteSpace(session.Status) ? "n/a" : session.Status;
+                var project = string.IsNullOrWhiteSpace(session.ProjectId) ? "n/a" : session.ProjectId;
+                var marker = !string.IsNullOrWhiteSpace(currentSessionId) && session.Id.Equals(currentSessionId, StringComparison.OrdinalIgnoreCase)
+                    ? " [current IM session]"
+                    : string.Empty;
+                lines.Add($"- {session.Title} ({session.Id}) [status: {status}, project: {project}]{marker}");
+            }
+
+            if (sessions.Count > 40)
+            {
+                lines.Add($"... and {sessions.Count - 40} more");
+            }
+
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return;
+        }
+
+        if (verb == "create")
+        {
+            var createParts = tail.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            var titleParts = new List<string>();
+            var selectCreated = true;
+            foreach (var part in createParts)
+            {
+                if (part.Equals("--no-select", StringComparison.OrdinalIgnoreCase))
+                {
+                    selectCreated = false;
+                    continue;
+                }
+
+                titleParts.Add(part);
+            }
+
+            var requestedTitle = titleParts.Count == 0 ? null : string.Join(' ', titleParts);
+            var created = await _opencodeChat.CreateSessionAsync(requestedTitle, null, CancellationToken.None).ConfigureAwait(false);
+            if (selectCreated)
+            {
+                _opencodeChat.SetConversationSessionId(conversationKey, created.Id);
+            }
+
+            var status = string.IsNullOrWhiteSpace(created.Status) ? "n/a" : created.Status;
+            var selectedSuffix = selectCreated ? " [selected for this IM]" : string.Empty;
+            SendImText(client, agentId, from, $"Created session: {created.Title} ({created.Id}) [status: {status}]{selectedSuffix}");
+            return;
+        }
+
+        if (verb is "use" or "select")
+        {
+            if (string.IsNullOrWhiteSpace(tail))
+            {
+                SendImText(client, agentId, from, "Usage: *session use <session-id>");
+                return;
+            }
+
+            var requested = tail.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)[0];
+            var sessionId = NormalizeLooseQuery(requested);
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                SendImText(client, agentId, from, "Usage: *session use <session-id>");
+                return;
+            }
+
+            _ = await _opencodeChat.GetSessionDetailsJsonAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            _opencodeChat.SetConversationSessionId(conversationKey, sessionId);
+            SendImText(client, agentId, from, $"Current IM Opencode session set to: {sessionId}");
+            return;
+        }
+
+        if (verb == "status")
+        {
+            var statuses = await _opencodeChat.GetSessionStatusAsync(CancellationToken.None).ConfigureAwait(false);
+            if (statuses.Count == 0)
+            {
+                SendImText(client, agentId, from, "No session status data was reported by Opencode.");
+                return;
+            }
+
+            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var lines = new List<string> { $"Session status ({statuses.Count}):" };
+            foreach (var entry in statuses.Take(60))
+            {
+                var marker = !string.IsNullOrWhiteSpace(currentSessionId) && entry.Key.Equals(currentSessionId, StringComparison.OrdinalIgnoreCase)
+                    ? " [current IM session]"
+                    : string.Empty;
+                lines.Add($"- {entry.Key}: {entry.Value}{marker}");
+            }
+
+            if (statuses.Count > 60)
+            {
+                lines.Add($"... and {statuses.Count - 60} more");
+            }
+
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return;
+        }
+
+        if (verb == "current")
+        {
+            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            SendImText(client, agentId, from, string.IsNullOrWhiteSpace(currentSessionId)
+                ? "This IM conversation does not have an active Opencode session yet. Send a normal message first."
+                : $"Current IM Opencode session: {currentSessionId}");
+            return;
+        }
+
+        if (verb == "details")
+        {
+            var sessionId = ResolveSessionSelector(conversationKey, tail, requireExplicit: true);
+            var details = await _opencodeChat.GetSessionDetailsJsonAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            SendImText(client, agentId, from, $"Session details for {sessionId}:\n{details}");
+            return;
+        }
+
+        if (verb == "children")
+        {
+            var sessionId = ResolveSessionSelector(conversationKey, tail, requireExplicit: false);
+            var children = await _opencodeChat.GetSessionChildrenAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            if (children.Count == 0)
+            {
+                SendImText(client, agentId, from, $"Session {sessionId} has no child sessions.");
+                return;
+            }
+
+            var lines = new List<string> { $"Child sessions for {sessionId} ({children.Count}):" };
+            foreach (var child in children.Take(40))
+            {
+                var status = string.IsNullOrWhiteSpace(child.Status) ? "n/a" : child.Status;
+                var project = string.IsNullOrWhiteSpace(child.ProjectId) ? "n/a" : child.ProjectId;
+                lines.Add($"- {child.Title} ({child.Id}) [status: {status}, project: {project}]");
+            }
+
+            if (children.Count > 40)
+            {
+                lines.Add($"... and {children.Count - 40} more");
+            }
+
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return;
+        }
+
+        if (verb == "patch-title")
+        {
+            var titleParts = tail.Split(' ', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (titleParts.Length < 2)
+            {
+                SendImText(client, agentId, from, "Usage: *session patch-title <session-id|current> <new-title>");
+                return;
+            }
+
+            var sessionId = ResolveSessionSelector(conversationKey, titleParts[0], requireExplicit: true);
+            var newTitle = titleParts[1].Trim();
+            if (string.IsNullOrWhiteSpace(newTitle))
+            {
+                SendImText(client, agentId, from, "Usage: *session patch-title <session-id|current> <new-title>");
+                return;
+            }
+
+            var updated = await _opencodeChat.UpdateSessionTitleAsync(sessionId, newTitle, CancellationToken.None).ConfigureAwait(false);
+            SendImText(client, agentId, from, $"Session renamed: {updated.Title} ({updated.Id})");
+            return;
+        }
+
+        if (verb is "delete" or "remove")
+        {
+            var deleteParts = tail.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (deleteParts.Length == 0)
+            {
+                SendImText(client, agentId, from, "Usage: *session delete <session-id|current> [--force] | *session delete --all [--force]");
+                return;
+            }
+
+            var normalizedDeleteParts = deleteParts
+                .Select(NormalizeLooseQuery)
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .ToArray();
+            var deleteAllRequested = normalizedDeleteParts.Any(p => p.Equals("--all", StringComparison.OrdinalIgnoreCase)
+                || p.Equals("all", StringComparison.OrdinalIgnoreCase));
+            if (deleteAllRequested)
+            {
+                var deleteAllConfirmed = normalizedDeleteParts.Any(p => p.Equals("--force", StringComparison.OrdinalIgnoreCase)
+                    || p.Equals("confirm", StringComparison.OrdinalIgnoreCase));
+                if (!deleteAllConfirmed)
+                {
+                    SendImText(client, agentId, from, "Deletion is destructive. To confirm deleting all sessions, run: *session delete --all --force");
+                    return;
+                }
+
+                var sessions = await _opencodeChat.ListSessionsAsync(CancellationToken.None).ConfigureAwait(false);
+                if (sessions.Count == 0)
+                {
+                    SendImText(client, agentId, from, "No sessions were reported by Opencode.");
+                    return;
+                }
+
+                var mappedCurrentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                var deletedCount = 0;
+                var failedCount = 0;
+                foreach (var session in sessions)
+                {
+                    try
+                    {
+                        _ = await _opencodeChat.DeleteSessionAsync(session.Id, CancellationToken.None).ConfigureAwait(false);
+                        deletedCount++;
+                    }
+                    catch
+                    {
+                        failedCount++;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(mappedCurrentSessionId)
+                    && sessions.Any(s => s.Id.Equals(mappedCurrentSessionId, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _opencodeChat.ResetConversation(conversationKey);
+                }
+
+                SendImText(client, agentId, from, failedCount == 0
+                    ? $"Deleted {deletedCount} session(s)."
+                    : $"Deleted {deletedCount} session(s); {failedCount} failed.");
+                return;
+            }
+
+            var sessionSelector = deleteParts[0];
+            var deleteConfirmed = normalizedDeleteParts.Skip(1).Any(p => p.Equals("--force", StringComparison.OrdinalIgnoreCase)
+                || p.Equals("confirm", StringComparison.OrdinalIgnoreCase));
+            var sessionId = ResolveSessionSelector(conversationKey, sessionSelector, requireExplicit: false);
+            if (!deleteConfirmed)
+            {
+                SendImText(client, agentId, from, $"Deletion is destructive. To confirm, run: *session delete {sessionSelector} --force");
+                return;
+            }
+
+            var deleted = await _opencodeChat.DeleteSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+
+            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            if (!string.IsNullOrWhiteSpace(currentSessionId)
+                && currentSessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
+            {
+                _opencodeChat.ResetConversation(conversationKey);
+            }
+
+            SendImText(client, agentId, from, deleted
+                ? $"Deleted session {sessionId}."
+                : $"Delete request completed for session {sessionId}, but Opencode did not return an explicit success flag.");
+            return;
+        }
+
+        if (verb is "summarize" or "summarise")
+        {
+            var partsForSummarize = tail.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            var selector = partsForSummarize.Length > 0 ? partsForSummarize[0] : "current";
+            var sessionId = ResolveSessionSelector(conversationKey, selector, requireExplicit: false);
+
+            string? providerId = null;
+            string? modelId = null;
+            if (partsForSummarize.Length > 1)
+            {
+                var requestedModel = NormalizeLooseQuery(partsForSummarize[1]);
+                if (requestedModel.Contains('/'))
+                {
+                    var slash = requestedModel.IndexOf('/');
+                    providerId = requestedModel[..slash];
+                    modelId = requestedModel;
+                }
+            }
+
+            var ok = await _opencodeChat.SummarizeSessionAsync(sessionId, providerId, modelId, CancellationToken.None).ConfigureAwait(false);
+            SendImText(client, agentId, from, ok
+                ? $"Requested summary for session {sessionId}."
+                : $"Summary request completed for session {sessionId}, but Opencode did not return an explicit success flag.");
+            return;
+        }
+
+        if (verb == "abort")
+        {
+            var sessionId = ResolveSessionSelector(conversationKey, tail, requireExplicit: false);
+            var ok = await _opencodeChat.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            SendImText(client, agentId, from, ok
+                ? $"Abort requested for session {sessionId}."
+                : $"Abort request completed for session {sessionId}, but Opencode did not return an explicit success flag.");
+            return;
+        }
+
+        SendImText(client, agentId, from, "Unknown session command. Usage: *session list | *session create [title] [--no-select] | *session use <session-id> | *session status | *session current | *session details <session-id|current> | *session children <session-id|current> | *session patch-title <session-id|current> <new-title> | *session delete <session-id|current> [--force] | *session delete --all [--force] | *session summarize <session-id|current> [provider/model] | *session abort <session-id|current>");
+    }
+
+    private async Task HandleProjectCommandAsync(GridClient client, UUID agentId, string from, string arg)
+    {
+        if (_opencodeChat == null)
+        {
+            SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
+            return;
+        }
+
+        var normalized = string.IsNullOrWhiteSpace(arg) ? "list" : arg.Trim().ToLowerInvariant();
+        if (normalized is "list" or "all")
+        {
+            var projects = await _opencodeChat.ListProjectsAsync(CancellationToken.None).ConfigureAwait(false);
+            if (projects.Count == 0)
+            {
+                SendImText(client, agentId, from, "No projects were reported by Opencode.");
+                return;
+            }
+
+            var lines = new List<string> { $"Projects ({projects.Count}):" };
+            foreach (var project in projects.Take(40))
+            {
+                var path = string.IsNullOrWhiteSpace(project.Path) ? "n/a" : project.Path;
+                var marker = project.Current == true ? " [current]" : string.Empty;
+                lines.Add($"- {project.Name} ({project.Id}) [path: {path}]{marker}");
+            }
+
+            if (projects.Count > 40)
+            {
+                lines.Add($"... and {projects.Count - 40} more");
+            }
+
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return;
+        }
+
+        if (normalized == "current")
+        {
+            var current = await _opencodeChat.GetCurrentProjectAsync(CancellationToken.None).ConfigureAwait(false);
+            if (current == null)
+            {
+                SendImText(client, agentId, from, "Opencode did not report a current project.");
+                return;
+            }
+
+            var path = string.IsNullOrWhiteSpace(current.Path) ? "n/a" : current.Path;
+            SendImText(client, agentId, from, $"Current project: {current.Name} ({current.Id}) [path: {path}]");
+            return;
+        }
+
+        SendImText(client, agentId, from, "Usage: *projects | *project current");
+    }
+
+    private string ResolveSessionSelector(string conversationKey, string selector, bool requireExplicit)
+    {
+        var normalized = string.IsNullOrWhiteSpace(selector) ? "current" : NormalizeLooseQuery(selector);
+        if (normalized.Equals("current", StringComparison.OrdinalIgnoreCase))
+        {
+            var current = _opencodeChat?.GetConversationSessionId(conversationKey);
+            if (!string.IsNullOrWhiteSpace(current))
+            {
+                return current;
+            }
+
+            throw new InvalidOperationException("This IM conversation does not have an active Opencode session yet. Send a normal message first, or pass an explicit session id.");
+        }
+
+        if (requireExplicit && string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new InvalidOperationException("session id is required (or use 'current').");
+        }
+
+        return normalized;
+    }
+
     private async Task<OpencodeProviderSummary?> ResolveProviderForAuthAsync(string query)
     {
         var available = await _opencodeChat!.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
@@ -2666,6 +3792,105 @@ internal sealed partial class BotSession : IDisposable
     private static string NormalizeLooseQuery(string value)
     {
         return value.Trim().TrimEnd('.', ',', ';', ':');
+    }
+
+    private static bool TryParseSimplePermissionResponse(string text, out string response, out bool remember)
+    {
+        response = string.Empty;
+        remember = false;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var normalized = text.Trim().ToLowerInvariant();
+        if (normalized is "yes" or "y")
+        {
+            response = "allow";
+            return true;
+        }
+
+        if (normalized is "yes always" or "always yes" or "yes remember" or "y always")
+        {
+            response = "allow";
+            remember = true;
+            return true;
+        }
+
+        if (normalized is "no" or "n")
+        {
+            response = "reject";
+            return true;
+        }
+
+        if (normalized is "no always" or "always no" or "no remember" or "n always")
+        {
+            response = "reject";
+            remember = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseSimpleQuestionResponse(string text, out string answer)
+    {
+        answer = string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var trimmed = text.Trim();
+        if (trimmed.StartsWith('*'))
+        {
+            return false;
+        }
+
+        var normalized = trimmed.ToLowerInvariant();
+        if (normalized is "yes" or "y" or "no" or "n")
+        {
+            answer = trimmed;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool IsHandlerRestricted()
+    {
+        return !string.IsNullOrWhiteSpace(_handlerFullName);
+    }
+
+    private bool IsHandlerAvatar(string? avatarName)
+    {
+        if (string.IsNullOrWhiteSpace(_handlerFullName))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeAvatarName(avatarName);
+        return normalized.Equals(_handlerFullName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildHandlerFullName(string? firstName, string? lastName)
+    {
+        if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
+        {
+            return string.Empty;
+        }
+
+        return NormalizeAvatarName($"{firstName} {lastName}");
+    }
+
+    private static string NormalizeAvatarName(string? avatarName)
+    {
+        if (string.IsNullOrWhiteSpace(avatarName))
+        {
+            return string.Empty;
+        }
+
+        return string.Join(' ', avatarName.Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
     private async Task<string> ResolvePinnedModelIdAsync(string requestedModel, CancellationToken cancellationToken)

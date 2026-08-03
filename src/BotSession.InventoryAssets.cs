@@ -1101,6 +1101,7 @@ internal sealed partial class BotSession
         var fromAgentId = e.Offer.FromAgentID.ToString();
         var fromName = e.Offer.FromAgentName ?? string.Empty;
         var offerMessage = e.Offer.Message ?? string.Empty;
+        var acceptedByHandlerOverride = IsHandlerRestricted() && IsHandlerAvatar(fromName);
 
         InventoryOfferPolicyRule? matchedRule = null;
         var decision = "decline";
@@ -1108,13 +1109,20 @@ internal sealed partial class BotSession
 
         lock (_inventoryOfferLock)
         {
-            matchedRule = _inventoryOfferPolicyRules.FirstOrDefault(rule => IsInventoryOfferRuleMatch(rule, e));
-            if (matchedRule != null)
+            if (acceptedByHandlerOverride)
             {
-                decision = matchedRule.Action;
-                if (decision == "accept" && matchedRule.DestinationFolderId.HasValue)
+                decision = "accept";
+            }
+            else
+            {
+                matchedRule = _inventoryOfferPolicyRules.FirstOrDefault(rule => IsInventoryOfferRuleMatch(rule, e));
+                if (matchedRule != null)
                 {
-                    destinationFolder = matchedRule.DestinationFolderId.Value;
+                    decision = matchedRule.Action;
+                    if (decision == "accept" && matchedRule.DestinationFolderId.HasValue)
+                    {
+                        destinationFolder = matchedRule.DestinationFolderId.Value;
+                    }
                 }
             }
 
@@ -1145,7 +1153,8 @@ internal sealed partial class BotSession
             e.FolderID = destinationFolder;
         }
 
-        Console.WriteLine($"[inventory-offer] from '{fromName}' ({fromAgentId}) type={e.AssetType} fromTask={e.FromTask} decision={decision}");
+        var reason = acceptedByHandlerOverride ? "handler" : "policy";
+        Console.WriteLine($"[inventory-offer] from '{fromName}' ({fromAgentId}) type={e.AssetType} fromTask={e.FromTask} decision={decision} reason={reason}");
     }
 
     private static bool IsInventoryOfferRuleMatch(InventoryOfferPolicyRule rule, InventoryObjectOfferedEventArgs offer)

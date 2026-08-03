@@ -29,6 +29,8 @@ internal sealed class AppOptions
     public string? OpencodeUsername { get; set; }
     public string? OpencodePassword { get; set; }
     public int OpencodeRequestTimeoutSeconds { get; set; } = 60;
+    public string? OpencodeHandlerFirstName { get; set; }
+    public string? OpencodeHandlerLastName { get; set; }
 
     public bool ShowHelp { get; set; }
 
@@ -89,6 +91,13 @@ internal sealed class AppOptions
             if (OpencodeRequestTimeoutSeconds < 1)
             {
                 errors.Add("Opencode timeout must be at least 1 second.");
+            }
+
+            var hasHandlerFirst = !string.IsNullOrWhiteSpace(OpencodeHandlerFirstName);
+            var hasHandlerLast = !string.IsNullOrWhiteSpace(OpencodeHandlerLastName);
+            if (hasHandlerFirst != hasHandlerLast)
+            {
+                errors.Add("Handler name must include both first and last names (OPENCODE_HANDLER_FIRSTNAME and OPENCODE_HANDLER_LASTNAME). ");
             }
         }
 
