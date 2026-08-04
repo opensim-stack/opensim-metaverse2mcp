@@ -32,6 +32,14 @@ internal sealed class AppOptions
     public string? OpencodeHandlerFirstName { get; set; }
     public string? OpencodeHandlerLastName { get; set; }
 
+    public bool PromptHandlingEnabled { get; set; } = true;
+    public bool PromptBuiltInEnabled { get; set; } = true;
+    public bool PromptProjectAgentsEnabled { get; set; } = true;
+    public string PromptProjectAgentsFile { get; set; } = "AGENTS.md";
+    public bool PromptNotecardEnabled { get; set; } = true;
+    public bool PromptNotecardRequireHandler { get; set; } = true;
+    public int PromptMaxChars { get; set; } = 16000;
+
     public bool ShowHelp { get; set; }
 
     public bool UseLegacySseCompatibility => string.Equals(McpTransport, "sse", StringComparison.OrdinalIgnoreCase);
@@ -91,6 +99,30 @@ internal sealed class AppOptions
             if (OpencodeRequestTimeoutSeconds < 1)
             {
                 errors.Add("Opencode timeout must be at least 1 second.");
+            }
+
+            if (PromptHandlingEnabled)
+            {
+                if (PromptMaxChars < 512)
+                {
+                    errors.Add("Prompt max chars must be at least 512 when prompt handling is enabled.");
+                }
+
+                if (string.IsNullOrWhiteSpace(PromptProjectAgentsFile))
+                {
+                    errors.Add("Prompt project AGENTS file path must not be empty when prompt handling is enabled.");
+                }
+                else
+                {
+                    try
+                    {
+                        _ = Path.GetFullPath(PromptProjectAgentsFile);
+                    }
+                    catch
+                    {
+                        errors.Add("Prompt project AGENTS file path is invalid.");
+                    }
+                }
             }
 
             var hasHandlerFirst = !string.IsNullOrWhiteSpace(OpencodeHandlerFirstName);

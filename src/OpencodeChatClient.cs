@@ -18,7 +18,7 @@ internal interface IOpencodeChatClient
     Task<IReadOnlyDictionary<string, IReadOnlyList<OpencodeProviderAuthMethod>>> ListProviderAuthMethodsAsync(CancellationToken cancellationToken);
     Task SetProviderApiKeyAsync(string providerId, string apiKey, CancellationToken cancellationToken);
     Task<OpencodeOAuthStartResult> StartProviderOAuthAsync(string providerId, int methodIndex, IReadOnlyDictionary<string, string>? inputs, CancellationToken cancellationToken);
-    Task CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken);
+    Task<OpencodeOAuthCompleteResult> CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeModelSummary>> ListModelsAsync(string? providerId, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken);
     Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, CancellationToken cancellationToken);
@@ -43,7 +43,7 @@ internal sealed record OpencodeChatReply(
     bool IsConfirmationPrompt,
     IReadOnlyList<OpencodePendingPermission>? PendingPermissions = null,
     IReadOnlyList<OpencodePendingQuestion>? PendingQuestions = null);
-internal sealed record OpencodeSendOptions(string? ModelId, string? ThinkingLevel);
+internal sealed record OpencodeSendOptions(string? ModelId, string? ThinkingLevel, string? SystemPrompt);
 internal sealed record OpencodeProviderSummary(string Id, string Name, bool? Connected);
 internal sealed record OpencodeModelSummary(string Id, string Name, string? Provider);
 internal sealed record OpencodeSessionSummary(string Id, string Title, string? Status, string? ProjectId);
@@ -52,6 +52,7 @@ internal sealed record OpencodePendingPermission(string Id, string SessionId, st
 internal sealed record OpencodePendingQuestion(string Id, string SessionId, string Header, string Question, IReadOnlyList<string> Options, bool? AllowsMultiple, bool? AllowsCustom);
 internal sealed record OpencodeProviderAuthMethod(int MethodIndex, string Type, string Label);
 internal sealed record OpencodeOAuthStartResult(string Url, string? Method, string? Instructions);
+internal sealed record OpencodeOAuthCompleteResult(bool CallbackAccepted, bool ProviderConfigured, string Message);
 
 internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 {
@@ -345,7 +346,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return new OpencodeOAuthStartResult(parsed.Url!, parsed.Method, parsed.Instructions);
     }
 
-    public async Task CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken)
+    public async Task<OpencodeOAuthCompleteResult> CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(providerId))
         {
@@ -384,15 +385,18 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         // Some providers finalize asynchronously after callback; wait briefly so UX reflects real state.
-        var configured = await WaitForProviderConfiguredAsync(providerId, TimeSpan.FromSeconds(45), cancellationToken).ConfigureAwait(false);
+        var configured = await WaitForProviderConfiguredAsync(providerId, TimeSpan.FromSeconds(90), cancellationToken).ConfigureAwait(false);
         if (!configured)
         {
-            throw new InvalidOperationException(
+            var pendingMessage =
                 $"OAuth callback was accepted, but provider '{providerId}' is still not configured. " +
-                "If this is a device flow, ensure approval completed in your browser and retry *auth ... oauth-complete.");
+                "If this is a device flow, finish/confirm approval in your browser and retry *auth ... oauth-complete.";
+            Console.WriteLine($"[opencode] oauth pending for provider {providerId}: callback accepted but provider not configured yet.");
+            return new OpencodeOAuthCompleteResult(true, false, pendingMessage);
         }
 
         _oauthPendingStates.TryRemove(stateKey, out _);
+        return new OpencodeOAuthCompleteResult(true, true, $"OAuth completed for provider '{providerId}'.");
     }
 
     public async Task<IReadOnlyList<OpencodeModelSummary>> ListModelsAsync(string? providerId, CancellationToken cancellationToken)
@@ -1224,7 +1228,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
     private async Task<OpencodeChatReply> SendToSessionAsync(string sessionId, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
     {
-        var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel);
+        var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel, options?.SystemPrompt);
         var body = new Dictionary<string, object?>
         {
             ["parts"] = new[]
@@ -1342,15 +1346,28 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return $"{normalizedScheme}://{normalizedHost}:{port}";
     }
 
-    private static string BuildOutboundMessage(string message, string? thinkingLevel)
+    private static string BuildOutboundMessage(string message, string? thinkingLevel, string? systemPrompt)
     {
-        if (string.IsNullOrWhiteSpace(thinkingLevel))
+        var pieces = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(systemPrompt))
+        {
+            pieces.Add("[system instructions]\n" + systemPrompt.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(thinkingLevel))
+        {
+            // Not all providers expose a first-class "reasoning effort" API; use a compact instruction prefix.
+            pieces.Add($"[reasoning effort: {thinkingLevel.Trim()}]");
+        }
+
+        if (pieces.Count == 0)
         {
             return message;
         }
 
-        // Not all providers expose a first-class "reasoning effort" API; use a compact instruction prefix.
-        return $"[reasoning effort: {thinkingLevel.Trim()}]\n{message}";
+        pieces.Add("[user message]\n" + message);
+        return string.Join("\n\n", pieces);
     }
 
     private string ExtractReplyText(OpenCodeReply? reply, string? rawReply, out bool hasUsableText)

@@ -18,6 +18,29 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly string? _handlerFullName;
+    private readonly object _promptStateLock = new();
+
+    private string? _projectAgentsPromptCache;
+    private DateTime _projectAgentsPromptCacheLastWriteUtc;
+    private string? _activeAgentsNotecardPrompt;
+    private string? _activeAgentsNotecardSourceName;
+    private string? _activeAgentsNotecardItemId;
+    private DateTimeOffset? _activeAgentsNotecardInstalledAt;
+
+    private const string BuiltInBridgePrompt =
+        "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n" +
+        "Environment basics:\n" +
+        "- Avatars, regions, parcels, prim objects, inventory, scripts, and environment settings are stateful and shared.\n" +
+        "- Simulator/cache state may be stale; verify current state before mutating it.\n" +
+        "Tooling basics:\n" +
+        "- Use metaverse MCP tools for avatar/world operations (movement, prims, inventory, scripts, environment).\n" +
+        "- Use console2mcp tools for simulator administration tasks when needed.\n" +
+        "Operating rules:\n" +
+        "- Prefer safe and reversible actions.\n" +
+        "- Confirm destructive or high-impact actions first (delete, bulk changes, ownership/permission changes, restarts).\n" +
+        "- Ask concise clarifying questions when instructions are ambiguous or missing required identifiers.\n" +
+        "- For multi-step tasks, inspect -> plan -> execute -> verify and report results clearly.\n" +
+        "- Respect handler and policy restrictions configured by the bridge.";
 
     private GridClient? _client;
     private bool _connected;
@@ -2360,12 +2383,224 @@ internal sealed partial class BotSession : IDisposable
 
     private OpencodeSendOptions? BuildSendOptions(string conversationKey)
     {
-        if (!_imConversationConfigs.TryGetValue(conversationKey, out var cfg))
+        _imConversationConfigs.TryGetValue(conversationKey, out var cfg);
+
+        var systemPrompt = BuildLayeredPromptText();
+        if (cfg == null && string.IsNullOrWhiteSpace(systemPrompt))
         {
             return null;
         }
 
-        return new OpencodeSendOptions(cfg.ModelId, cfg.ThinkingLevel);
+        return new OpencodeSendOptions(cfg?.ModelId, cfg?.ThinkingLevel, systemPrompt);
+    }
+
+    private string BuildPromptStatusText()
+    {
+        if (!_options.PromptHandlingEnabled)
+        {
+            return "prompt: disabled";
+        }
+
+        var sources = new List<string>();
+        if (_options.PromptBuiltInEnabled)
+        {
+            sources.Add("builtin");
+        }
+
+        if (_options.PromptProjectAgentsEnabled)
+        {
+            var projectPath = ResolveProjectAgentsPromptPath();
+            sources.Add(projectPath == null ? "project(AGENTS.md:missing)" : $"project({projectPath})");
+        }
+
+        lock (_promptStateLock)
+        {
+            if (_options.PromptNotecardEnabled && !string.IsNullOrWhiteSpace(_activeAgentsNotecardPrompt))
+            {
+                sources.Add($"notecard({_activeAgentsNotecardSourceName ?? "unknown"}, {_activeAgentsNotecardItemId ?? "n/a"})");
+            }
+        }
+
+        return sources.Count == 0 ? "prompt: no active sources" : "prompt sources: " + string.Join(", ", sources);
+    }
+
+    private string? BuildLayeredPromptText()
+    {
+        if (!_options.PromptHandlingEnabled)
+        {
+            return null;
+        }
+
+        var layers = new List<string>();
+
+        if (_options.PromptBuiltInEnabled)
+        {
+            layers.Add("[bridge]\n" + ClampPromptLength(BuiltInBridgePrompt));
+        }
+
+        if (_options.PromptProjectAgentsEnabled)
+        {
+            var projectAgents = TryLoadProjectAgentsPromptText();
+            if (!string.IsNullOrWhiteSpace(projectAgents))
+            {
+                layers.Add("[project AGENTS.md]\n" + projectAgents);
+            }
+        }
+
+        if (_options.PromptNotecardEnabled)
+        {
+            string? notecardPrompt;
+            lock (_promptStateLock)
+            {
+                notecardPrompt = _activeAgentsNotecardPrompt;
+            }
+
+            if (!string.IsNullOrWhiteSpace(notecardPrompt))
+            {
+                layers.Add("[in-world AGENTS.md notecard]\n" + notecardPrompt);
+            }
+        }
+
+        return layers.Count == 0 ? null : string.Join("\n\n", layers);
+    }
+
+    private string? TryLoadProjectAgentsPromptText()
+    {
+        var fullPath = ResolveProjectAgentsPromptPath();
+        if (fullPath == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var lastWriteUtc = File.GetLastWriteTimeUtc(fullPath);
+            lock (_promptStateLock)
+            {
+                if (_projectAgentsPromptCache != null && lastWriteUtc == _projectAgentsPromptCacheLastWriteUtc)
+                {
+                    return _projectAgentsPromptCache;
+                }
+            }
+
+            var raw = File.ReadAllText(fullPath);
+            var normalized = NormalizePromptText(raw);
+            lock (_promptStateLock)
+            {
+                _projectAgentsPromptCache = normalized;
+                _projectAgentsPromptCacheLastWriteUtc = lastWriteUtc;
+            }
+
+            return normalized;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[prompt] failed to read project AGENTS prompt file: {ex.Message}");
+            return null;
+        }
+    }
+
+    private string? ResolveProjectAgentsPromptPath()
+    {
+        var configured = (_options.PromptProjectAgentsFile ?? "AGENTS.md").Trim();
+        if (configured.Length == 0)
+        {
+            return null;
+        }
+
+        var fullPath = Path.GetFullPath(configured);
+        if (File.Exists(fullPath))
+        {
+            return fullPath;
+        }
+
+        // Support running from ./src while keeping strict AGENTS.md semantics at project root.
+        if (string.Equals(configured, "AGENTS.md", StringComparison.OrdinalIgnoreCase))
+        {
+            var cwd = Directory.GetCurrentDirectory();
+            var parent = Directory.GetParent(cwd)?.FullName;
+            if (!string.IsNullOrWhiteSpace(parent))
+            {
+                var parentPath = Path.Combine(parent, "AGENTS.md");
+                if (File.Exists(parentPath))
+                {
+                    return parentPath;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private string NormalizePromptText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = value.Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+        return ClampPromptLength(normalized);
+    }
+
+    private string ClampPromptLength(string value)
+    {
+        var maxChars = _options.PromptMaxChars < 512 ? 512 : _options.PromptMaxChars;
+        if (value.Length <= maxChars)
+        {
+            return value;
+        }
+
+        return value[..maxChars] + "\n\n[prompt truncated]";
+    }
+
+    private void SetActiveAgentsNotecardPrompt(string promptText, string sourceName, string itemId)
+    {
+        var normalized = NormalizePromptText(promptText);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return;
+        }
+
+        lock (_promptStateLock)
+        {
+            _activeAgentsNotecardPrompt = normalized;
+            _activeAgentsNotecardSourceName = sourceName;
+            _activeAgentsNotecardItemId = itemId;
+            _activeAgentsNotecardInstalledAt = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private void ClearActiveAgentsNotecardPrompt()
+    {
+        lock (_promptStateLock)
+        {
+            _activeAgentsNotecardPrompt = null;
+            _activeAgentsNotecardSourceName = null;
+            _activeAgentsNotecardItemId = null;
+            _activeAgentsNotecardInstalledAt = null;
+        }
+    }
+
+    private void InvalidateProjectAgentsPromptCache()
+    {
+        lock (_promptStateLock)
+        {
+            _projectAgentsPromptCache = null;
+            _projectAgentsPromptCacheLastWriteUtc = default;
+        }
+    }
+
+    private static string BuildPromptPreviewText(string sourceName, string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return $"Prompt source '{sourceName}' is empty or unavailable.";
+        }
+
+        const int maxPreviewChars = 2400;
+        var preview = text.Length <= maxPreviewChars ? text : text[..maxPreviewChars] + "\n\n[prompt preview truncated]";
+        return string.Join("\n", $"Prompt source: {sourceName}", preview);
     }
 
     private static bool IsLikelyBackendTimeout(Exception ex)
@@ -2405,7 +2640,7 @@ internal sealed partial class BotSession : IDisposable
             switch (command)
             {
                 case "help":
-                    SendImText(client, agentId, from, BuildStarHelpText());
+                    SendImText(client, agentId, from, BuildStarHelpText(arg));
                     return true;
                 case "status":
                     SendImText(client, agentId, from, BuildConversationStatusText(conversationKey));
@@ -2435,6 +2670,10 @@ internal sealed partial class BotSession : IDisposable
                 case "configure":
                     await HandleConfigureCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
+                case "prompt":
+                case "prompts":
+                    await HandlePromptCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
+                    return true;
                 case "auth":
                     await HandleAuthCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
                     return true;
@@ -2458,57 +2697,145 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private static string BuildStarHelpText()
+    private static string BuildStarHelpText(string topicArg)
     {
-        return string.Join(
-            "\n",
-            "Star commands:",
-            "*help - Show this help",
-            "*status - Show active AI settings for this IM",
-            "*cancel - Abort the current in-flight AI request for this IM",
-            "*permission list - List pending Opencode permission requests",
-            "*permission allow <permission-id> [remember] - Approve a permission request",
-            "*permission deny <permission-id> [remember] - Reject a permission request",
-            "*question list - List pending Opencode question requests",
-            "*question answer <question-id> <text> - Answer a pending question",
-            "*question reject <question-id> - Reject a pending question",
-            "*providers [configured] - List providers from the live Opencode server",
-            "*models [provider] - List models (optionally filtered by provider)",
-            "*auth methods [provider] - List provider auth methods",
-            "*auth <provider-id> api <api-key> - Save API key for a provider",
-            "*auth <provider-id> oauth [method-index] - Start OAuth/device flow",
-            "*auth <provider-id> oauth-complete [method-index] [code] - Complete OAuth flow",
-            "*session list - List all Opencode sessions",
-            "*session create [title] [--no-select] - Create a new Opencode session",
-            "*session use <session-id> - Set the active session for this IM",
-            "*session status - Show status for all sessions",
-            "*session details <session-id|current> - Get session details",
-            "*session children <session-id|current> - List child sessions",
-            "*session patch-title <session-id|current> <new-title> - Rename a session",
-            "*session delete <session-id|current> [--force] - Delete a session (confirmation required)",
-            "*session delete --all [--force] - Delete all sessions (confirmation required)",
-            "*session summarize <session-id|current> [provider/model] - Summarize a session",
-            "*session abort <session-id|current> - Abort a running session",
-            "*projects - List all Opencode projects",
-            "*project current - Show current Opencode project",
-            "*configure <provider-name-or-id> - Set provider and auto-pick a model",
-            "*configure provider <provider-name-or-id> - Same as above",
-            "*configure model <provider/model-id> - Pin an exact model for this IM",
-            "*configure thinking <low|medium|high|off> - Set reasoning effort hint",
-            "*configure reset - Clear settings for this IM",
-            "*reset - Alias for '*configure reset'");
+        if (string.IsNullOrWhiteSpace(topicArg))
+        {
+            return string.Join(
+                "\n",
+                "Star commands:",
+                "*help - Show command summary",
+                "*help <command> - Show detailed help for one command",
+                "*help all - Show detailed help for all commands",
+                "*status - Show active AI and prompt settings for this IM",
+                "*cancel - Abort current in-flight AI request for this IM",
+                "*prompt - Manage prompt layers (status/show/clear/reload)",
+                "*permission - Manage pending permission requests",
+                "*question - Manage pending question requests",
+                "*providers - List providers",
+                "*models - List models",
+                "*auth - Provider API key/OAuth flows",
+                "*session - Manage Opencode sessions",
+                "*project - Inspect Opencode project context",
+                "*configure - Configure provider/model/thinking for this IM",
+                "*reset - Alias for '*configure reset'");
+        }
+
+        var topic = topicArg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault()?.ToLowerInvariant() ?? "help";
+        topic = topic switch
+        {
+            "permissions" => "permission",
+            "questions" => "question",
+            "projects" => "project",
+            "sessions" => "session",
+            "prompts" => "prompt",
+            _ => topic
+        };
+
+        return topic switch
+        {
+            "help" => string.Join(
+                "\n",
+                "*help usage:",
+                "*help - show command summary",
+                "*help <command> - show detailed variants",
+                "*help all - show detailed variants for all commands",
+                "Examples: *help session, *help configure, *help prompt"),
+            "all" => string.Join(
+                "\n\n",
+                BuildStarHelpText("status"),
+                BuildStarHelpText("cancel"),
+                BuildStarHelpText("prompt"),
+                BuildStarHelpText("permission"),
+                BuildStarHelpText("question"),
+                BuildStarHelpText("providers"),
+                BuildStarHelpText("models"),
+                BuildStarHelpText("auth"),
+                BuildStarHelpText("session"),
+                BuildStarHelpText("project"),
+                BuildStarHelpText("configure"),
+                BuildStarHelpText("reset")),
+            "status" => "*status - Show current provider/model/thinking/session and prompt source state for this IM.",
+            "cancel" => "*cancel - Abort the current in-flight AI request for this IM conversation.",
+            "prompt" => string.Join(
+                "\n",
+                "*prompt variants:",
+                "*prompt status - Show prompt layer status",
+                "*prompt show [effective|builtin|project|notecard] - Preview prompt text",
+                "*prompt clear-notecard - Remove active in-world AGENTS.md prompt layer",
+                "*prompt reload-project - Re-read project AGENTS.md from disk"),
+            "permission" => string.Join(
+                "\n",
+                "*permission variants:",
+                "*permission list - List pending permission requests",
+                "*permission allow <permission-id> [remember] - Approve",
+                "*permission deny <permission-id> [remember] - Reject"),
+            "question" => string.Join(
+                "\n",
+                "*question variants:",
+                "*question list - List pending question requests",
+                "*question answer <question-id> <text> - Answer a question",
+                "*question reject <question-id> - Reject a question"),
+            "providers" => string.Join(
+                "\n",
+                "*providers variants:",
+                "*providers - List all providers from Opencode",
+                "*providers configured - List only configured providers"),
+            "models" => "*models [provider] - List models, optionally filtered by provider id/name.",
+            "auth" => string.Join(
+                "\n",
+                "*auth variants:",
+                "*auth methods [provider] - List provider auth methods",
+                "*auth <provider-id> api <api-key> - Save API key",
+                "*auth <provider-id> oauth [method-index] - Start OAuth/device flow",
+                "*auth <provider-id> oauth-complete [method-index] [code] - Complete OAuth flow"),
+            "session" => string.Join(
+                "\n",
+                "*session variants:",
+                "*session list",
+                "*session create [title] [--no-select]",
+                "*session use|select <session-id>",
+                "*session current",
+                "*session status",
+                "*session details <session-id|current>",
+                "*session children <session-id|current>",
+                "*session patch-title <session-id|current> <new-title>",
+                "*session summarize <session-id|current> [provider/model]",
+                "*session abort <session-id|current>",
+                "*session delete <session-id|current> [--force]",
+                "*session delete --all [--force]"),
+            "project" => string.Join(
+                "\n",
+                "*project variants:",
+                "*projects - List all Opencode projects",
+                "*project current - Show current Opencode project"),
+            "configure" => string.Join(
+                "\n",
+                "*configure variants:",
+                "*configure <provider-name-or-id>",
+                "*configure provider <provider-name-or-id>",
+                "*configure model <provider/model-id>",
+                "*configure thinking <low|medium|high|off>",
+                "*configure reset"),
+            "reset" => "*reset - Alias for '*configure reset'.",
+            _ => $"Unknown help topic '{topic}'. Try *help."
+        };
+
     }
 
     private string BuildConversationStatusText(string conversationKey)
     {
         var currentSessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
+        var promptState = BuildPromptStatusText();
 
         if (!_imConversationConfigs.TryGetValue(conversationKey, out var cfg))
         {
             return string.Join(
                 "\n",
                 "This IM conversation is using Opencode server defaults (no overrides).",
-                $"sessionId: {currentSessionId}");
+                $"sessionId: {currentSessionId}",
+                promptState);
         }
 
         return string.Join(
@@ -2517,7 +2844,125 @@ internal sealed partial class BotSession : IDisposable
             $"provider: {cfg.ProviderId ?? "(default)"}",
             $"model: {cfg.ModelId ?? "(default)"}",
             $"thinking: {cfg.ThinkingLevel ?? "(default)"}",
-            $"sessionId: {currentSessionId}");
+            $"sessionId: {currentSessionId}",
+            promptState);
+    }
+
+    private Task HandlePromptCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
+    {
+        var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var sub = parts.Length == 0 ? "status" : parts[0].ToLowerInvariant();
+
+        if (sub is "help" or "-h" or "--help")
+        {
+            SendImText(client, agentId, from, BuildStarHelpText("prompt"));
+            return Task.CompletedTask;
+        }
+
+        if (sub == "status")
+        {
+            var sessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
+            var lines = new List<string>
+            {
+                "Prompt status:",
+                $"conversation: {conversationKey}",
+                $"sessionId: {sessionId}",
+                $"handling: {_options.PromptHandlingEnabled}",
+                $"builtin source: {_options.PromptBuiltInEnabled}",
+                $"project source: {_options.PromptProjectAgentsEnabled}",
+                $"project file: {_options.PromptProjectAgentsFile}",
+                $"notecard source: {_options.PromptNotecardEnabled}",
+                $"notecard handler-only install: {_options.PromptNotecardRequireHandler}",
+                $"max chars per source: {_options.PromptMaxChars}",
+                BuildPromptStatusText()
+            };
+
+            lock (_promptStateLock)
+            {
+                if (_activeAgentsNotecardInstalledAt.HasValue)
+                {
+                    lines.Add($"notecard installedAtUtc: {_activeAgentsNotecardInstalledAt.Value:O}");
+                }
+            }
+
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return Task.CompletedTask;
+        }
+
+        if (sub == "show" || sub == "show-source")
+        {
+            var target = parts.Length > 1 ? parts[1].ToLowerInvariant() : "effective";
+            target = target switch
+            {
+                "all" => "effective",
+                _ => target
+            };
+
+            string? promptText = null;
+            string promptName;
+            switch (target)
+            {
+                case "effective":
+                    promptName = "effective";
+                    promptText = BuildLayeredPromptText();
+                    break;
+                case "builtin":
+                    promptName = "builtin";
+                    promptText = _options.PromptBuiltInEnabled ? ClampPromptLength(BuiltInBridgePrompt) : null;
+                    break;
+                case "project":
+                    promptName = "project AGENTS.md";
+                    promptText = _options.PromptProjectAgentsEnabled ? TryLoadProjectAgentsPromptText() : null;
+                    break;
+                case "notecard":
+                    promptName = "in-world AGENTS.md notecard";
+                    lock (_promptStateLock)
+                    {
+                        promptText = _activeAgentsNotecardPrompt;
+                    }
+
+                    break;
+                default:
+                    SendImText(client, agentId, from, "Usage: *prompt show [effective|builtin|project|notecard]");
+                    return Task.CompletedTask;
+            }
+
+            SendImText(client, agentId, from, BuildPromptPreviewText(promptName, promptText));
+            return Task.CompletedTask;
+        }
+
+        if (sub == "clear-notecard")
+        {
+            if (_options.PromptNotecardRequireHandler && !IsHandlerAvatar(from))
+            {
+                SendImText(client, agentId, from, "Only the configured handler may clear the AGENTS.md notecard prompt layer.");
+                return Task.CompletedTask;
+            }
+
+            ClearActiveAgentsNotecardPrompt();
+            SendImText(client, agentId, from, "Cleared active in-world AGENTS.md notecard prompt layer.");
+            return Task.CompletedTask;
+        }
+
+        if (sub == "reload-project")
+        {
+            InvalidateProjectAgentsPromptCache();
+            var path = ResolveProjectAgentsPromptPath();
+            var loaded = TryLoadProjectAgentsPromptText();
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                SendImText(client, agentId, from, "Project AGENTS.md file is not found. Check PROMPT_PROJECT_AGENTS_FILE.");
+                return Task.CompletedTask;
+            }
+
+            SendImText(client, agentId, from, string.IsNullOrWhiteSpace(loaded)
+                ? $"Project AGENTS.md exists but no prompt text was loaded from: {path}"
+                : $"Reloaded project AGENTS.md from {path} ({loaded.Length} chars)." );
+            return Task.CompletedTask;
+        }
+
+        SendImText(client, agentId, from, "Usage: *prompt status | *prompt show [effective|builtin|project|notecard] | *prompt clear-notecard | *prompt reload-project");
+        return Task.CompletedTask;
     }
 
     private async Task HandleProvidersCommandAsync(GridClient client, UUID agentId, string from, string arg = "")
@@ -3329,8 +3774,10 @@ internal sealed partial class BotSession : IDisposable
                 code = string.Join(' ', parts.Skip(3));
             }
 
-            await _opencodeChat.CompleteProviderOAuthAsync(provider.Id, methodIndex, code, CancellationToken.None).ConfigureAwait(false);
-            SendImText(client, agentId, from, $"OAuth completed for {provider.Name} ({provider.Id}). Run *providers configured and *models {provider.Id}.");
+            var completed = await _opencodeChat.CompleteProviderOAuthAsync(provider.Id, methodIndex, code, CancellationToken.None).ConfigureAwait(false);
+            SendImText(client, agentId, from, completed.ProviderConfigured
+                ? $"OAuth completed for {provider.Name} ({provider.Id}). Run *providers configured and *models {provider.Id}."
+                : completed.Message);
             return;
         }
 

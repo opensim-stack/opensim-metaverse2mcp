@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Text.Json;
 using LibreMetaverse;
+using LibreMetaverse.Assets;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -1155,6 +1156,107 @@ internal sealed partial class BotSession
 
         var reason = acceptedByHandlerOverride ? "handler" : "policy";
         Console.WriteLine($"[inventory-offer] from '{fromName}' ({fromAgentId}) type={e.AssetType} fromTask={e.FromTask} decision={decision} reason={reason}");
+
+        if (e.Accept
+            && _options.PromptHandlingEnabled
+            && _options.PromptNotecardEnabled
+            && e.AssetType == AssetType.Notecard)
+        {
+            var offeredObjectId = e.ObjectID;
+            var offeredFromName = fromName;
+            var offeredFromAgentId = e.Offer.FromAgentID;
+            _ = Task.Run(() => TryInstallAgentsPromptFromOfferAsync(offeredObjectId, offeredFromName, offeredFromAgentId));
+        }
+    }
+
+    private async Task TryInstallAgentsPromptFromOfferAsync(UUID offeredObjectId, string fromName, UUID fromAgentId)
+    {
+        if (!_options.PromptNotecardEnabled || !_options.PromptHandlingEnabled)
+        {
+            return;
+        }
+
+        if (_options.PromptNotecardRequireHandler)
+        {
+            if (!IsHandlerRestricted())
+            {
+                Console.WriteLine("[prompt] ignored AGENTS.md notecard offer because handler-only mode is enabled but no handler is configured.");
+                return;
+            }
+
+            if (!IsHandlerAvatar(fromName))
+            {
+                Console.WriteLine($"[prompt] ignored AGENTS.md notecard offer from '{fromName}' because handler-only install mode is enabled.");
+                return;
+            }
+        }
+
+        var attempts = 0;
+        while (attempts < 6)
+        {
+            attempts++;
+            await Task.Delay(TimeSpan.FromMilliseconds(450)).ConfigureAwait(false);
+
+            await _actionGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                var client = _client;
+                if (client == null)
+                {
+                    return;
+                }
+
+                var inventoryItem = await ResolveInventoryItemAsync(client, offeredObjectId, CancellationToken.None).ConfigureAwait(false);
+                if (inventoryItem == null)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(inventoryItem.Name?.Trim(), "AGENTS.md", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Strict mode: only AGENTS.md is accepted as a prompt notecard source.
+                    return;
+                }
+
+                var notecardAsset = await client.Assets.RequestInventoryAssetAsync(
+                    inventoryItem.AssetUUID,
+                    inventoryItem.UUID,
+                    UUID.Zero,
+                    client.Self.AgentID,
+                    AssetType.Notecard,
+                    true,
+                    UUID.Random(),
+                    CancellationToken.None).ConfigureAwait(false);
+
+                if (notecardAsset?.AssetData == null || notecardAsset.AssetData.Length == 0)
+                {
+                    Console.WriteLine($"[prompt] failed to download AGENTS.md notecard asset for item {inventoryItem.UUID}.");
+                    return;
+                }
+
+                var notecard = new AssetNotecard(inventoryItem.AssetUUID, notecardAsset.AssetData);
+                if (!notecard.Decode() || string.IsNullOrWhiteSpace(notecard.BodyText))
+                {
+                    Console.WriteLine($"[prompt] failed to decode AGENTS.md notecard for item {inventoryItem.UUID}.");
+                    return;
+                }
+
+                SetActiveAgentsNotecardPrompt(notecard.BodyText, fromName, inventoryItem.UUID.ToString());
+                Console.WriteLine($"[prompt] installed in-world AGENTS.md prompt from '{fromName}' ({fromAgentId}), item={inventoryItem.UUID}.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (attempts >= 6)
+                {
+                    Console.WriteLine($"[prompt] failed to install AGENTS.md notecard prompt: {ex.Message}");
+                }
+            }
+            finally
+            {
+                _actionGate.Release();
+            }
+        }
     }
 
     private static bool IsInventoryOfferRuleMatch(InventoryOfferPolicyRule rule, InventoryObjectOfferedEventArgs offer)

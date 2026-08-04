@@ -108,6 +108,18 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `OPENCODE_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
 - `OPENCODE_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
 
+### Layered prompt handling
+
+- `PROMPT_HANDLING_ENABLED` (`true`/`false`, default: `true`)
+- `PROMPT_BUILTIN_ENABLED` (`true`/`false`, default: `true`)
+- `PROMPT_PROJECT_AGENTS_ENABLED` (`true`/`false`, default: `true`)
+- `PROMPT_PROJECT_AGENTS_FILE` (default: `AGENTS.md`)
+- `PROMPT_NOTECARD_ENABLED` (`true`/`false`, default: `true`)
+- `PROMPT_NOTECARD_REQUIRE_HANDLER` (`true`/`false`, default: `true`)
+- `PROMPT_MAX_CHARS` (default: `16000`, minimum effective clamp: `512`)
+
+This repository includes a starter project prompt file at `AGENTS.md`.
+
 Notes:
 - `MCP_TRANSPORT=sse` enables legacy SSE compatibility in the MCP HTTP transport.
 - This server always runs MCP over HTTP (streamable transport), not stdio.
@@ -189,10 +201,18 @@ The server publishes tools including:
 Chat notes:
 - In this stage, only avatar-to-bot IM is routed to Opencode.
 - Optional handler mode: when `OPENCODE_HANDLER_FIRSTNAME` + `OPENCODE_HANDLER_LASTNAME` are set, only that avatar may control the bot; others get a friendly deny reply.
+- Prompt layering is enabled by default with this precedence (low -> high): built-in bridge prompt, project `AGENTS.md`, then in-world `AGENTS.md` notecard.
+- In-world prompt install is strict and handler-gated by default: only notecards named `AGENTS.md` are eligible, and when `PROMPT_NOTECARD_REQUIRE_HANDLER=true`, only the configured handler avatar can install/replace it.
 - IM supports "star commands" (prefixed with `*`) for live AI configuration per avatar conversation:
-  - `*help`
+  - `*help` (summary of unique commands)
+  - `*help <command>` (detailed variants for one command)
+  - `*help all` (detailed variants for all commands)
   - `*status`
   - `*cancel` (abort the current in-flight AI request for this IM)
+  - `*prompt status` (show prompt layer state)
+  - `*prompt show [effective|builtin|project|notecard]` (preview prompt text)
+  - `*prompt clear-notecard` (remove active in-world prompt layer)
+  - `*prompt reload-project` (re-read project `AGENTS.md`)
   - `*permission list` (list pending policy permission requests)
   - `*permission allow <permission-id> [remember]` (approve a pending permission)
   - `*permission deny <permission-id> [remember]` (reject a pending permission)
@@ -229,6 +249,7 @@ Chat notes:
 - Busy-request behavior: if the bot is still processing a previous request, it will prompt you to use `*cancel`.
 - Permission-request behavior: policy prompts can be answered with `yes`/`no` (mapped to latest pending request), or explicitly with `*permission allow|deny <permission-id> [remember]`.
 - Question-request behavior: when Opencode emits question prompts (`question.asked`), the bot now auto-shows a friendly prompt in IM, and plain text replies are treated as answers when possible. You can still use `*question list`, `*question answer`, or `*question reject`.
+- OAuth behavior: `*auth <provider> oauth-complete` now reports pending (instead of hard failing) when callback is accepted but provider activation has not propagated yet; complete browser approval and retry.
 - Delete confirmation behavior: run `*session delete <id>` first to get a safety prompt, then rerun with `--force`.
 - Bulk delete confirmation behavior: run `*session delete --all` first to get a safety prompt, then rerun with `--force`.
 - Inventory offers from the configured handler are always accepted (policy rules are bypassed for handler offers).

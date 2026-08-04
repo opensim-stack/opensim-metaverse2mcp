@@ -28,7 +28,14 @@ internal static class ConfigLoader
             OpencodePassword = FirstDefined("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60),
             OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
-            OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME")
+            OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
+            PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
+            PromptBuiltInEnabled = ParseBool(Env("PROMPT_BUILTIN_ENABLED"), true),
+            PromptProjectAgentsEnabled = ParseBool(Env("PROMPT_PROJECT_AGENTS_ENABLED"), true),
+            PromptProjectAgentsFile = Env("PROMPT_PROJECT_AGENTS_FILE") ?? "AGENTS.md",
+            PromptNotecardEnabled = ParseBool(Env("PROMPT_NOTECARD_ENABLED"), true),
+            PromptNotecardRequireHandler = ParseBool(Env("PROMPT_NOTECARD_REQUIRE_HANDLER"), true),
+            PromptMaxChars = ParseInt(Env("PROMPT_MAX_CHARS"), 16000)
         };
 
         options.McpPort = ParseInt(Env("MCP_PORT"), 8999);
@@ -71,6 +78,23 @@ internal static class ConfigLoader
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
             "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
             "  --handler-last-name <value>    Optional handler last name (env: OPENCODE_HANDLER_LASTNAME)",
+            string.Empty,
+            "Prompt handling:",
+            "  --prompt-handling-enabled <bool>",
+            "                                Enable layered prompt handling (env: PROMPT_HANDLING_ENABLED, default: true)",
+            "  --prompt-builtin-enabled <bool>",
+            "                                Include built-in bridge prompt (env: PROMPT_BUILTIN_ENABLED, default: true)",
+            "  --prompt-project-agents-enabled <bool>",
+            "                                Include local AGENTS.md prompt file (env: PROMPT_PROJECT_AGENTS_ENABLED, default: true)",
+            "  --prompt-project-agents-file <path>",
+            "                                AGENTS.md path (env: PROMPT_PROJECT_AGENTS_FILE, default: AGENTS.md)",
+            "  --prompt-notecard-enabled <bool>",
+            "                                Allow in-world AGENTS.md notecard prompt source (env: PROMPT_NOTECARD_ENABLED, default: true)",
+            "  --prompt-notecard-require-handler <bool>",
+            "                                Only allow handler avatar to install/replace AGENTS.md notecard prompts",
+            "                                (env: PROMPT_NOTECARD_REQUIRE_HANDLER, default: true)",
+            "  --prompt-max-chars <int>      Per-source maximum characters after normalization",
+            "                                (env: PROMPT_MAX_CHARS, default: 16000)",
             string.Empty,
             "MCP HTTP options:",
             "  --mcp-transport <http|sse>     Transport (env: MCP_TRANSPORT, default: http)",
@@ -146,6 +170,27 @@ internal static class ConfigLoader
                     break;
                 case "--handler-last-name":
                     options.OpencodeHandlerLastName = RequireValue(args, ref i, arg);
+                    break;
+                case "--prompt-handling-enabled":
+                    options.PromptHandlingEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptHandlingEnabled);
+                    break;
+                case "--prompt-builtin-enabled":
+                    options.PromptBuiltInEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptBuiltInEnabled);
+                    break;
+                case "--prompt-project-agents-enabled":
+                    options.PromptProjectAgentsEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptProjectAgentsEnabled);
+                    break;
+                case "--prompt-project-agents-file":
+                    options.PromptProjectAgentsFile = RequireValue(args, ref i, arg);
+                    break;
+                case "--prompt-notecard-enabled":
+                    options.PromptNotecardEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptNotecardEnabled);
+                    break;
+                case "--prompt-notecard-require-handler":
+                    options.PromptNotecardRequireHandler = ParseBool(RequireValue(args, ref i, arg), options.PromptNotecardRequireHandler);
+                    break;
+                case "--prompt-max-chars":
+                    options.PromptMaxChars = ParseInt(RequireValue(args, ref i, arg), options.PromptMaxChars);
                     break;
                 case "--mcp-transport":
                     options.McpTransport = RequireValue(args, ref i, arg);
