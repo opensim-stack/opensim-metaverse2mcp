@@ -31,7 +31,6 @@ internal sealed class AppOptions
     public string? OpencodeInitialProvider { get; set; }
     public string? OpencodeInitialModel { get; set; }
     public int OpencodeRequestTimeoutSeconds { get; set; } = 60;
-    public string OpencodeEventMode { get; set; } = "off";
     public string? OpencodeHandlerFirstName { get; set; }
     public string? OpencodeHandlerLastName { get; set; }
 
@@ -102,12 +101,6 @@ internal sealed class AppOptions
             if (OpencodeRequestTimeoutSeconds < 1)
             {
                 errors.Add("Opencode timeout must be at least 1 second.");
-            }
-
-            var eventMode = (OpencodeEventMode ?? string.Empty).Trim().ToLowerInvariant();
-            if (eventMode != "off" && eventMode != "observe" && eventMode != "active")
-            {
-                errors.Add("Opencode event mode must be one of: off, observe, active.");
             }
 
             if (PromptHandlingEnabled)

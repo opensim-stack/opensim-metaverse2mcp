@@ -29,7 +29,6 @@ internal static class ConfigLoader
             OpencodeInitialProvider = Env("OPENCODE_INITIAL_PROVIDER"),
             OpencodeInitialModel = Env("OPENCODE_INITIAL_MODEL"),
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60),
-            OpencodeEventMode = Env("OPENCODE_EVENT_MODE") ?? "off",
             OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
             OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
@@ -85,8 +84,6 @@ internal static class ConfigLoader
             "                                (env: OPENCODE_INITIAL_MODEL)",
             "  --opencode-timeout-seconds <int>",
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
-            "  --opencode-event-mode <off|observe|active>",
-            "                                Opencode event stream mode (env: OPENCODE_EVENT_MODE, default: off)",
             "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
             "  --handler-last-name <value>    Optional handler last name (env: OPENCODE_HANDLER_LASTNAME)",
             string.Empty,
@@ -181,9 +178,6 @@ internal static class ConfigLoader
                     break;
                 case "--opencode-timeout-seconds":
                     options.OpencodeRequestTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.OpencodeRequestTimeoutSeconds);
-                    break;
-                case "--opencode-event-mode":
-                    options.OpencodeEventMode = RequireValue(args, ref i, arg);
                     break;
                 case "--handler-first-name":
                     options.OpencodeHandlerFirstName = RequireValue(args, ref i, arg);

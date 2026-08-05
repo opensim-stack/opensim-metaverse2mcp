@@ -105,7 +105,6 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `OPENCODE_PASSWORD` (optional Basic auth password)
 - `OPENCODE_SERVER_PASSWORD` (optional fallback alias for `OPENCODE_PASSWORD`)
 - `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `240`)
-- `OPENCODE_EVENT_MODE` (`off`, `observe`, or `active`; default: `off`)
 - `OPENCODE_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
 - `OPENCODE_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
 
@@ -250,7 +249,7 @@ Chat notes:
 - Busy-request behavior: if the bot is still processing a previous request, it will prompt you to use `*cancel`.
 - Permission-request behavior: policy prompts can be answered with `yes`/`no` (mapped to latest pending request), or explicitly with `*permission allow|deny <permission-id> [remember]`.
 - Question-request behavior: when Opencode emits question prompts (`question.asked`), the bot now auto-shows a friendly prompt in IM, and plain text replies are treated as answers when possible. You can still use `*question list`, `*question answer`, or `*question reject`.
-- Event discovery behavior: `OPENCODE_EVENT_MODE=observe` starts background probes to `/event` and `/global/event` and logs event shape/session correlation without changing command routing.
+- Event listener behavior: the bridge now keeps `/event` and `/global/event` listeners on to maintain pending permission/question state without extra runtime toggles.
 - OAuth behavior: `*auth <provider> oauth-complete` now reports pending (instead of hard failing) when callback is accepted but provider activation has not propagated yet; complete browser approval and retry.
 - Delete confirmation behavior: run `*session delete <id>` first to get a safety prompt, then rerun with `--force`.
 - Bulk delete confirmation behavior: run `*session delete --all` first to get a safety prompt, then rerun with `--force`.

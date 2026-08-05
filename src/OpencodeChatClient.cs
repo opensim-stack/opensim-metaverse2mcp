@@ -60,12 +60,8 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 {
     private readonly HttpClient _http;
     private readonly HttpClient? _eventHttp;
-    private readonly string _opencodeEventMode;
     private readonly CancellationTokenSource? _eventLoopCts;
     private readonly Task? _eventLoopTask;
-    // TEMP(event-first migration): this is only for discovery-rate limiting while validating
-    // endpoint behavior. Remove when event schema/flow is stable and structured metrics replace it.
-    private readonly ConcurrentDictionary<string, int> _eventLogCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _sessionIds = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OpencodeOAuthPendingState> _oauthPendingStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _pendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
@@ -82,7 +78,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     public OpencodeChatClient(AppOptions options)
     {
         var baseUrl = BuildBaseUrl(options.OpencodeScheme, options.OpencodeHost, options.OpencodePort);
-        _opencodeEventMode = NormalizeEventMode(options.OpencodeEventMode);
 
         _http = new HttpClient
         {
@@ -98,35 +93,18 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 new AuthenticationHeaderValue("Basic", Convert.ToBase64String(bytes));
         }
 
-        if (_opencodeEventMode == "off")
+        _eventHttp = new HttpClient
         {
-            _eventHttp = null;
-            _eventLoopCts = null;
-            _eventLoopTask = null;
-        }
-        else
-        {
-            _eventHttp = new HttpClient
-            {
-                BaseAddress = new Uri(baseUrl, UriKind.Absolute),
-                Timeout = Timeout.InfiniteTimeSpan
-            };
-            _eventHttp.DefaultRequestHeaders.Authorization = _http.DefaultRequestHeaders.Authorization;
-            _eventLoopCts = new CancellationTokenSource();
-            _eventLoopTask = Task.Run(() => ObserveEventStreamsLoopAsync(_eventLoopCts.Token));
-            Console.WriteLine($"[opencode:event] mode={_opencodeEventMode}; probing /event and /global/event for runtime behavior.");
-            if (_opencodeEventMode == "active")
-            {
-                Console.WriteLine("[opencode:event] active mode currently runs discovery/observation only; command flow remains polling-backed for now.");
-            }
-        }
+            BaseAddress = new Uri(baseUrl, UriKind.Absolute),
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+        _eventHttp.DefaultRequestHeaders.Authorization = _http.DefaultRequestHeaders.Authorization;
+        _eventLoopCts = new CancellationTokenSource();
+        _eventLoopTask = Task.Run(() => ObserveEventStreamsLoopAsync(_eventLoopCts.Token));
 
         Console.WriteLine("[opencode] model payload strategy: session-only (no per-message model override)");
     }
 
-    // TEMP(event-first migration): keep this observer until BotSession consumes session-correlated
-    // events directly for permission/question handling. After cutover, retain one production listener
-    // path and remove duplicate probe behavior.
     private async Task ObserveEventStreamsLoopAsync(CancellationToken cancellationToken)
     {
         if (_eventHttp == null)
@@ -164,7 +142,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     continue;
                 }
 
-                Console.WriteLine($"[opencode:event] connected endpoint={endpoint}");
                 using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
                 using var reader = new StreamReader(stream);
 
@@ -183,7 +160,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     {
                         if (dataBuilder.Length > 0)
                         {
-                            LogObservedEvent(endpoint, currentEventName, dataBuilder.ToString());
+                            LogObservedEvent(currentEventName, dataBuilder.ToString());
                         }
 
                         currentEventName = "message";
@@ -214,7 +191,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     }
                 }
 
-                Console.WriteLine($"[opencode:event] stream ended endpoint={endpoint}; reconnecting...");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -236,17 +212,14 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    // TEMP(event-first migration): once event-first flow is proven, replace this with compact
-    // structured metrics/correlation logging and remove discovery-oriented payload diagnostics.
-    private void LogObservedEvent(string endpoint, string eventName, string rawData)
+    private void LogObservedEvent(string eventName, string rawData)
     {
         if (string.IsNullOrWhiteSpace(rawData))
         {
             return;
         }
 
-        var normalizedEvent = string.IsNullOrWhiteSpace(eventName) ? "message" : eventName.Trim();
-        var eventType = normalizedEvent;
+        var eventType = string.IsNullOrWhiteSpace(eventName) ? "message" : eventName.Trim();
         var sessionId = string.Empty;
 
         try
@@ -272,23 +245,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
         catch (JsonException)
         {
-            // Keep logging, but mark payload as non-JSON for discovery diagnostics.
-            eventType = normalizedEvent + "/non-json";
+            // Ignore non-JSON heartbeat/control frames.
         }
 
-        var key = endpoint + "|" + eventType;
-        var seenCount = _eventLogCounts.AddOrUpdate(key, 1, (_, count) => count + 1);
-        var important = eventType.Contains("permission", StringComparison.OrdinalIgnoreCase)
-            || eventType.Contains("question", StringComparison.OrdinalIgnoreCase)
-            || eventType.Contains("session", StringComparison.OrdinalIgnoreCase);
-
-        if (!important && seenCount > 3)
-        {
-            return;
-        }
-
-        var sessionLabel = string.IsNullOrWhiteSpace(sessionId) ? "n/a" : sessionId;
-        Console.WriteLine($"[opencode:event] endpoint={endpoint} event={normalizedEvent} type={eventType} session={sessionLabel} seen={seenCount} dataLength={rawData.Length}");
     }
 
     private void IngestEventDerivedPendingState(string eventType, string? hintedSessionId, JsonElement root)
@@ -389,14 +348,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             default:
                 return false;
         }
-    }
-
-    private static string NormalizeEventMode(string? raw)
-    {
-        var normalized = (raw ?? "off").Trim().ToLowerInvariant();
-        return normalized is "observe" or "active"
-            ? normalized
-            : "off";
     }
 
     public async Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
