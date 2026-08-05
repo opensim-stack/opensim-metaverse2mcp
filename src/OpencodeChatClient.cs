@@ -800,10 +800,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             return filtered;
         }
 
-        if (_pendingPermissionsBySession.TryGetValue(normalizedSessionId, out var cached))
-        {
-            return cached;
-        }
+        // Treat an empty /permission result as authoritative for this session.
+        _pendingPermissionsBySession.TryRemove(normalizedSessionId, out _);
+        _eventPendingPermissionsBySession.TryRemove(normalizedSessionId, out _);
 
         return Array.Empty<OpencodePendingPermission>();
     }
@@ -1932,6 +1931,12 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     ? genericId!.Trim()
                     : string.Empty;
         if (string.IsNullOrWhiteSpace(id))
+        {
+            return false;
+        }
+
+        // Question requests (que...) can appear in mixed event envelopes; do not treat them as permissions.
+        if (id.StartsWith("que", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

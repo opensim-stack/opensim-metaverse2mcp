@@ -2101,7 +2101,6 @@ internal sealed partial class BotSession : IDisposable
             var gate = _imConversationLocks.GetOrAdd(conversationKey, _ => new SemaphoreSlim(1, 1));
             if (!await gate.WaitAsync(0).ConfigureAwait(false))
             {
-                Console.WriteLine($"[im] skipping while previous request is still in flight for {from} ({conversationKey}).");
                 if (text.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
                     || text.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
                     || text.StartsWith("*question", StringComparison.OrdinalIgnoreCase))
@@ -2161,7 +2160,8 @@ internal sealed partial class BotSession : IDisposable
 
                 try
                 {
-                    client.Self.InstantMessage(e.IM.FromAgentID, "I am still working on your previous request. You can send *cancel to abort, *permission list, or *question list while waiting.");
+                    Console.WriteLine($"[im] overlapping message while previous request is still in flight for {from} ({conversationKey}).");
+                    client.Self.InstantMessage(e.IM.FromAgentID, "I am still working on your previous request. You can send *cancel to abort while waiting.");
                 }
                 catch
                 {
@@ -2253,7 +2253,7 @@ internal sealed partial class BotSession : IDisposable
                 Console.WriteLine($"[im] opencode reply received in {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey} replyLength={reply.Text.Length}");
 
                 var responseText = reply.IsConfirmationPrompt
-                    ? reply.Text + "\n\nReply with yes or no to continue. If this is a policy request, you can also use *permission list and *permission allow|deny <permission-id>."
+                    ? reply.Text + "\n\nReply with yes or no to continue."
                     : reply.Text;
 
                 if (reply.PendingPermissions != null && reply.PendingPermissions.Count > 0)
@@ -2264,17 +2264,13 @@ internal sealed partial class BotSession : IDisposable
                     {
                         _latestPendingPermissionByConversation[conversationKey] = latestPermission.Id;
                         _announcedPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                        responseText += "\n\n" + BuildFriendlyPermissionPrompt(latestPermission);
                     }
 
-                    var permissionLines = reply.PendingPermissions
-                        .Take(5)
-                        .Select(p => string.IsNullOrWhiteSpace(p.Description)
-                            ? $"- {p.Title} ({p.Id})"
-                            : $"- {p.Title} ({p.Id}) [{p.Description}]")
-                        .ToList();
-                    permissionLines.Insert(0, "Pending permission request(s):");
-                    permissionLines.Add("Use *permission allow <permission-id> [remember] or *permission deny <permission-id> [remember].");
-                    responseText += "\n\n" + string.Join("\n", permissionLines);
+                    if (reply.PendingPermissions.Count > 1)
+                    {
+                        responseText += $"\n(There are {reply.PendingPermissions.Count - 1} more pending approvals.)";
+                    }
                 }
                 else
                 {
@@ -2286,8 +2282,12 @@ internal sealed partial class BotSession : IDisposable
                         {
                             var latestPermission = eventFirstPermissions[0];
                             _latestPendingPermissionByConversation[conversationKey] = latestPermission.Id;
-                            _announcedPendingPermissionByConversation[conversationKey] = latestPermission.Id;
-                            responseText += "\n\n" + BuildFriendlyPermissionPrompt(latestPermission);
+                            if (!_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
+                                || !announcedPermissionId.Equals(latestPermission.Id, StringComparison.OrdinalIgnoreCase))
+                            {
+                                _announcedPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                                responseText += "\n\n" + BuildFriendlyPermissionPrompt(latestPermission);
+                            }
                         }
                     }
                 }
@@ -2306,12 +2306,13 @@ internal sealed partial class BotSession : IDisposable
                         .Take(3)
                         .Select(q =>
                         {
+                            var header = string.IsNullOrWhiteSpace(q.Header) ? "Question" : q.Header.Trim();
                             var optionText = q.Options.Count == 0 ? string.Empty : $" options: {string.Join(", ", q.Options)}";
-                            return $"- {q.Header} ({q.Id}): {q.Question}{optionText}";
+                            return $"- {header}: {q.Question}{optionText}";
                         })
                         .ToList();
                     questionLines.Insert(0, "Pending question request(s):");
-                    questionLines.Add("Use *question answer <question-id> <text> or *question reject <question-id>.");
+                    questionLines.Add("Reply in chat with your answer (or option number) to continue.");
                     responseText += "\n\n" + string.Join("\n", questionLines);
                 }
                 else
@@ -2326,8 +2327,12 @@ internal sealed partial class BotSession : IDisposable
                         if (polledQuestions.Count > 0)
                         {
                             _latestPendingQuestionByConversation[conversationKey] = polledQuestions[0].Id;
-                            _announcedPendingQuestionByConversation[conversationKey] = polledQuestions[0].Id;
-                            responseText += "\n\n" + BuildFriendlyQuestionPrompt(polledQuestions[0]);
+                            if (!_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedQuestionId)
+                                || !announcedQuestionId.Equals(polledQuestions[0].Id, StringComparison.OrdinalIgnoreCase))
+                            {
+                                _announcedPendingQuestionByConversation[conversationKey] = polledQuestions[0].Id;
+                                responseText += "\n\n" + BuildFriendlyQuestionPrompt(polledQuestions[0]);
+                            }
                         }
                     }
                 }
@@ -3111,9 +3116,7 @@ internal sealed partial class BotSession : IDisposable
             var lines = new List<string> { $"Pending permission requests ({pending.Count}):" };
             foreach (var permission in pending.Take(12))
             {
-                lines.Add(string.IsNullOrWhiteSpace(permission.Description)
-                    ? $"- {permission.Title} ({permission.Id})"
-                    : $"- {permission.Title} ({permission.Id}) [{permission.Description}]");
+                lines.Add("- " + BuildFriendlyPermissionListLine(permission));
             }
 
             if (pending.Count > 12)
@@ -3211,10 +3214,31 @@ internal sealed partial class BotSession : IDisposable
         }
 
         var ok = await _opencodeChat.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
+        if (!ok)
+        {
+            _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
+            SendImText(client, agentId, from, "I sent your approval response, but Opencode did not return an explicit success flag.");
+            return true;
+        }
+
+        // Confirm the specific permission is no longer pending before claiming progress.
+        await Task.Delay(250).ConfigureAwait(false);
+        var remaining = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        var stillPending = remaining.Any(p => p.Id.Equals(permissionId, StringComparison.OrdinalIgnoreCase));
+
+        if (stillPending)
+        {
+            _latestPendingPermissionByConversation[conversationKey] = permissionId;
+            _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
+            SendImText(client, agentId, from,
+                    "I sent your approval, but it still appears pending. I will keep waiting for the current task.");
+            return true;
+        }
+
         _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
-        SendImText(client, agentId, from, ok
-            ? $"Permission response sent: {response} ({permissionId}){(remember ? " [remembered]" : string.Empty)}"
-            : $"Permission response request was sent for {permissionId}, but Opencode did not return an explicit success flag.");
+        SendImText(client, agentId, from, remember
+            ? "Got it - approval sent and remembered."
+            : "Got it - approval sent.");
         return true;
     }
 
@@ -3345,8 +3369,8 @@ internal sealed partial class BotSession : IDisposable
         var ok = await _opencodeChat.ReplyToQuestionAsync(sessionId, questionId, new[] { answer }, CancellationToken.None).ConfigureAwait(false);
         _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
         SendImText(client, agentId, from, ok
-            ? $"Question answered: {questionId}"
-            : $"Question answer request was sent for {questionId}, but Opencode did not return an explicit success flag.");
+            ? "Got it - answered your pending question."
+            : "I sent your answer, but Opencode did not return an explicit success flag.");
         return true;
     }
 
@@ -3384,8 +3408,8 @@ internal sealed partial class BotSession : IDisposable
             var ok = await _opencodeChat.ReplyToQuestionAsync(sessionId, question.Id, new[] { resolvedAnswer }, CancellationToken.None).ConfigureAwait(false);
             _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
             SendImText(client, agentId, from, ok
-                ? $"Got it - answered question {question.Id} with: {resolvedAnswer}"
-                : $"I tried to answer question {question.Id}, but Opencode did not return an explicit success flag.");
+                ? $"Got it - answered your pending question with: {resolvedAnswer}"
+                : "I tried to answer your pending question, but Opencode did not return an explicit success flag.");
             return true;
         }
 
@@ -3454,10 +3478,11 @@ internal sealed partial class BotSession : IDisposable
 
     private static string BuildFriendlyQuestionPrompt(OpencodePendingQuestion question)
     {
+        var header = string.IsNullOrWhiteSpace(question.Header) ? "Question" : question.Header.Trim();
         var lines = new List<string>
         {
             "I need your input before I can continue:",
-            $"{question.Header} ({question.Id})",
+            header,
             question.Question
         };
 
@@ -3470,26 +3495,80 @@ internal sealed partial class BotSession : IDisposable
         }
 
         lines.Add(question.AllowsCustom == false
-            ? "Reply with one of the options above, or use *question reject <question-id>."
-            : "Reply in plain text (or option number), or use *question reject <question-id>.");
+            ? "Reply with one of the options above."
+            : "Reply in plain text (or option number).");
         return string.Join("\n", lines);
     }
 
     private static string BuildFriendlyPermissionPrompt(OpencodePendingPermission permission)
     {
-        var hasCanonicalRequestId = IsCanonicalPermissionRequestId(permission.Id);
+        var title = permission.Title?.Trim() ?? string.Empty;
+        var primaryText = GetPermissionPrimaryText(permission, out var titleLooksLikeId);
+
         var lines = new List<string>
         {
             "I need your approval before I can continue:",
-            string.IsNullOrWhiteSpace(permission.Description)
-                ? $"{permission.Title} ({permission.Id})"
-                : $"{permission.Title} ({permission.Id}) [{permission.Description}]",
-            hasCanonicalRequestId
-                ? "Reply with yes/no, or use *permission allow|deny <permission-id> [remember]."
-                : "Reply with yes/no, then run *permission list in a moment to get the canonical permission id (per...)."
+            primaryText,
+            "Reply with yes/no to continue."
         };
 
+        if (!string.IsNullOrWhiteSpace(title)
+            && !titleLooksLikeId
+            && !title.Equals(primaryText, StringComparison.OrdinalIgnoreCase))
+        {
+            lines.Insert(2, $"Request: {title}");
+        }
+
         return string.Join("\n", lines);
+    }
+
+    private static string BuildFriendlyPermissionListLine(OpencodePendingPermission permission)
+    {
+        var requestId = permission.Id?.Trim() ?? string.Empty;
+        var title = permission.Title?.Trim() ?? string.Empty;
+        var primaryText = GetPermissionPrimaryText(permission, out var titleLooksLikeId);
+        var details = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(title)
+            && !titleLooksLikeId
+            && !title.Equals(primaryText, StringComparison.OrdinalIgnoreCase))
+        {
+            details.Add($"request: {title}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(requestId))
+        {
+            details.Add(IsCanonicalPermissionRequestId(requestId)
+                ? $"id: {requestId}"
+                : $"request: {requestId}");
+        }
+
+        return details.Count == 0
+            ? primaryText
+            : primaryText + " (" + string.Join(", ", details) + ")";
+    }
+
+    private static string GetPermissionPrimaryText(OpencodePendingPermission permission, out bool titleLooksLikeId)
+    {
+        var requestId = permission.Id?.Trim() ?? string.Empty;
+        var title = permission.Title?.Trim() ?? string.Empty;
+        var description = permission.Description?.Trim() ?? string.Empty;
+        titleLooksLikeId = !string.IsNullOrWhiteSpace(title)
+            && (title.Equals(requestId, StringComparison.OrdinalIgnoreCase)
+                || title.StartsWith("per", StringComparison.OrdinalIgnoreCase)
+                || title.StartsWith("que", StringComparison.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(description))
+        {
+            return description;
+        }
+
+        if (!string.IsNullOrWhiteSpace(title) && !titleLooksLikeId)
+        {
+            return title;
+        }
+
+        return "This action requires your approval.";
     }
 
     private static bool IsCanonicalPermissionRequestId(string? permissionId)
@@ -3617,9 +3696,8 @@ internal sealed partial class BotSession : IDisposable
 
         // TEMP(event-first migration): delete this method once in-flight question/permission events
         // are forwarded directly to IM from the stream observer.
-        // Watch up to two minutes while the request is running.
-        var deadline = DateTimeOffset.UtcNow.AddMinutes(2);
-        while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
+        // Keep watching until the in-flight request ends (token is canceled by caller).
+        while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
@@ -3658,7 +3736,7 @@ internal sealed partial class BotSession : IDisposable
 
                 _announcedPendingPermissionByConversation[conversationKey] = permission.Id;
                 SendImText(client, agentId, from, BuildFriendlyPermissionPrompt(permission));
-                return;
+                continue;
             }
 
             IReadOnlyList<OpencodePendingQuestion> pending;
@@ -3686,7 +3764,7 @@ internal sealed partial class BotSession : IDisposable
 
             _announcedPendingQuestionByConversation[conversationKey] = question.Id;
             SendImText(client, agentId, from, BuildFriendlyQuestionPrompt(question));
-            return;
+            continue;
         }
     }
 
