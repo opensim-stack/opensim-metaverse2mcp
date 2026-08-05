@@ -26,8 +26,10 @@ internal interface IOpencodeChatClient
     Task<string> GetSessionDetailsJsonAsync(string sessionId, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeSessionSummary>> GetSessionChildrenAsync(string sessionId, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodePendingPermission>> ListPendingPermissionsAsync(string sessionId, CancellationToken cancellationToken);
+    bool TryGetPendingPermissionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingPermission> pendingPermissions);
     Task<bool> RespondToPermissionAsync(string sessionId, string permissionId, string response, bool remember, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodePendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken);
+    bool TryGetPendingQuestionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingQuestion> pendingQuestions);
     Task<bool> ReplyToQuestionAsync(string sessionId, string questionId, IReadOnlyList<string> answers, CancellationToken cancellationToken);
     Task<bool> RejectQuestionAsync(string sessionId, string questionId, CancellationToken cancellationToken);
     Task<OpencodeSessionSummary> UpdateSessionTitleAsync(string sessionId, string title, CancellationToken cancellationToken);
@@ -57,10 +59,19 @@ internal sealed record OpencodeOAuthCompleteResult(bool CallbackAccepted, bool P
 internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 {
     private readonly HttpClient _http;
+    private readonly HttpClient? _eventHttp;
+    private readonly string _opencodeEventMode;
+    private readonly CancellationTokenSource? _eventLoopCts;
+    private readonly Task? _eventLoopTask;
+    // TEMP(event-first migration): this is only for discovery-rate limiting while validating
+    // endpoint behavior. Remove when event schema/flow is stable and structured metrics replace it.
+    private readonly ConcurrentDictionary<string, int> _eventLogCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _sessionIds = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OpencodeOAuthPendingState> _oauthPendingStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _pendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _pendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _eventPendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _eventPendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _modelOverrideGate = new(1, 1);
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -71,6 +82,8 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     public OpencodeChatClient(AppOptions options)
     {
         var baseUrl = BuildBaseUrl(options.OpencodeScheme, options.OpencodeHost, options.OpencodePort);
+        _opencodeEventMode = NormalizeEventMode(options.OpencodeEventMode);
+
         _http = new HttpClient
         {
             BaseAddress = new Uri(baseUrl, UriKind.Absolute),
@@ -85,7 +98,305 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 new AuthenticationHeaderValue("Basic", Convert.ToBase64String(bytes));
         }
 
+        if (_opencodeEventMode == "off")
+        {
+            _eventHttp = null;
+            _eventLoopCts = null;
+            _eventLoopTask = null;
+        }
+        else
+        {
+            _eventHttp = new HttpClient
+            {
+                BaseAddress = new Uri(baseUrl, UriKind.Absolute),
+                Timeout = Timeout.InfiniteTimeSpan
+            };
+            _eventHttp.DefaultRequestHeaders.Authorization = _http.DefaultRequestHeaders.Authorization;
+            _eventLoopCts = new CancellationTokenSource();
+            _eventLoopTask = Task.Run(() => ObserveEventStreamsLoopAsync(_eventLoopCts.Token));
+            Console.WriteLine($"[opencode:event] mode={_opencodeEventMode}; probing /event and /global/event for runtime behavior.");
+            if (_opencodeEventMode == "active")
+            {
+                Console.WriteLine("[opencode:event] active mode currently runs discovery/observation only; command flow remains polling-backed for now.");
+            }
+        }
+
         Console.WriteLine("[opencode] model payload strategy: session-only (no per-message model override)");
+    }
+
+    // TEMP(event-first migration): keep this observer until BotSession consumes session-correlated
+    // events directly for permission/question handling. After cutover, retain one production listener
+    // path and remove duplicate probe behavior.
+    private async Task ObserveEventStreamsLoopAsync(CancellationToken cancellationToken)
+    {
+        if (_eventHttp == null)
+        {
+            return;
+        }
+
+        var workers = new[]
+        {
+            ObserveEventStreamLoopAsync("/event", cancellationToken),
+            ObserveEventStreamLoopAsync("/global/event", cancellationToken)
+        };
+
+        await Task.WhenAll(workers).ConfigureAwait(false);
+    }
+
+    private async Task ObserveEventStreamLoopAsync(string endpoint, CancellationToken cancellationToken)
+    {
+        if (_eventHttp == null)
+        {
+            return;
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+                using var response = await _eventHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    Console.WriteLine($"[opencode:event] connect failed endpoint={endpoint} status={(int)response.StatusCode} {response.StatusCode} body={TruncateForLog(body, 240)}");
+                    await Task.Delay(2000, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                Console.WriteLine($"[opencode:event] connected endpoint={endpoint}");
+                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                using var reader = new StreamReader(stream);
+
+                var currentEventName = "message";
+                var dataBuilder = new StringBuilder();
+
+                while (!cancellationToken.IsCancellationRequested && !reader.EndOfStream)
+                {
+                    var line = await reader.ReadLineAsync().ConfigureAwait(false);
+                    if (line == null)
+                    {
+                        break;
+                    }
+
+                    if (line.Length == 0)
+                    {
+                        if (dataBuilder.Length > 0)
+                        {
+                            LogObservedEvent(endpoint, currentEventName, dataBuilder.ToString());
+                        }
+
+                        currentEventName = "message";
+                        dataBuilder.Clear();
+                        continue;
+                    }
+
+                    if (line[0] == ':')
+                    {
+                        continue;
+                    }
+
+                    if (line.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        currentEventName = line[6..].Trim();
+                        continue;
+                    }
+
+                    if (line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var chunk = line[5..].TrimStart();
+                        if (dataBuilder.Length > 0)
+                        {
+                            dataBuilder.Append('\n');
+                        }
+
+                        dataBuilder.Append(chunk);
+                    }
+                }
+
+                Console.WriteLine($"[opencode:event] stream ended endpoint={endpoint}; reconnecting...");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[opencode:event] stream error endpoint={endpoint}: {ex.Message}");
+            }
+
+            try
+            {
+                await Task.Delay(2000, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+    }
+
+    // TEMP(event-first migration): once event-first flow is proven, replace this with compact
+    // structured metrics/correlation logging and remove discovery-oriented payload diagnostics.
+    private void LogObservedEvent(string endpoint, string eventName, string rawData)
+    {
+        if (string.IsNullOrWhiteSpace(rawData))
+        {
+            return;
+        }
+
+        var normalizedEvent = string.IsNullOrWhiteSpace(eventName) ? "message" : eventName.Trim();
+        var eventType = normalizedEvent;
+        var sessionId = string.Empty;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawData);
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                if (TryGetStringPropertyAny(root, out var parsedType, "type", "event", "name")
+                    && !string.IsNullOrWhiteSpace(parsedType))
+                {
+                    eventType = parsedType!.Trim();
+                }
+
+                if (TryExtractSessionId(root, out var parsedSessionId)
+                    && !string.IsNullOrWhiteSpace(parsedSessionId))
+                {
+                    sessionId = parsedSessionId!.Trim();
+                }
+            }
+
+            IngestEventDerivedPendingState(eventType, sessionId, root);
+        }
+        catch (JsonException)
+        {
+            // Keep logging, but mark payload as non-JSON for discovery diagnostics.
+            eventType = normalizedEvent + "/non-json";
+        }
+
+        var key = endpoint + "|" + eventType;
+        var seenCount = _eventLogCounts.AddOrUpdate(key, 1, (_, count) => count + 1);
+        var important = eventType.Contains("permission", StringComparison.OrdinalIgnoreCase)
+            || eventType.Contains("question", StringComparison.OrdinalIgnoreCase)
+            || eventType.Contains("session", StringComparison.OrdinalIgnoreCase);
+
+        if (!important && seenCount > 3)
+        {
+            return;
+        }
+
+        var sessionLabel = string.IsNullOrWhiteSpace(sessionId) ? "n/a" : sessionId;
+        Console.WriteLine($"[opencode:event] endpoint={endpoint} event={normalizedEvent} type={eventType} session={sessionLabel} seen={seenCount} dataLength={rawData.Length}");
+    }
+
+    private void IngestEventDerivedPendingState(string eventType, string? hintedSessionId, JsonElement root)
+    {
+        var normalizedType = (eventType ?? string.Empty).Trim().ToLowerInvariant();
+        var derivedPermissions = ParsePendingPermissions(root)
+            .Select(p => string.IsNullOrWhiteSpace(p.SessionId) && !string.IsNullOrWhiteSpace(hintedSessionId)
+                ? new OpencodePendingPermission(p.Id, hintedSessionId!, p.Title, p.Description)
+                : p)
+            .Where(p => !string.IsNullOrWhiteSpace(p.SessionId))
+            .ToList();
+
+        if (derivedPermissions.Count > 0)
+        {
+            foreach (var group in derivedPermissions.GroupBy(p => p.SessionId, StringComparer.OrdinalIgnoreCase))
+            {
+                _eventPendingPermissionsBySession[group.Key] = group
+                    .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g.First())
+                    .ToList();
+                _pendingPermissionsBySession[group.Key] = _eventPendingPermissionsBySession[group.Key];
+            }
+        }
+        else if (normalizedType.Contains("permission", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(hintedSessionId))
+        {
+            _eventPendingPermissionsBySession.TryRemove(hintedSessionId, out _);
+        }
+
+        var derivedQuestions = ParsePendingQuestions(root)
+            .Select(q => string.IsNullOrWhiteSpace(q.SessionId) && !string.IsNullOrWhiteSpace(hintedSessionId)
+                ? new OpencodePendingQuestion(q.Id, hintedSessionId!, q.Header, q.Question, q.Options, q.AllowsMultiple, q.AllowsCustom)
+                : q)
+            .Where(q => !string.IsNullOrWhiteSpace(q.SessionId))
+            .ToList();
+
+        if (derivedQuestions.Count > 0)
+        {
+            foreach (var group in derivedQuestions.GroupBy(q => q.SessionId, StringComparer.OrdinalIgnoreCase))
+            {
+                _eventPendingQuestionsBySession[group.Key] = group
+                    .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g.First())
+                    .ToList();
+                _pendingQuestionsBySession[group.Key] = _eventPendingQuestionsBySession[group.Key];
+            }
+        }
+        else if (normalizedType.Contains("question", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(hintedSessionId))
+        {
+            _eventPendingQuestionsBySession.TryRemove(hintedSessionId, out _);
+        }
+    }
+
+    private static bool TryExtractSessionId(JsonElement element, out string? sessionId)
+    {
+        sessionId = null;
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                if (TryGetStringPropertyAny(element, out var direct, "sessionID", "sessionId")
+                    && !string.IsNullOrWhiteSpace(direct))
+                {
+                    sessionId = direct!.Trim();
+                    return true;
+                }
+
+                if (element.TryGetProperty("session", out var sessionObject)
+                    && sessionObject.ValueKind == JsonValueKind.Object
+                    && TryGetStringPropertyAny(sessionObject, out var nested, "id", "sessionID", "sessionId")
+                    && !string.IsNullOrWhiteSpace(nested))
+                {
+                    sessionId = nested!.Trim();
+                    return true;
+                }
+
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (TryExtractSessionId(property.Value, out sessionId))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
+            case JsonValueKind.Array:
+                foreach (var child in element.EnumerateArray())
+                {
+                    if (TryExtractSessionId(child, out sessionId))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
+            default:
+                return false;
+        }
+    }
+
+    private static string NormalizeEventMode(string? raw)
+    {
+        var normalized = (raw ?? "off").Trim().ToLowerInvariant();
+        return normalized is "observe" or "active"
+            ? normalized
+            : "off";
     }
 
     public async Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
@@ -546,6 +857,17 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return Array.Empty<OpencodePendingPermission>();
     }
 
+    public bool TryGetPendingPermissionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingPermission> pendingPermissions)
+    {
+        pendingPermissions = Array.Empty<OpencodePendingPermission>();
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        return _eventPendingPermissionsBySession.TryGetValue(sessionId.Trim(), out pendingPermissions!);
+    }
+
     public async Task<bool> RespondToPermissionAsync(string sessionId, string permissionId, string response, bool remember, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
@@ -590,6 +912,21 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     }
                 }
 
+                if (accepted && _eventPendingPermissionsBySession.TryGetValue(sessionKey, out var eventExisting))
+                {
+                    var eventRemaining = eventExisting
+                        .Where(p => !p.Id.Equals(permissionKey, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                    if (eventRemaining.Count == 0)
+                    {
+                        _eventPendingPermissionsBySession.TryRemove(sessionKey, out _);
+                    }
+                    else
+                    {
+                        _eventPendingPermissionsBySession[sessionKey] = eventRemaining;
+                    }
+                }
+
                 return accepted;
             }
             catch (OpencodeHttpException ex) when ((int)ex.StatusCode >= 400 && (int)ex.StatusCode < 500)
@@ -625,6 +962,17 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         return Array.Empty<OpencodePendingQuestion>();
+    }
+
+    public bool TryGetPendingQuestionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingQuestion> pendingQuestions)
+    {
+        pendingQuestions = Array.Empty<OpencodePendingQuestion>();
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        return _eventPendingQuestionsBySession.TryGetValue(sessionId.Trim(), out pendingQuestions!);
     }
 
     public async Task<bool> ReplyToQuestionAsync(string sessionId, string questionId, IReadOnlyList<string> answers, CancellationToken cancellationToken)
@@ -668,6 +1016,21 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     _pendingQuestionsBySession[sessionKey] = remaining;
                 }
             }
+
+            if (_eventPendingQuestionsBySession.TryGetValue(sessionKey, out var eventExisting))
+            {
+                var eventRemaining = eventExisting
+                    .Where(q => !q.Id.Equals(questionKey, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (eventRemaining.Count == 0)
+                {
+                    _eventPendingQuestionsBySession.TryRemove(sessionKey, out _);
+                }
+                else
+                {
+                    _eventPendingQuestionsBySession[sessionKey] = eventRemaining;
+                }
+            }
         }
 
         return ok;
@@ -704,6 +1067,21 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 else
                 {
                     _pendingQuestionsBySession[sessionKey] = remaining;
+                }
+            }
+
+            if (_eventPendingQuestionsBySession.TryGetValue(sessionKey, out var eventExisting))
+            {
+                var eventRemaining = eventExisting
+                    .Where(q => !q.Id.Equals(questionKey, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (eventRemaining.Count == 0)
+                {
+                    _eventPendingQuestionsBySession.TryRemove(sessionKey, out _);
+                }
+                else
+                {
+                    _eventPendingQuestionsBySession[sessionKey] = eventRemaining;
                 }
             }
         }
@@ -1453,12 +1831,29 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private static IReadOnlyList<OpencodePendingPermission> ParsePendingPermissions(JsonElement root)
     {
         var found = new List<OpencodePendingPermission>();
-        CollectPendingPermissions(root, null, found);
+        CollectPendingPermissions(root, BuildInitialPermissionParseContext(root), found);
         return found
             .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
             .OrderBy(p => p.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static string? BuildInitialPermissionParseContext(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (TryGetStringPropertyAny(root, out var eventType, "type", "event", "name")
+            && !string.IsNullOrWhiteSpace(eventType)
+            && eventType.Contains("permission", StringComparison.OrdinalIgnoreCase))
+        {
+            return eventType.Trim();
+        }
+
+        return null;
     }
 
     private static void CollectPendingPermissions(JsonElement element, string? context, List<OpencodePendingPermission> output)
@@ -1481,7 +1876,15 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
                 foreach (var property in element.EnumerateObject())
                 {
-                    CollectPendingPermissions(property.Value, property.Name, output);
+                    if (!ShouldTraversePermissionProperty(context, property.Name))
+                    {
+                        continue;
+                    }
+
+                    var nextContext = string.IsNullOrWhiteSpace(context)
+                        ? property.Name
+                        : context + "." + property.Name;
+                    CollectPendingPermissions(property.Value, nextContext, output);
                 }
 
                 return;
@@ -1489,6 +1892,41 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             default:
                 return;
         }
+    }
+
+    private static bool ShouldTraversePermissionProperty(string? parentContext, string propertyName)
+    {
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            return false;
+        }
+
+        var key = propertyName.Trim();
+        if (key.Contains("permission", StringComparison.OrdinalIgnoreCase)
+            || key.Contains("request", StringComparison.OrdinalIgnoreCase)
+            || key.Contains("pending", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Common envelope/container keys used by list/event payloads.
+        if (key.Equals("data", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("item", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("items", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("payload", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("body", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("event", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("properties", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("details", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("metadata", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("context", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Once already inside a permission context, allow traversal to reach nested session/meta fields.
+        return !string.IsNullOrWhiteSpace(parentContext)
+            && parentContext.Contains("permission", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryBuildPendingPermission(JsonElement element, string? context, out OpencodePendingPermission? permission)
@@ -1502,24 +1940,46 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         var isPermissionContext = !string.IsNullOrWhiteSpace(context)
             && context.Contains("permission", StringComparison.OrdinalIgnoreCase);
         var hasPermissionIdField = TryGetStringPropertyAny(element, out var parsedId, "permissionID", "permissionId") && !string.IsNullOrWhiteSpace(parsedId);
+        var hasRequestIdField = TryGetStringPropertyAny(element, out var parsedRequestId, "requestID", "requestId") && !string.IsNullOrWhiteSpace(parsedRequestId);
+        var hasCanonicalIdField = hasPermissionIdField || hasRequestIdField;
         var hasGenericId = TryGetStringProperty(element, "id", out var genericId) && !string.IsNullOrWhiteSpace(genericId);
-        if (!isPermissionContext && !hasPermissionIdField)
+        var hasSessionField = TryGetStringPropertyAny(element, out var parsedSessionField, "sessionID", "sessionId")
+            && !string.IsNullOrWhiteSpace(parsedSessionField);
+        var hasNestedSessionField = element.TryGetProperty("session", out var nestedSession)
+            && nestedSession.ValueKind == JsonValueKind.Object
+            && TryGetStringPropertyAny(nestedSession, out _, "id", "sessionID", "sessionId");
+        var hasPermissionSignals = element.TryGetProperty("pattern", out _)
+            || element.TryGetProperty("permission", out _)
+            || element.TryGetProperty("tool", out _)
+            || element.TryGetProperty("path", out _)
+            || element.TryGetProperty("command", out _)
+            || element.TryGetProperty("rule", out _)
+            || element.TryGetProperty("action", out _)
+            || element.TryGetProperty("remember", out _);
+        if (!isPermissionContext && !hasCanonicalIdField)
         {
             // Guard against unrelated objects that happen to have an id field.
             var typeLooksPermission = TryGetStringProperty(element, "type", out var typeValue)
                 && !string.IsNullOrWhiteSpace(typeValue)
                 && typeValue.Contains("permission", StringComparison.OrdinalIgnoreCase);
-            if (!typeLooksPermission)
+            var looksLikePermissionRecord = hasGenericId
+                && (hasSessionField || hasNestedSessionField)
+                && hasPermissionSignals;
+            if (!typeLooksPermission && !looksLikePermissionRecord)
             {
                 return false;
             }
         }
 
-        var id = hasPermissionIdField
-            ? parsedId!.Trim()
-            : hasGenericId
-                ? genericId!.Trim()
-                : string.Empty;
+        // Prefer explicit request IDs, but fall back to generic id for newer/variant payload shapes.
+        // Some event envelopes only expose a generic id in nested `properties` records.
+        var id = hasRequestIdField
+            ? parsedRequestId!.Trim()
+            : hasPermissionIdField
+                ? parsedId!.Trim()
+                : hasGenericId
+                    ? genericId!.Trim()
+                    : string.Empty;
         if (string.IsNullOrWhiteSpace(id))
         {
             return false;
@@ -1539,6 +1999,14 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         var sessionId = TryGetStringPropertyAny(element, out var parsedSessionId, "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedSessionId)
             ? parsedSessionId!.Trim()
             : string.Empty;
+        if (string.IsNullOrWhiteSpace(sessionId)
+            && element.TryGetProperty("session", out var sessionObject)
+            && sessionObject.ValueKind == JsonValueKind.Object
+            && TryGetStringPropertyAny(sessionObject, out var nestedParsedSessionId, "id", "sessionID", "sessionId")
+            && !string.IsNullOrWhiteSpace(nestedParsedSessionId))
+        {
+            sessionId = nestedParsedSessionId!.Trim();
+        }
 
         string? description = null;
         if (TryGetStringProperty(element, "pattern", out var parsedPattern) && !string.IsNullOrWhiteSpace(parsedPattern))
@@ -1557,6 +2025,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             {
                 description = string.Join(", ", parts);
             }
+        }
+        else if (TryGetStringPropertyAny(element, out var parsedScope, "path", "command", "permission", "tool", "rule")
+            && !string.IsNullOrWhiteSpace(parsedScope))
+        {
+            description = parsedScope!.Trim();
         }
 
         permission = new OpencodePendingPermission(id, sessionId, title, description);
@@ -2112,6 +2585,36 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
     public void Dispose()
     {
+        if (_eventLoopCts != null)
+        {
+            try
+            {
+                _eventLoopCts.Cancel();
+            }
+            catch
+            {
+                // Ignore shutdown cancellation races.
+            }
+        }
+
+        if (_eventLoopTask != null)
+        {
+            try
+            {
+                _eventLoopTask.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                // Normal on shutdown.
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[opencode:event] shutdown warning: {ex.Message}");
+            }
+        }
+
+        _eventLoopCts?.Dispose();
+        _eventHttp?.Dispose();
         _http.Dispose();
     }
 

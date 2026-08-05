@@ -16,6 +16,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, ImConversationConfig> _imConversationConfigs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _announcedPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly string? _handlerFullName;
     private readonly object _promptStateLock = new();
@@ -53,6 +54,11 @@ internal sealed partial class BotSession : IDisposable
         if (_options.OpencodeChatEnabled)
         {
             _opencodeChat = new OpencodeChatClient(_options);
+            var startupModel = GetStartupDefaultModelId();
+            if (!string.IsNullOrWhiteSpace(startupModel))
+            {
+                Console.WriteLine($"[opencode] startup default model configured (runtime-overridable): {startupModel}");
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(_handlerFullName))
@@ -2224,6 +2230,8 @@ internal sealed partial class BotSession : IDisposable
                 }
 
                 var sendOptions = BuildSendOptions(conversationKey);
+                // TEMP(event-first migration): remove this watcher once event-driven permission/question
+                // routing is proven stable under reconnect/load; keep only bounded fallback polling.
                 using var inFlightQuestionWatchCts = new CancellationTokenSource();
                 var inFlightQuestionWatchTask = Task.Run(() =>
                     NotifyPendingQuestionDuringInFlightRequestAsync(
@@ -2255,6 +2263,7 @@ internal sealed partial class BotSession : IDisposable
                     if (latestPermission != null)
                     {
                         _latestPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                        _announcedPendingPermissionByConversation[conversationKey] = latestPermission.Id;
                     }
 
                     var permissionLines = reply.PendingPermissions
@@ -2266,6 +2275,21 @@ internal sealed partial class BotSession : IDisposable
                     permissionLines.Insert(0, "Pending permission request(s):");
                     permissionLines.Add("Use *permission allow <permission-id> [remember] or *permission deny <permission-id> [remember].");
                     responseText += "\n\n" + string.Join("\n", permissionLines);
+                }
+                else
+                {
+                    var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                    if (!string.IsNullOrWhiteSpace(currentSessionId))
+                    {
+                        var eventFirstPermissions = await GetPendingPermissionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
+                        if (eventFirstPermissions.Count > 0)
+                        {
+                            var latestPermission = eventFirstPermissions[0];
+                            _latestPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                            _announcedPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                            responseText += "\n\n" + BuildFriendlyPermissionPrompt(latestPermission);
+                        }
+                    }
                 }
 
                 if (reply.PendingQuestions != null && reply.PendingQuestions.Count > 0)
@@ -2292,11 +2316,13 @@ internal sealed partial class BotSession : IDisposable
                 }
                 else
                 {
+                    // TEMP(event-first migration): this post-reply poll is a safety net for delayed emits.
+                    // Delete after event stream handlers populate pending question state reliably.
                     // Some prompts are emitted asynchronously after the initial message response.
                     var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
                     if (!string.IsNullOrWhiteSpace(currentSessionId))
                     {
-                        var polledQuestions = await _opencodeChat.ListPendingQuestionsAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
+                        var polledQuestions = await GetPendingQuestionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
                         if (polledQuestions.Count > 0)
                         {
                             _latestPendingQuestionByConversation[conversationKey] = polledQuestions[0].Id;
@@ -2322,6 +2348,8 @@ internal sealed partial class BotSession : IDisposable
                     // Ignore watcher cancellation or transient polling errors.
                 }
 
+                // TEMP(event-first migration): remove this delayed poll task once event-driven prompt
+                // delivery is reliable across reconnects and all tested providers.
                 // Some question prompts can arrive slightly after the first reply payload.
                 _ = Task.Run(() => NotifyPendingQuestionIfAppearsAsync(client, e.IM.FromAgentID, from, conversationKey));
             }
@@ -2386,12 +2414,15 @@ internal sealed partial class BotSession : IDisposable
         _imConversationConfigs.TryGetValue(conversationKey, out var cfg);
 
         var systemPrompt = BuildLayeredPromptText();
-        if (cfg == null && string.IsNullOrWhiteSpace(systemPrompt))
+        var modelId = cfg?.ModelId ?? GetStartupDefaultModelId();
+        var thinkingLevel = cfg?.ThinkingLevel;
+
+        if (cfg == null && string.IsNullOrWhiteSpace(systemPrompt) && string.IsNullOrWhiteSpace(modelId))
         {
             return null;
         }
 
-        return new OpencodeSendOptions(cfg?.ModelId, cfg?.ThinkingLevel, systemPrompt);
+        return new OpencodeSendOptions(modelId, thinkingLevel, systemPrompt);
     }
 
     private string BuildPromptStatusText()
@@ -2831,9 +2862,14 @@ internal sealed partial class BotSession : IDisposable
 
         if (!_imConversationConfigs.TryGetValue(conversationKey, out var cfg))
         {
+            var startupModel = GetStartupDefaultModelId();
+            var startupProvider = GetStartupDefaultProviderId(startupModel);
             return string.Join(
                 "\n",
-                "This IM conversation is using Opencode server defaults (no overrides).",
+                "This IM conversation is using startup defaults (runtime-overridable).",
+                $"provider: {startupProvider ?? "(server default)"}",
+                $"model: {startupModel ?? "(server default)"}",
+                "thinking: (default)",
                 $"sessionId: {currentSessionId}",
                 promptState);
         }
@@ -3065,7 +3101,7 @@ internal sealed partial class BotSession : IDisposable
         var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0 || parts[0].Equals("list", StringComparison.OrdinalIgnoreCase))
         {
-            var pending = await _opencodeChat.ListPendingPermissionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var pending = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             if (pending.Count == 0)
             {
                 SendImText(client, agentId, from, "No pending permission requests were reported for this session.");
@@ -3109,6 +3145,13 @@ internal sealed partial class BotSession : IDisposable
             || p.Equals("always", StringComparison.OrdinalIgnoreCase)
             || p.Equals("--remember", StringComparison.OrdinalIgnoreCase));
 
+        if (!IsCanonicalPermissionRequestId(permissionId))
+        {
+            SendImText(client, agentId, from,
+                $"'{permissionId}' is not a canonical permission request id (expected per...). Run *permission list and use the per... id.");
+            return;
+        }
+
         var response = action == "allow" ? "allow" : "reject";
         var ok = await _opencodeChat.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
         _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
@@ -3139,7 +3182,7 @@ internal sealed partial class BotSession : IDisposable
         if (!_latestPendingPermissionByConversation.TryGetValue(conversationKey, out var permissionId)
             || string.IsNullOrWhiteSpace(permissionId))
         {
-            var pending = await _opencodeChat.ListPendingPermissionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var pending = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             var latest = pending.FirstOrDefault();
             if (latest == null)
             {
@@ -3148,6 +3191,23 @@ internal sealed partial class BotSession : IDisposable
 
             permissionId = latest.Id;
             _latestPendingPermissionByConversation[conversationKey] = permissionId;
+        }
+
+        if (!IsCanonicalPermissionRequestId(permissionId))
+        {
+            var pending = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var canonical = pending.FirstOrDefault(p => IsCanonicalPermissionRequestId(p.Id));
+            if (canonical != null)
+            {
+                permissionId = canonical.Id;
+                _latestPendingPermissionByConversation[conversationKey] = permissionId;
+            }
+            else
+            {
+                SendImText(client, agentId, from,
+                    "I can see a permission request, but its canonical id (per...) is not available yet. Try *permission list again in a moment.");
+                return true;
+            }
         }
 
         var ok = await _opencodeChat.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
@@ -3176,7 +3236,7 @@ internal sealed partial class BotSession : IDisposable
         var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0 || parts[0].Equals("list", StringComparison.OrdinalIgnoreCase))
         {
-            var pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             if (pending.Count == 0)
             {
                 SendImText(client, agentId, from, "No pending question requests were reported for this session.");
@@ -3271,7 +3331,7 @@ internal sealed partial class BotSession : IDisposable
         if (!_latestPendingQuestionByConversation.TryGetValue(conversationKey, out var questionId)
             || string.IsNullOrWhiteSpace(questionId))
         {
-            var pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             var latest = pending.FirstOrDefault();
             if (latest == null)
             {
@@ -3308,7 +3368,9 @@ internal sealed partial class BotSession : IDisposable
             return false;
         }
 
-        var pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        // TEMP(event-first migration): this pre-routing poll can be deleted after session-correlated
+        // question events are consumed directly from /event and mapped to conversationKey.
+        var pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
         if (pending.Count == 0)
         {
             return false;
@@ -3413,6 +3475,59 @@ internal sealed partial class BotSession : IDisposable
         return string.Join("\n", lines);
     }
 
+    private static string BuildFriendlyPermissionPrompt(OpencodePendingPermission permission)
+    {
+        var hasCanonicalRequestId = IsCanonicalPermissionRequestId(permission.Id);
+        var lines = new List<string>
+        {
+            "I need your approval before I can continue:",
+            string.IsNullOrWhiteSpace(permission.Description)
+                ? $"{permission.Title} ({permission.Id})"
+                : $"{permission.Title} ({permission.Id}) [{permission.Description}]",
+            hasCanonicalRequestId
+                ? "Reply with yes/no, or use *permission allow|deny <permission-id> [remember]."
+                : "Reply with yes/no, then run *permission list in a moment to get the canonical permission id (per...)."
+        };
+
+        return string.Join("\n", lines);
+    }
+
+    private static bool IsCanonicalPermissionRequestId(string? permissionId)
+        => !string.IsNullOrWhiteSpace(permissionId)
+            && permissionId.Trim().StartsWith("per", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<IReadOnlyList<OpencodePendingPermission>> GetPendingPermissionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return Array.Empty<OpencodePendingPermission>();
+        }
+
+        if (_opencodeChat.TryGetPendingPermissionsFromEvents(sessionId, out var fromEvents)
+            && fromEvents.Count > 0)
+        {
+            return fromEvents;
+        }
+
+        return await _opencodeChat.ListPendingPermissionsAsync(sessionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<OpencodePendingQuestion>> GetPendingQuestionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return Array.Empty<OpencodePendingQuestion>();
+        }
+
+        if (_opencodeChat.TryGetPendingQuestionsFromEvents(sessionId, out var fromEvents)
+            && fromEvents.Count > 0)
+        {
+            return fromEvents;
+        }
+
+        return await _opencodeChat.ListPendingQuestionsAsync(sessionId, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task NotifyPendingQuestionIfAppearsAsync(GridClient client, UUID agentId, string from, string conversationKey)
     {
         if (_opencodeChat == null)
@@ -3420,6 +3535,8 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
+        // TEMP(event-first migration): delete this method once event stream routing replaces delayed
+        // polling of /question. This exists only as a migration fallback.
         // Keep this short to avoid stale prompts, but long enough for async question.asked emission.
         for (var attempt = 0; attempt < 10; attempt++)
         {
@@ -3431,10 +3548,35 @@ internal sealed partial class BotSession : IDisposable
                 return;
             }
 
+            IReadOnlyList<OpencodePendingPermission> pendingPermissions;
+            try
+            {
+                pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                return;
+            }
+
+            var permission = pendingPermissions.FirstOrDefault();
+            if (permission != null && !string.IsNullOrWhiteSpace(permission.Id))
+            {
+                _latestPendingPermissionByConversation[conversationKey] = permission.Id;
+                if (_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
+                    && announcedPermissionId.Equals(permission.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                _announcedPendingPermissionByConversation[conversationKey] = permission.Id;
+                SendImText(client, agentId, from, BuildFriendlyPermissionPrompt(permission));
+                return;
+            }
+
             IReadOnlyList<OpencodePendingQuestion> pending;
             try
             {
-                pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+                pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {
@@ -3473,6 +3615,8 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
+        // TEMP(event-first migration): delete this method once in-flight question/permission events
+        // are forwarded directly to IM from the stream observer.
         // Watch up to two minutes while the request is running.
         var deadline = DateTimeOffset.UtcNow.AddMinutes(2);
         while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
@@ -3492,10 +3636,35 @@ internal sealed partial class BotSession : IDisposable
                 continue;
             }
 
+            IReadOnlyList<OpencodePendingPermission> pendingPermissions;
+            try
+            {
+                pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                continue;
+            }
+
+            var permission = pendingPermissions.FirstOrDefault();
+            if (permission != null && !string.IsNullOrWhiteSpace(permission.Id))
+            {
+                _latestPendingPermissionByConversation[conversationKey] = permission.Id;
+                if (_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
+                    && announcedPermissionId.Equals(permission.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                _announcedPendingPermissionByConversation[conversationKey] = permission.Id;
+                SendImText(client, agentId, from, BuildFriendlyPermissionPrompt(permission));
+                return;
+            }
+
             IReadOnlyList<OpencodePendingQuestion> pending;
             try
             {
-                pending = await _opencodeChat.ListPendingQuestionsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+                pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {
@@ -4400,6 +4569,41 @@ internal sealed partial class BotSession : IDisposable
             ? providerId.Trim()
             : providerHint;
         return string.IsNullOrWhiteSpace(provider) ? trimmedModel : $"{provider}/{trimmedModel}";
+    }
+
+    private string? GetStartupDefaultModelId()
+    {
+        var configuredModel = _options.OpencodeInitialModel?.Trim();
+        if (string.IsNullOrWhiteSpace(configuredModel))
+        {
+            return null;
+        }
+
+        if (configuredModel.Contains('/'))
+        {
+            return configuredModel;
+        }
+
+        var configuredProvider = _options.OpencodeInitialProvider?.Trim();
+        return string.IsNullOrWhiteSpace(configuredProvider)
+            ? configuredModel
+            : $"{configuredProvider}/{configuredModel}";
+    }
+
+    private static string? GetStartupDefaultProviderId(string? startupModelId)
+    {
+        if (string.IsNullOrWhiteSpace(startupModelId))
+        {
+            return null;
+        }
+
+        var slash = startupModelId.IndexOf('/');
+        if (slash <= 0)
+        {
+            return null;
+        }
+
+        return startupModelId[..slash];
     }
 
     private static string SanitizeImLogText(string text)

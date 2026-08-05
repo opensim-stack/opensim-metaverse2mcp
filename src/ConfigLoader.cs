@@ -26,7 +26,10 @@ internal static class ConfigLoader
             OpencodePort = ParseInt(Env("OPENCODE_PORT"), 8998),
             OpencodeUsername = Env("OPENCODE_USERNAME"),
             OpencodePassword = FirstDefined("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
+            OpencodeInitialProvider = Env("OPENCODE_INITIAL_PROVIDER"),
+            OpencodeInitialModel = Env("OPENCODE_INITIAL_MODEL"),
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60),
+            OpencodeEventMode = Env("OPENCODE_EVENT_MODE") ?? "off",
             OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
             OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
@@ -74,8 +77,16 @@ internal static class ConfigLoader
             "  --opencode-port <port>         Opencode server port (env: OPENCODE_PORT, default: 8998)",
             "  --opencode-username <value>    Optional Basic auth username (env: OPENCODE_USERNAME, default: opencode when password set)",
             "  --opencode-password <value>    Optional Basic auth password (env: OPENCODE_PASSWORD/OPENCODE_SERVER_PASSWORD)",
+            "  --opencode-initial-provider <id>",
+            "                                Optional startup provider for IM conversations without runtime overrides",
+            "                                (env: OPENCODE_INITIAL_PROVIDER)",
+            "  --opencode-initial-model <provider/model|model>",
+            "                                Optional startup model for IM conversations without runtime overrides",
+            "                                (env: OPENCODE_INITIAL_MODEL)",
             "  --opencode-timeout-seconds <int>",
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
+            "  --opencode-event-mode <off|observe|active>",
+            "                                Opencode event stream mode (env: OPENCODE_EVENT_MODE, default: off)",
             "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
             "  --handler-last-name <value>    Optional handler last name (env: OPENCODE_HANDLER_LASTNAME)",
             string.Empty,
@@ -162,8 +173,17 @@ internal static class ConfigLoader
                 case "--opencode-password":
                     options.OpencodePassword = RequireValue(args, ref i, arg);
                     break;
+                case "--opencode-initial-provider":
+                    options.OpencodeInitialProvider = RequireValue(args, ref i, arg);
+                    break;
+                case "--opencode-initial-model":
+                    options.OpencodeInitialModel = RequireValue(args, ref i, arg);
+                    break;
                 case "--opencode-timeout-seconds":
                     options.OpencodeRequestTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.OpencodeRequestTimeoutSeconds);
+                    break;
+                case "--opencode-event-mode":
+                    options.OpencodeEventMode = RequireValue(args, ref i, arg);
                     break;
                 case "--handler-first-name":
                     options.OpencodeHandlerFirstName = RequireValue(args, ref i, arg);

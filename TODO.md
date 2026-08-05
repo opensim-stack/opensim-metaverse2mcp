@@ -198,6 +198,18 @@ Scope notes:
 - Tool schema normalization
 - Integration/failure-path tests
 
+#### Event-first migration cleanup targets
+
+- [ ] Remove temporary polling fallback methods in `src/BotSession.cs` after event-first reliability is proven:
+  - `NotifyPendingQuestionIfAppearsAsync`
+  - `NotifyPendingQuestionDuringInFlightRequestAsync`
+  - pre-routing poll in `TryHandlePendingQuestionBeforeRoutingAsync`
+  - post-reply `/question` fallback branch in `OnInstantMessage`
+- [ ] Remove temporary event-discovery logging scaffolding in `src/OpencodeChatClient.cs`:
+  - `_eventLogCounts`
+  - probe-oriented logging in `LogObservedEvent`
+  - dual-probe behavior in `ObserveEventStreamsLoopAsync` once a single canonical stream is selected
+
 ### Phase 2 (P1 capability expansion)
 
 - Parcel/group/friends/directory tools
