@@ -1,5 +1,10 @@
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Xml;
+using System.Diagnostics;
 using LibreMetaverse;
 using LibreMetaverse.Assets;
 
@@ -256,9 +261,11 @@ internal sealed partial class BotSession
                 return BotToolResult.Fail($"Inventory item {scriptItemUuid} was not found.");
             }
 
-            if (item.AssetType != AssetType.LSLText)
+            if (item.AssetType != AssetType.LSLText || item.InventoryType != InventoryType.LSL)
             {
-                return BotToolResult.Fail($"Item {item.UUID} is not an LSL script (assetType={item.AssetType}).");
+                return BotToolResult.Fail(
+                    $"Inventory item {item.UUID} is not script-typed (assetType={item.AssetType}, inventoryType={item.InventoryType}). " +
+                    "Bridge install requires a real LSL script inventory item.");
             }
 
             var transaction = client.Inventory.CopyScriptToTask(objectLocalId, item, enableScript, sim);
@@ -331,6 +338,99 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<DialogBridgeInstallResult> DialogBridgeInstallAsync(
+        string? scriptSource,
+        string? objectName,
+        string? objectDescription,
+        string? folderId,
+        float offsetX,
+        float offsetY,
+        float offsetZ,
+        bool pinAsTrustedSender,
+        CancellationToken cancellationToken)
+    {
+        UUID existingPinnedObjectId;
+        uint existingPinnedLocalId;
+        if (TryGetPinnedBridgeObjectInCurrentSim(out existingPinnedObjectId, out existingPinnedLocalId))
+        {
+            return DialogBridgeInstallResult.FailResult(
+                $"Dialog bridge appears already installed (pinned object {existingPinnedObjectId}, localId={existingPinnedLocalId}). Reuse it or clear trust pin before reinstalling.");
+        }
+
+        if (!TryResolveDialogBridgeScriptSource(scriptSource, out var resolvedSource, out var sourceError))
+        {
+            return DialogBridgeInstallResult.FailResult(sourceError);
+        }
+
+        var upload = await AssetUploadInventoryAsync(
+            resolvedSource,
+            "lsltext",
+            "lsl",
+            "dialog-bridge.lsl",
+            "Auto-installed dialog bridge script",
+            folderId,
+            cancellationToken).ConfigureAwait(false);
+        if (!upload.Ok || string.IsNullOrWhiteSpace(upload.ItemId))
+        {
+            return DialogBridgeInstallResult.FailResult($"Script upload failed: {upload.Message}");
+        }
+
+        var status = GetStatus();
+        var create = await CreatePrimAsync(
+            "box",
+            status.X + offsetX,
+            status.Y + offsetY,
+            status.Z + offsetZ,
+            0.25f,
+            0.25f,
+            0.25f,
+            0f,
+            0f,
+            0f,
+            "Plastic",
+            string.IsNullOrWhiteSpace(objectName) ? "Opencode Dialog Bridge" : objectName,
+            string.IsNullOrWhiteSpace(objectDescription) ? "Auto-installed dialog bridge prim" : objectDescription,
+            cancellationToken).ConfigureAwait(false);
+        if (!create.Ok)
+        {
+            return DialogBridgeInstallResult.FailResult($"Bridge prim creation failed: {create.Message}");
+        }
+
+        var copy = await ScriptCopyInventoryToTaskAsync(create.LocalId, upload.ItemId!, enableScript: true, cancellationToken).ConfigureAwait(false);
+        if (!copy.Ok)
+        {
+            return DialogBridgeInstallResult.FailResult($"Script copy failed after prim creation (localId={create.LocalId}): {copy.Message}");
+        }
+
+        var inspect = await InspectPrimAsync(create.LocalId, includeFaceTextures: false, cancellationToken).ConfigureAwait(false);
+        var objectId = inspect.Prim?.Uuid;
+        var ownerId = inspect.Prim?.OwnerId;
+
+        if (pinAsTrustedSender && !string.IsNullOrWhiteSpace(objectId) && UUID.TryParse(objectId, out var objectUuid))
+        {
+            lock (_dialogBridgeTrustLock)
+            {
+                _trustedDialogBridgeObjectId = objectUuid;
+                if (!string.IsNullOrWhiteSpace(ownerId) && UUID.TryParse(ownerId, out var ownerUuid) && ownerUuid != UUID.Zero)
+                {
+                    _trustedDialogBridgeOwnerId = ownerUuid;
+                }
+            }
+
+            Console.WriteLine($"[dialog-bridge] installer pinned trusted bridge sender: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId}");
+            TrySaveDialogBridgeTrustStateToFile();
+        }
+
+        var installMessage = $"Bridge installed: objectLocalId={create.LocalId}, objectId={(objectId ?? "(unknown)")}, inventoryScriptItemId={upload.ItemId}.";
+        return DialogBridgeInstallResult.OkResult(
+            create.LocalId,
+            objectId,
+            ownerId,
+            upload.ItemId,
+            upload.AssetId,
+            installMessage);
+    }
+
     public async Task<InventoryQueryResult> InventoryListAsync(
         string? folderId,
         bool recursive,
@@ -357,32 +457,45 @@ internal sealed partial class BotSession
 
             var limit = Math.Clamp(maxResults, 1, 2000);
             var owner = client.Self.AgentID;
-            var entries = new List<InventoryEntry>();
+            var entries = new List<InventoryBase>();
 
             if (!store.TryGetValue(folderUuid, out var folderNode) || folderNode is not InventoryFolder folder)
             {
                 return InventoryQueryResult.FailResult($"Folder {folderUuid} was not found in local inventory store.");
             }
 
-            entries.Add(ToInventoryEntry(folder));
+            entries.Add(folder);
 
             if (recursive)
             {
                 var folders = new List<InventoryFolder>();
                 var items = new List<InventoryItem>();
                 await client.Inventory.GetInventoryRecursiveAsync(folderUuid, owner, folders, items, token).ConfigureAwait(false);
-                entries.AddRange(folders.Select(ToInventoryEntry));
-                entries.AddRange(items.Select(ToInventoryEntry));
+                entries.AddRange(folders);
+                entries.AddRange(items);
             }
             else
             {
                 var contents = await client.Inventory
                     .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, token)
                     .ConfigureAwait(false);
-                entries.AddRange(contents.Select(ToInventoryEntry));
+                entries.AddRange(contents);
             }
 
-            var ordered = entries
+            var materialized = new List<InventoryEntry>(entries.Count);
+            foreach (var entry in entries)
+            {
+                if (entry is InventoryItem item)
+                {
+                    materialized.Add(ToInventoryEntry(item));
+                }
+                else
+                {
+                    materialized.Add(ToInventoryEntry(entry));
+                }
+            }
+
+            var ordered = materialized
                 .OrderBy(e => e.Kind, StringComparer.Ordinal)
                 .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(e => e.Id, StringComparer.Ordinal)
@@ -455,6 +568,177 @@ internal sealed partial class BotSession
 
             await client.Inventory.GiveFolderAsync(folder.UUID, folder.Name, recipientUuid, withBeamEffect, token).ConfigureAwait(false);
             return BotToolResult.OkResult($"Gave folder '{folder.Name}' ({folder.UUID}) to {recipientUuid}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> InventoryDeleteItemAsync(string itemId, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return BotToolResult.Fail("itemId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var item = await ResolveInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+            if (item == null)
+            {
+                return BotToolResult.Fail($"Inventory item {itemUuid} was not found.");
+            }
+
+            await client.Inventory.RemoveItemAsync(itemUuid, token).ConfigureAwait(false);
+            return BotToolResult.OkResult($"Delete request sent for inventory item '{item.Name}' ({itemUuid}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> InventoryDeleteFolderAsync(string folderId, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(folderId, out var folderUuid))
+        {
+            return BotToolResult.Fail("folderId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var store = client.Inventory.Store;
+            if (store == null || !store.TryGetValue(folderUuid, out var node) || node is not InventoryFolder folder)
+            {
+                return BotToolResult.Fail($"Inventory folder {folderUuid} was not found in local store.");
+            }
+
+            await client.Inventory.RemoveFolderAsync(folderUuid, token).ConfigureAwait(false);
+            return BotToolResult.OkResult($"Delete request sent for inventory folder '{folder.Name}' ({folderUuid}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> InventoryDeleteManyAsync(string itemIdsCsv, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(itemIdsCsv))
+        {
+            return BotToolResult.Fail("itemIdsCsv is required (comma-separated UUIDs).");
+        }
+
+        var ids = new List<UUID>();
+        var seen = new HashSet<UUID>();
+        var parts = itemIdsCsv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        foreach (var part in parts)
+        {
+            if (!UUID.TryParse(part, out var parsed))
+            {
+                return BotToolResult.Fail($"Invalid item UUID '{part}'.");
+            }
+
+            if (seen.Add(parsed))
+            {
+                ids.Add(parsed);
+            }
+        }
+
+        if (ids.Count == 0)
+        {
+            return BotToolResult.Fail("No valid item UUIDs were provided.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var deleted = 0;
+            var missing = 0;
+            foreach (var itemId in ids)
+            {
+                var item = await ResolveInventoryItemAsync(client, itemId, token).ConfigureAwait(false);
+                if (item == null)
+                {
+                    missing++;
+                    continue;
+                }
+
+                await client.Inventory.RemoveItemAsync(itemId, token).ConfigureAwait(false);
+                deleted++;
+            }
+
+            return BotToolResult.OkResult($"Delete requests sent for {deleted} inventory item(s). Missing/not-found: {missing}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> DialogBridgeUninstallAsync(bool deleteInventoryScripts, bool clearTrustPins, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var details = new List<string>();
+            var bridgeDeleted = false;
+
+            if (TryGetPinnedBridgeObjectInCurrentSim(out var pinnedObjectId, out var pinnedLocalId))
+            {
+                client.Inventory.RequestDeRezToInventory(pinnedLocalId);
+                bridgeDeleted = true;
+                details.Add($"Requested bridge prim delete (de-rez): object={pinnedObjectId}, localId={pinnedLocalId}.");
+            }
+            else
+            {
+                details.Add("No pinned bridge object was found in the current simulator cache.");
+            }
+
+            if (deleteInventoryScripts)
+            {
+                var rootFolder = client.Inventory.Store?.RootFolder;
+                if (rootFolder == null)
+                {
+                    details.Add("Could not resolve inventory root folder for bridge script cleanup.");
+                }
+                else
+                {
+                    var scriptItems = await FindDialogBridgeScriptItemIdsAsync(client, rootFolder.UUID, token).ConfigureAwait(false);
+
+                    var deleteErrors = 0;
+                    foreach (var scriptItemId in scriptItems)
+                    {
+                        try
+                        {
+                            await client.Inventory.RemoveItemAsync(scriptItemId, token).ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            deleteErrors++;
+                        }
+                    }
+
+                    // Allow inventory cache to settle before reporting what remains.
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
+                    var remaining = await FindDialogBridgeScriptItemIdsAsync(client, rootFolder.UUID, token).ConfigureAwait(false);
+
+                    details.Add(scriptItems.Count == 0
+                        ? "No dialog-bridge.lsl script items were found in inventory."
+                        : $"Delete requests sent for {scriptItems.Count} dialog-bridge.lsl inventory script item(s).");
+
+                    if (deleteErrors > 0)
+                    {
+                        details.Add($"{deleteErrors} delete request(s) failed immediately.");
+                    }
+
+                    details.Add(remaining.Count == 0
+                        ? "No dialog-bridge.lsl inventory script items remain (from current recursive listing)."
+                        : $"{remaining.Count} dialog-bridge.lsl inventory script item(s) still listed after delete request.");
+                }
+            }
+
+            if (clearTrustPins)
+            {
+                lock (_dialogBridgeTrustLock)
+                {
+                    _trustedDialogBridgeObjectId = UUID.Zero;
+                    _trustedDialogBridgeOwnerId = UUID.Zero;
+                }
+
+                TrySaveDialogBridgeTrustStateToFile();
+                details.Add("Cleared runtime trusted bridge object/owner pins.");
+            }
+
+            if (!bridgeDeleted && !deleteInventoryScripts && !clearTrustPins)
+            {
+                details.Add("No uninstall actions were requested.");
+            }
+
+            return BotToolResult.OkResult(string.Join(" ", details));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -622,6 +906,12 @@ internal sealed partial class BotSession
                 }
             }
 
+            if (parsedAssetType == AssetType.LSLText || parsedInventoryType == InventoryType.LSL)
+            {
+                return await UploadScriptInventoryItemAsync(client, data, name, description ?? string.Empty, folderUuid, token)
+                    .ConfigureAwait(false);
+            }
+
             var result = await client.Inventory
                 .RequestCreateItemFromAssetAsync(
                     data,
@@ -645,6 +935,124 @@ internal sealed partial class BotSession
                 data.Length,
                 $"Uploaded {data.Length} bytes as {parsedAssetType}/{parsedInventoryType} into folder {folderUuid}.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<AssetTransferResult> UploadScriptInventoryItemAsync(
+        GridClient client,
+        byte[] data,
+        string name,
+        string description,
+        UUID folderUuid,
+        CancellationToken cancellationToken)
+    {
+        const AssetType createAssetType = AssetType.LSLText;
+        const InventoryType createInventoryType = InventoryType.LSL;
+        const WearableType createWearableType = (WearableType)0;
+        const PermissionMask createNextOwnerMask = PermissionMask.All;
+        // Viewer-created "New Script" uses a zero transaction ID for create-item.
+        var createTransactionId = UUID.Zero;
+
+        var createStopwatch = Stopwatch.StartNew();
+        var createdItem = await client.Inventory
+            .CreateItemAsync(
+                folderUuid,
+                name,
+                description,
+                createAssetType,
+                createTransactionId,
+                createInventoryType,
+                createWearableType,
+                createNextOwnerMask,
+                cancellationToken)
+            .ConfigureAwait(false);
+        createStopwatch.Stop();
+
+        if (createdItem == null)
+        {
+            return AssetTransferResult.FailResult($"Script item creation failed before upload (CreateItemAsync returned null, elapsed {createStopwatch.ElapsedMilliseconds}ms).");
+        }
+
+        if (createdItem.UUID == UUID.Zero)
+        {
+            return AssetTransferResult.FailResult("Script item creation returned an empty item UUID.");
+        }
+
+        const bool uploadMono = true;
+
+        var upload = await client.Inventory
+            .RequestUpdateScriptAgentInventoryAsync(data, createdItem.UUID, mono: uploadMono, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!upload.uploadSuccess)
+        {
+            return AssetTransferResult.FailResult($"Script upload failed for created item {createdItem.UUID}: {upload.uploadStatus}");
+        }
+
+        if (upload.itemID != UUID.Zero && upload.itemID != createdItem.UUID)
+        {
+            return AssetTransferResult.FailResult(
+                $"Script upload verification failed: capability updated item {upload.itemID}, but created item was {createdItem.UUID}.");
+        }
+
+        InventoryItem? item = null;
+        const int verifyAttempts = 6;
+        for (var attempt = 1; attempt <= verifyAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            item = await client.Inventory.FetchItemAsync(createdItem.UUID, client.Self.AgentID, cancellationToken).ConfigureAwait(false)
+                ?? await client.Inventory.FetchItemHttpAsync(createdItem.UUID, client.Self.AgentID, cancellationToken).ConfigureAwait(false);
+
+            if (item != null)
+            {
+                if (item.AssetType == AssetType.LSLText && item.InventoryType == InventoryType.LSL)
+                {
+                    break;
+                }
+            }
+
+            if (attempt < verifyAttempts)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(300), cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        if (item == null)
+        {
+            return AssetTransferResult.FailResult(
+                $"Script upload succeeded but created item {createdItem.UUID} could not be fetched for verification. " +
+                $"Returned assetID={upload.assetID}, status='{upload.uploadStatus}'.");
+        }
+
+        if (item.AssetType != AssetType.LSLText || item.InventoryType != InventoryType.LSL)
+        {
+            return AssetTransferResult.FailResult(
+                $"Script upload verification failed: created item {createdItem.UUID} fetched as {item.AssetType}({(int)item.AssetType})/{item.InventoryType}({(int)item.InventoryType}) " +
+                $"(expected {AssetType.LSLText}({(int)AssetType.LSLText})/{InventoryType.LSL}({(int)InventoryType.LSL})). capability returned assetID={upload.assetID}, status='{upload.uploadStatus}'.");
+        }
+
+        var uploadedAssetId = upload.assetID != UUID.Zero ? upload.assetID : item.AssetUUID;
+        return AssetTransferResult.OkResult(
+            createdItem.UUID.ToString(),
+            uploadedAssetId.ToString(),
+            data.Length,
+            $"Uploaded {data.Length} bytes as script into folder {folderUuid} (item={createdItem.UUID}, status='{upload.uploadStatus}', compileSuccess={upload.compileSuccess}).");
+    }
+
+    private static async Task<List<UUID>> FindDialogBridgeScriptItemIdsAsync(
+        GridClient client,
+        UUID rootFolderId,
+        CancellationToken cancellationToken)
+    {
+        var folders = new List<InventoryFolder>();
+        var items = new List<InventoryItem>();
+        await client.Inventory.GetInventoryRecursiveAsync(rootFolderId, client.Self.AgentID, folders, items, cancellationToken).ConfigureAwait(false);
+
+        return items
+            .Where(item => string.Equals(item.Name?.Trim(), "dialog-bridge.lsl", StringComparison.OrdinalIgnoreCase))
+            .Select(item => item.UUID)
+            .Distinct()
+            .ToList();
     }
 
     private static bool TryResolveUploadTypes(
@@ -1543,6 +1951,94 @@ internal sealed partial class BotSession
         return await client.Inventory.FetchItemAsync(itemId, client.Self.AgentID, cancellationToken).ConfigureAwait(false);
     }
 
+    private bool TryGetPinnedBridgeObjectInCurrentSim(out UUID objectId, out uint localId)
+    {
+        objectId = UUID.Zero;
+        localId = 0;
+
+        UUID pinnedObjectId;
+        lock (_dialogBridgeTrustLock)
+        {
+            pinnedObjectId = _trustedDialogBridgeObjectId;
+        }
+
+        if (pinnedObjectId == UUID.Zero)
+        {
+            return false;
+        }
+
+        var client = _client;
+        var sim = client?.Network.CurrentSim;
+        if (sim == null)
+        {
+            return false;
+        }
+
+        foreach (var prim in sim.ObjectsPrimitives.Values)
+        {
+            if (prim.ID != pinnedObjectId)
+            {
+                continue;
+            }
+
+            objectId = pinnedObjectId;
+            localId = prim.LocalID;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryResolveDialogBridgeScriptSource(string? requestedSource, out string resolvedSource, out string error)
+    {
+        resolvedSource = string.Empty;
+        error = string.Empty;
+
+        var trimmed = requestedSource?.Trim();
+        if (!string.IsNullOrWhiteSpace(trimmed))
+        {
+            if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
+                && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+            {
+                resolvedSource = trimmed;
+                return true;
+            }
+
+            var explicitPath = Path.GetFullPath(trimmed);
+            if (!File.Exists(explicitPath))
+            {
+                error = $"dialog bridge script source was not found: {explicitPath}";
+                return false;
+            }
+
+            resolvedSource = explicitPath;
+            return true;
+        }
+
+        var candidates = new[]
+        {
+            Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "lsl", "dialog-bridge.lsl")),
+            Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", "lsl", "dialog-bridge.lsl")),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "lsl", "dialog-bridge.lsl")),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "lsl", "dialog-bridge.lsl")),
+            "/app/lsl/dialog-bridge.lsl"
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (!File.Exists(candidate))
+            {
+                continue;
+            }
+
+            resolvedSource = candidate;
+            return true;
+        }
+
+        error = "dialog bridge script source was not provided and lsl/dialog-bridge.lsl was not found. Provide scriptSource as a local path or URL.";
+        return false;
+    }
+
     private static InventoryEntry ToInventoryEntry(InventoryBase entry)
     {
         if (entry is InventoryFolder folder)
@@ -1902,3 +2398,26 @@ internal sealed record ScriptRunningResult(
     public static ScriptRunningResult FailResult(string message)
         => new(false, message, null, null, null, null);
 }
+
+internal sealed record DialogBridgeInstallResult(
+    bool Ok,
+    string Message,
+    uint ObjectLocalId,
+    string? ObjectId,
+    string? OwnerId,
+    string? InventoryScriptItemId,
+    string? InventoryScriptAssetId)
+{
+    public static DialogBridgeInstallResult OkResult(
+        uint objectLocalId,
+        string? objectId,
+        string? ownerId,
+        string? inventoryScriptItemId,
+        string? inventoryScriptAssetId,
+        string message)
+        => new(true, message, objectLocalId, objectId, ownerId, inventoryScriptItemId, inventoryScriptAssetId);
+
+    public static DialogBridgeInstallResult FailResult(string message)
+        => new(false, message, 0, null, null, null, null);
+}
+

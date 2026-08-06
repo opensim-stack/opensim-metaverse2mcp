@@ -33,6 +33,10 @@ internal sealed class AppOptions
     public int OpencodeRequestTimeoutSeconds { get; set; } = 60;
     public string? OpencodeHandlerFirstName { get; set; }
     public string? OpencodeHandlerLastName { get; set; }
+    public string? LslDialogBridgeTrustedObjectId { get; set; }
+    public string? LslDialogBridgeTrustedOwnerId { get; set; }
+    public bool LslDialogBridgeRequireTrustedSender { get; set; } = true;
+    public string? LslDialogBridgeTrustStateFile { get; set; } = "/workspace/state/dialog-bridge-trust.json";
 
     public bool PromptHandlingEnabled { get; set; } = true;
     public bool PromptBuiltInEnabled { get; set; } = true;
@@ -132,6 +136,30 @@ internal sealed class AppOptions
             if (hasHandlerFirst != hasHandlerLast)
             {
                 errors.Add("Handler name must include both first and last names (OPENCODE_HANDLER_FIRSTNAME and OPENCODE_HANDLER_LASTNAME). ");
+            }
+
+            if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedObjectId)
+                && !Guid.TryParse(LslDialogBridgeTrustedObjectId, out _))
+            {
+                errors.Add("LSL dialog bridge trusted object id must be a valid UUID.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedOwnerId)
+                && !Guid.TryParse(LslDialogBridgeTrustedOwnerId, out _))
+            {
+                errors.Add("LSL dialog bridge trusted owner id must be a valid UUID.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustStateFile))
+            {
+                try
+                {
+                    _ = Path.GetFullPath(LslDialogBridgeTrustStateFile);
+                }
+                catch
+                {
+                    errors.Add("LSL dialog bridge trust state file path is invalid.");
+                }
             }
         }
 

@@ -508,6 +508,30 @@ internal sealed class BotMcpTools
         return _bot.InventoryGiveFolderAsync(folderId, recipientAgentId, withBeamEffect, cancellationToken);
     }
 
+    [McpServerTool, Description("Delete an inventory item by UUID.")]
+    public Task<BotToolResult> InventoryDeleteItem(
+        [Description("Inventory item UUID to delete.")] string itemId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryDeleteItemAsync(itemId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Delete an inventory folder by UUID.")]
+    public Task<BotToolResult> InventoryDeleteFolder(
+        [Description("Inventory folder UUID to delete.")] string folderId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryDeleteFolderAsync(folderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Delete multiple inventory items by comma-separated UUID list.")]
+    public Task<BotToolResult> InventoryDeleteMany(
+        [Description("Comma-separated inventory item UUIDs to delete.")] string itemIdsCsv,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryDeleteManyAsync(itemIdsCsv, cancellationToken);
+    }
+
     [McpServerTool, Description("List task inventory (contents) for an in-world object local ID.")]
     public Task<InventoryQueryResult> TaskInventoryList(
         [Description("Object local ID in current simulator.")] uint objectLocalId,
@@ -651,6 +675,39 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken)
     {
         return _bot.AppearanceRebakeAsync(forceRebake, cancellationToken);
+    }
+
+    [McpServerTool, Description("Bootstrap-install the dialog bridge by uploading script inventory, creating a prim, and copying script into task inventory.")]
+    public Task<DialogBridgeInstallResult> DialogBridgeInstall(
+        [Description("Optional local path or HTTP/HTTPS URL to dialog-bridge.lsl. Empty = auto-discover lsl/dialog-bridge.lsl.")] string? scriptSource,
+        [Description("Optional bridge prim name. Empty uses default.")] string? objectName,
+        [Description("Optional bridge prim description. Empty uses default.")] string? objectDescription,
+        [Description("Optional destination inventory folder UUID for uploaded script item.")] string? folderId,
+        [Description("Create offset on X axis from bot position.")] float offsetX,
+        [Description("Create offset on Y axis from bot position.")] float offsetY,
+        [Description("Create offset on Z axis from bot position.")] float offsetZ,
+        [Description("If true, pin the installed object as trusted bridge sender at runtime.")] bool pinAsTrustedSender,
+        CancellationToken cancellationToken)
+    {
+        return _bot.DialogBridgeInstallAsync(
+            scriptSource,
+            objectName,
+            objectDescription,
+            folderId,
+            offsetX,
+            offsetY,
+            offsetZ,
+            pinAsTrustedSender,
+            cancellationToken);
+    }
+
+    [McpServerTool, Description("Uninstall the dialog bridge: delete pinned bridge prim in-world, optionally delete inventory script copies, and clear trust pins.")]
+    public Task<BotToolResult> DialogBridgeUninstall(
+        [Description("If true, also delete dialog-bridge.lsl copies from inventory Scripts folder.")] bool deleteInventoryScripts,
+        [Description("If true, clear trusted bridge object/owner pins and persist updated trust state.")] bool clearTrustPins,
+        CancellationToken cancellationToken)
+    {
+        return _bot.DialogBridgeUninstallAsync(deleteInventoryScripts, clearTrustPins, cancellationToken);
     }
 
     [McpServerTool, Description("Upload script source (path or URL) to an existing agent inventory script item.")]

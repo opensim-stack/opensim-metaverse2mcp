@@ -36,6 +36,21 @@ Scope notes:
 - [ ] **[P1] Failure classification and retry policy**
   - Distinguish transient simulator/caps/network errors from permanent validation errors.
 
+### Dialog Bridge Hardening Status
+
+- [x] **[P0] Viewer-parity script create transaction behavior**
+  - Script inventory create uses zero transaction UUID (`UUID.Zero`) to match viewer behavior.
+- [x] **[P0] Persisted trusted bridge sender pins**
+  - Trusted bridge object/owner pin state persists and survives restart.
+- [x] **[P1] Bridge uninstall cleanup flow**
+  - Uninstall clears runtime trust pins and removes bridge assets/prim paths.
+- [x] **[P1] Permission prompt fallback via IM**
+  - Permission approvals can be actioned through chat (`1/2/3/4` mapping) when needed.
+- [ ] **[P0] Add channel randomization + nonce challenge**
+  - Randomize dialog bridge channel and validate per-request nonce to reduce replay/spoof risk.
+- [ ] **[P0] Add periodic health-check and automatic re-provision if bridge is missing**
+  - Periodically verify bridge object/script/runtime presence and auto-reinstall when absent.
+
 ## 2) Eventing and Reactive Workflows
 
 - [ ] **[P0] MCP event/notification stream**
@@ -83,7 +98,7 @@ Scope notes:
 - [-] **[P1] Inventory browsing ergonomics**
   - Add search/filter by name/type/date/creator.
   - Return paginated results with cursors for large inventories.
-- [ ] **[P1] Inventory CRUD tools**
+- [-] **[P1] Inventory CRUD tools**
   - Create/rename/move/delete folders and items.
   - Copy/link items and folder-level organization tools.
 - [ ] **[P1] Notecard and script text editing workflows**

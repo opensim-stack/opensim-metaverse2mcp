@@ -28,11 +28,13 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, string> _announcedPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PendingScriptDialog> _latestScriptDialogByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _recentDialogBridgeReplies = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly string? _handlerFullName;
     private readonly object _promptStateLock = new();
     private readonly object _recentImSpeakerLock = new();
+    private readonly object _dialogBridgeTrustLock = new();
 
     private string? _projectAgentsPromptCache;
     private DateTime _projectAgentsPromptCacheLastWriteUtc;
@@ -44,6 +46,9 @@ internal sealed partial class BotSession : IDisposable
     private string? _lastImSpeakerName;
     private string? _lastImConversationKey;
     private long _scriptDialogSequence;
+    private UUID _trustedDialogBridgeObjectId = UUID.Zero;
+    private UUID _trustedDialogBridgeOwnerId = UUID.Zero;
+    private bool _lslDialogBridgeRequireTrustedSender = true;
     private const int LslDialogBridgeRequestChannel = -919191;
     private const string LslDialogBridgeRequestPrefix = "dlgreq";
     private const string LslDialogBridgeReplyPrefix = "dlgrep";
@@ -72,6 +77,7 @@ internal sealed partial class BotSession : IDisposable
     public BotSession(AppOptions options)
     {
         _options = options;
+        InitializeDialogBridgeTrustFromOptions();
         _handlerFullName = BuildHandlerFullName(_options.OpencodeHandlerFirstName, _options.OpencodeHandlerLastName);
         if (_options.OpencodeChatEnabled)
         {
@@ -86,6 +92,34 @@ internal sealed partial class BotSession : IDisposable
         if (!string.IsNullOrWhiteSpace(_handlerFullName))
         {
             Console.WriteLine($"[bot] handler restriction enabled: {_handlerFullName}");
+        }
+    }
+
+    private void InitializeDialogBridgeTrustFromOptions()
+    {
+        _lslDialogBridgeRequireTrustedSender = _options.LslDialogBridgeRequireTrustedSender;
+
+        if (!string.IsNullOrWhiteSpace(_options.LslDialogBridgeTrustedObjectId)
+            && UUID.TryParse(_options.LslDialogBridgeTrustedObjectId.Trim(), out var objectId)
+            && objectId != UUID.Zero)
+        {
+            _trustedDialogBridgeObjectId = objectId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_options.LslDialogBridgeTrustedOwnerId)
+            && UUID.TryParse(_options.LslDialogBridgeTrustedOwnerId.Trim(), out var ownerId)
+            && ownerId != UUID.Zero)
+        {
+            _trustedDialogBridgeOwnerId = ownerId;
+        }
+
+        if (_trustedDialogBridgeObjectId != UUID.Zero || _trustedDialogBridgeOwnerId != UUID.Zero)
+        {
+            Console.WriteLine($"[dialog-bridge] trust config loaded: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId} requireTrustedSender={_lslDialogBridgeRequireTrustedSender}");
+        }
+        else
+        {
+            Console.WriteLine($"[dialog-bridge] trust config loaded: no pinned bridge object/owner; requireTrustedSender={_lslDialogBridgeRequireTrustedSender} (first valid bridge sender will be pinned at runtime).");
         }
     }
 
@@ -136,6 +170,9 @@ internal sealed partial class BotSession : IDisposable
 
         _client = client;
         _connected = true;
+
+        // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
+        TryLoadDialogBridgeTrustStateFromFile();
 
         await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
         return true;
@@ -2077,15 +2114,17 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
+        var from = e.IM.FromAgentName;
+        var text = e.IM.Message?.Trim() ?? string.Empty;
+        var isDialogBridgePayload = text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase);
         if (e.IM.Dialog != InstantMessageDialog.MessageFromAgent
             && e.IM.Dialog != InstantMessageDialog.SessionSend
-            && e.IM.Dialog != InstantMessageDialog.MessageFromObject)
+            && e.IM.Dialog != InstantMessageDialog.MessageFromObject
+            && !isDialogBridgePayload)
         {
             return;
         }
 
-        var from = e.IM.FromAgentName;
-        var text = e.IM.Message?.Trim() ?? string.Empty;
         Console.WriteLine($"[im] ({e.IM.Dialog}) {from}: {SanitizeImLogText(text)}");
 
         if (string.IsNullOrWhiteSpace(text))
@@ -2093,11 +2132,18 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        if (e.IM.Dialog == InstantMessageDialog.MessageFromObject)
+        if (e.IM.Dialog == InstantMessageDialog.MessageFromObject || isDialogBridgePayload)
         {
+            var bridgeSenderObjectId = e.IM.FromAgentID;
+            if (isDialogBridgePayload && e.IM.IMSessionID != UUID.Zero)
+            {
+                // For object-origin payloads, IMSessionID carries the object UUID in OpenSim.
+                bridgeSenderObjectId = e.IM.IMSessionID;
+            }
+
             _ = Task.Run(async () =>
             {
-                await TryHandleLslDialogBridgeReplyAsync(client, text).ConfigureAwait(false);
+                await TryHandleLslDialogBridgeReplyAsync(client, bridgeSenderObjectId, e.IM.FromAgentName, text).ConfigureAwait(false);
             });
             return;
         }
@@ -2793,6 +2839,10 @@ internal sealed partial class BotSession : IDisposable
                 case "prompts":
                     await HandlePromptCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
+                case "bridge":
+                case "bridges":
+                    await HandleBridgeCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    return true;
                 case "auth":
                     await HandleAuthCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
                     return true;
@@ -2829,6 +2879,7 @@ internal sealed partial class BotSession : IDisposable
                 "*status - Show active AI and prompt settings for this IM",
                 "*cancel - Abort current in-flight AI request for this IM",
                 "*prompt - Manage prompt layers (status/show/clear/reload)",
+                "*bridge - Manage dialog-bridge install/trust status",
                 "*dialog - Manage pending script dialogs",
                 "*permission - Manage pending permission requests",
                 "*question - Manage pending question requests",
@@ -2850,6 +2901,7 @@ internal sealed partial class BotSession : IDisposable
             "projects" => "project",
             "sessions" => "session",
             "prompts" => "prompt",
+            "bridges" => "bridge",
             _ => topic
         };
 
@@ -2867,6 +2919,7 @@ internal sealed partial class BotSession : IDisposable
                 BuildStarHelpText("status"),
                 BuildStarHelpText("cancel"),
                 BuildStarHelpText("prompt"),
+                BuildStarHelpText("bridge"),
                 BuildStarHelpText("dialog"),
                 BuildStarHelpText("permission"),
                 BuildStarHelpText("question"),
@@ -2886,6 +2939,13 @@ internal sealed partial class BotSession : IDisposable
                 "*prompt show [effective|builtin|project|notecard] - Preview prompt text",
                 "*prompt clear-notecard - Remove active in-world AGENTS.md prompt layer",
                 "*prompt reload-project - Re-read project AGENTS.md from disk"),
+            "bridge" => string.Join(
+                "\n",
+                "*bridge variants:",
+                "*bridge status - Show dialog-bridge trust/install status",
+                "*bridge install [script-source] - Upload script, create bridge prim, and install script",
+                "*bridge uninstall [keep-scripts] - Delete pinned bridge prim and clear trust pins (default also removes script copies)",
+                "(script-source optional: local path or http/https URL; default auto-discovers lsl/dialog-bridge.lsl)"),
             "dialog" => string.Join(
                 "\n",
                 "*dialog variants:",
@@ -3095,6 +3155,91 @@ internal sealed partial class BotSession : IDisposable
 
         SendImText(client, agentId, from, "Usage: *prompt status | *prompt show [effective|builtin|project|notecard] | *prompt clear-notecard | *prompt reload-project");
         return Task.CompletedTask;
+    }
+
+    private async Task HandleBridgeCommandAsync(GridClient client, UUID agentId, string from, string arg)
+    {
+        var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var sub = parts.Length == 0 ? "status" : parts[0].ToLowerInvariant();
+
+        if (sub is "help" or "-h" or "--help")
+        {
+            SendImText(client, agentId, from, BuildStarHelpText("bridge"));
+            return;
+        }
+
+        if (sub == "status")
+        {
+            UUID pinnedObjectId;
+            UUID pinnedOwnerId;
+            bool requireTrusted;
+            lock (_dialogBridgeTrustLock)
+            {
+                pinnedObjectId = _trustedDialogBridgeObjectId;
+                pinnedOwnerId = _trustedDialogBridgeOwnerId;
+                requireTrusted = _lslDialogBridgeRequireTrustedSender;
+            }
+
+            var lines = new List<string>
+            {
+                "Dialog bridge status:",
+                $"request channel: {LslDialogBridgeRequestChannel}",
+                $"require trusted sender: {requireTrusted}",
+                $"trusted object pin: {(pinnedObjectId == UUID.Zero ? "(none)" : pinnedObjectId.ToString())}",
+                $"trusted owner pin: {(pinnedOwnerId == UUID.Zero ? "(none)" : pinnedOwnerId.ToString())}",
+                "Install command: *bridge install [script-source]",
+                "Uninstall command: *bridge uninstall [keep-scripts]"
+            };
+            SendImText(client, agentId, from, string.Join("\n", lines));
+            return;
+        }
+
+        if (sub == "install")
+        {
+            if (IsHandlerRestricted() && !IsHandlerAvatar(from))
+            {
+                SendImText(client, agentId, from, "Only the configured handler may run *bridge install.");
+                return;
+            }
+
+            var sourceArg = parts.Length > 1
+                ? arg[parts[0].Length..].Trim()
+                : string.Empty;
+            var install = await DialogBridgeInstallAsync(
+                string.IsNullOrWhiteSpace(sourceArg) ? null : sourceArg,
+                objectName: "Opencode Dialog Bridge",
+                objectDescription: "Auto-installed dialog bridge prim",
+                folderId: null,
+                offsetX: 1.5f,
+                offsetY: 0f,
+                offsetZ: 0.5f,
+                pinAsTrustedSender: true,
+                CancellationToken.None).ConfigureAwait(false);
+
+            SendImText(client, agentId, from, install.Message);
+            return;
+        }
+
+        if (sub == "uninstall")
+        {
+            if (IsHandlerRestricted() && !IsHandlerAvatar(from))
+            {
+                SendImText(client, agentId, from, "Only the configured handler may run *bridge uninstall.");
+                return;
+            }
+
+            var keepScripts = parts.Skip(1).Any(p =>
+                p.Equals("keep-scripts", StringComparison.OrdinalIgnoreCase)
+                || p.Equals("--keep-scripts", StringComparison.OrdinalIgnoreCase)
+                || p.Equals("no-delete-scripts", StringComparison.OrdinalIgnoreCase));
+            var deleteScripts = !keepScripts;
+
+            var uninstall = await DialogBridgeUninstallAsync(deleteScripts, clearTrustPins: true, CancellationToken.None).ConfigureAwait(false);
+            SendImText(client, agentId, from, uninstall.Message);
+            return;
+        }
+
+        SendImText(client, agentId, from, "Usage: *bridge status | *bridge install [script-source] | *bridge uninstall [keep-scripts]");
     }
 
     private async Task HandleProvidersCommandAsync(GridClient client, UUID agentId, string from, string arg = "")
@@ -3681,12 +3826,23 @@ internal sealed partial class BotSession : IDisposable
         return true;
     }
 
-    private async Task<bool> TryHandleLslDialogBridgeReplyAsync(GridClient client, string text)
+    private async Task<bool> TryHandleLslDialogBridgeReplyAsync(GridClient client, UUID senderObjectId, string senderName, string text)
     {
         if (!TryParseLslDialogBridgeReply(text, out var conversationKey, out var requestId, out var answer))
         {
             Console.WriteLine("[dialog-bridge] ignored object IM: not a dialog-bridge reply payload.");
             return false;
+        }
+
+        if (!IsTrustedDialogBridgeSender(client, senderObjectId, senderName, conversationKey))
+        {
+            return false;
+        }
+
+        if (IsDuplicateDialogBridgeReply(conversationKey, requestId, answer))
+        {
+            Console.WriteLine($"[dialog-bridge] duplicate reply suppressed: conversation={conversationKey} request={requestId} answer={answer}");
+            return true;
         }
 
         Console.WriteLine($"[dialog-bridge] received reply payload: conversation={conversationKey} request={requestId} answer={answer}");
@@ -3727,6 +3883,125 @@ internal sealed partial class BotSession : IDisposable
         }
 
         return true;
+    }
+
+    private bool IsTrustedDialogBridgeSender(GridClient client, UUID senderObjectId, string senderName, string conversationKey)
+    {
+        if (senderObjectId == UUID.Zero)
+        {
+            Console.WriteLine("[dialog-bridge] dropped reply: sender object UUID missing.");
+            return false;
+        }
+
+        UUID pinnedObjectId;
+        UUID pinnedOwnerId;
+        bool requireTrustedSender;
+        lock (_dialogBridgeTrustLock)
+        {
+            pinnedObjectId = _trustedDialogBridgeObjectId;
+            pinnedOwnerId = _trustedDialogBridgeOwnerId;
+            requireTrustedSender = _lslDialogBridgeRequireTrustedSender;
+        }
+
+        var ownerResolved = TryGetObjectOwnerIdFromCache(client, senderObjectId, out var senderOwnerId);
+        var objectMatchesPin = pinnedObjectId != UUID.Zero && senderObjectId == pinnedObjectId;
+        if (pinnedObjectId != UUID.Zero && senderObjectId != pinnedObjectId)
+        {
+            Console.WriteLine($"[dialog-bridge] dropped reply: untrusted object {senderObjectId} (expected {pinnedObjectId}) sender='{senderName}'.");
+            return false;
+        }
+
+        if (pinnedOwnerId != UUID.Zero)
+        {
+            if (!ownerResolved)
+            {
+                if (objectMatchesPin)
+                {
+                    Console.WriteLine($"[dialog-bridge] warning: owner not resolved for pinned object {senderObjectId}; accepting due to object pin match.");
+                }
+                else
+                {
+                    Console.WriteLine($"[dialog-bridge] dropped reply: owner not resolved for object {senderObjectId} while trusted owner pin is enabled ({pinnedOwnerId}).");
+                    return false;
+                }
+            }
+            else if (senderOwnerId != pinnedOwnerId)
+            {
+                if (objectMatchesPin)
+                {
+                    Console.WriteLine($"[dialog-bridge] warning: owner mismatch for pinned object {senderObjectId}. got={senderOwnerId} expected={pinnedOwnerId}; accepting due to object pin match.");
+                }
+                else
+                {
+                    Console.WriteLine($"[dialog-bridge] dropped reply: owner mismatch for object {senderObjectId}. got={senderOwnerId} expected={pinnedOwnerId}");
+                    return false;
+                }
+            }
+        }
+
+        if (!requireTrustedSender)
+        {
+            return true;
+        }
+
+        if (pinnedObjectId == UUID.Zero)
+        {
+            var shouldPersistTrustState = false;
+            lock (_dialogBridgeTrustLock)
+            {
+                if (_trustedDialogBridgeObjectId == UUID.Zero)
+                {
+                    _trustedDialogBridgeObjectId = senderObjectId;
+                    if (_trustedDialogBridgeOwnerId == UUID.Zero && ownerResolved)
+                    {
+                        _trustedDialogBridgeOwnerId = senderOwnerId;
+                    }
+
+                    Console.WriteLine($"[dialog-bridge] pinned trusted bridge sender from first valid reply: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId} conversation={conversationKey}");
+                    shouldPersistTrustState = true;
+                }
+                else if (_trustedDialogBridgeObjectId != senderObjectId)
+                {
+                    Console.WriteLine($"[dialog-bridge] dropped reply: sender object changed during pinning race. got={senderObjectId} pinned={_trustedDialogBridgeObjectId}");
+                    return false;
+                }
+            }
+
+            if (shouldPersistTrustState)
+            {
+                TrySaveDialogBridgeTrustStateToFile();
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryGetObjectOwnerIdFromCache(GridClient client, UUID objectId, out UUID ownerId)
+    {
+        ownerId = UUID.Zero;
+        var sim = client.Network.CurrentSim;
+        if (sim == null)
+        {
+            return false;
+        }
+
+        foreach (var prim in sim.ObjectsPrimitives.Values)
+        {
+            if (prim.ID != objectId)
+            {
+                continue;
+            }
+
+            if (prim.Properties?.OwnerID is UUID resolvedOwner && resolvedOwner != UUID.Zero)
+            {
+                ownerId = resolvedOwner;
+                return true;
+            }
+
+            return false;
+        }
+
+        return false;
     }
 
     private async Task<bool> TryHandleLslDialogBridgePermissionReplyAsync(
@@ -3911,11 +4186,6 @@ internal sealed partial class BotSession : IDisposable
             await Task.Delay(500).ConfigureAwait(false);
 
             var pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-            if (pendingPermissions.Count == 0)
-            {
-                return false;
-            }
-
             var permission = pendingPermissions.FirstOrDefault();
             if (permission != null && !string.IsNullOrWhiteSpace(permission.Id))
             {
@@ -5365,6 +5635,30 @@ internal sealed partial class BotSession : IDisposable
         return false;
     }
 
+    private bool IsDuplicateDialogBridgeReply(string conversationKey, string requestId, string answer)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var key = $"{conversationKey}:{requestId}:{answer}";
+        var duplicateWindow = TimeSpan.FromSeconds(10);
+
+        if (_recentDialogBridgeReplies.TryGetValue(key, out var seenAt) && now - seenAt <= duplicateWindow)
+        {
+            return true;
+        }
+
+        _recentDialogBridgeReplies[key] = now;
+
+        foreach (var entry in _recentDialogBridgeReplies)
+        {
+            if (now - entry.Value > TimeSpan.FromMinutes(5))
+            {
+                _recentDialogBridgeReplies.TryRemove(entry.Key, out _);
+            }
+        }
+
+        return false;
+    }
+
     private void OnChatFromSimulator(object? sender, ChatEventArgs e)
     {
         var client = _client;
@@ -5372,6 +5666,18 @@ internal sealed partial class BotSession : IDisposable
         {
             return;
         }
+
+        var text = e.Message?.Trim() ?? string.Empty;
+        if (!text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        Console.WriteLine($"[chat] ({e.SourceType}/{e.Type}) {e.FromName}: {SanitizeImLogText(text)}");
+        _ = Task.Run(async () =>
+        {
+            await TryHandleLslDialogBridgeReplyAsync(client, e.SourceID, e.FromName, text).ConfigureAwait(false);
+        });
 
         // TODO(ai-chat): route local chat to Opencode after conversation UX and anti-spam policies are finalized.
         // TODO(ai-chat): add group chat routing once we define session mapping semantics for groups.

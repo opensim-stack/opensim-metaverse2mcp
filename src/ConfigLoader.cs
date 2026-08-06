@@ -31,6 +31,10 @@ internal static class ConfigLoader
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60),
             OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
             OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
+            LslDialogBridgeTrustedObjectId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID"),
+            LslDialogBridgeTrustedOwnerId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID"),
+            LslDialogBridgeRequireTrustedSender = ParseBool(FirstDefined("LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER", "OPENCODE_LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER"), true),
+            LslDialogBridgeTrustStateFile = FirstDefined("LSL_DIALOG_BRIDGE_TRUST_STATE_FILE", "OPENCODE_LSL_DIALOG_BRIDGE_TRUST_STATE_FILE") ?? "/workspace/state/dialog-bridge-trust.json",
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
             PromptBuiltInEnabled = ParseBool(Env("PROMPT_BUILTIN_ENABLED"), true),
             PromptProjectAgentsEnabled = ParseBool(Env("PROMPT_PROJECT_AGENTS_ENABLED"), true),
@@ -86,6 +90,19 @@ internal static class ConfigLoader
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
             "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
             "  --handler-last-name <value>    Optional handler last name (env: OPENCODE_HANDLER_LASTNAME)",
+            "  --lsl-dialog-bridge-trusted-object-id <uuid>",
+            "                                Optional trusted bridge object UUID for dialog replies",
+            "                                (env: LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID)",
+            "  --lsl-dialog-bridge-trusted-owner-id <uuid>",
+            "                                Optional trusted owner UUID for bridge object replies",
+            "                                (env: LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID)",
+            "  --lsl-dialog-bridge-require-trusted-sender <bool>",
+            "                                Require trusted object/owner checks for bridge replies",
+            "                                (env: LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER, default: true)",
+            "  --lsl-dialog-bridge-trust-state-file <path>",
+            "                                Optional JSON file used to persist runtime bridge trust pins",
+            "                                Supports {bot_uuid} in path templates for multi-bot deployments",
+            "                                (env: LSL_DIALOG_BRIDGE_TRUST_STATE_FILE, default: /workspace/state/dialog-bridge-trust.json)",
             string.Empty,
             "Prompt handling:",
             "  --prompt-handling-enabled <bool>",
@@ -184,6 +201,18 @@ internal static class ConfigLoader
                     break;
                 case "--handler-last-name":
                     options.OpencodeHandlerLastName = RequireValue(args, ref i, arg);
+                    break;
+                case "--lsl-dialog-bridge-trusted-object-id":
+                    options.LslDialogBridgeTrustedObjectId = RequireValue(args, ref i, arg);
+                    break;
+                case "--lsl-dialog-bridge-trusted-owner-id":
+                    options.LslDialogBridgeTrustedOwnerId = RequireValue(args, ref i, arg);
+                    break;
+                case "--lsl-dialog-bridge-require-trusted-sender":
+                    options.LslDialogBridgeRequireTrustedSender = ParseBool(RequireValue(args, ref i, arg), options.LslDialogBridgeRequireTrustedSender);
+                    break;
+                case "--lsl-dialog-bridge-trust-state-file":
+                    options.LslDialogBridgeTrustStateFile = RequireValue(args, ref i, arg);
                     break;
                 case "--prompt-handling-enabled":
                     options.PromptHandlingEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptHandlingEnabled);

@@ -4,7 +4,7 @@ This prototype lets `opensim-metaverse2mcp` show Opencode multiple-choice questi
 
 ## Files
 
-- `examples/dialog-bridge.lsl` - in-world helper script.
+- `lsl/dialog-bridge.lsl` - in-world helper script.
 
 ## How it works
 

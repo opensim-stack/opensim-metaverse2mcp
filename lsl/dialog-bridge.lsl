@@ -180,6 +180,8 @@ default
                     + llEscapeURL(selectedAnswer);
 
                 llInstantMessage(botId, payload);
+                // Transport fallback: some simulator paths are more reliable over directed chat.
+                llRegionSayTo(botId, 0, payload);
                 gRequests = llDeleteSubList(gRequests, i, i + 4);
                 return;
             }
