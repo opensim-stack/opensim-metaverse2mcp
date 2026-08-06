@@ -8,6 +8,15 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession : IDisposable
 {
+    private sealed record PendingScriptDialog(
+        string Id,
+        string Message,
+        string ObjectName,
+        UUID ObjectId,
+        int Channel,
+        IReadOnlyList<string> Buttons,
+        DateTimeOffset ReceivedAt);
+
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
     private readonly IOpencodeChatClient? _opencodeChat;
@@ -18,8 +27,12 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingQuestionByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingScriptDialog> _latestScriptDialogByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly string? _handlerFullName;
     private readonly object _promptStateLock = new();
+    private readonly object _recentImSpeakerLock = new();
 
     private string? _projectAgentsPromptCache;
     private DateTime _projectAgentsPromptCacheLastWriteUtc;
@@ -27,6 +40,15 @@ internal sealed partial class BotSession : IDisposable
     private string? _activeAgentsNotecardSourceName;
     private string? _activeAgentsNotecardItemId;
     private DateTimeOffset? _activeAgentsNotecardInstalledAt;
+    private UUID _lastImSpeakerAgentId = UUID.Zero;
+    private string? _lastImSpeakerName;
+    private string? _lastImConversationKey;
+    private long _scriptDialogSequence;
+    private const int LslDialogBridgeRequestChannel = -919191;
+    private const string LslDialogBridgeRequestPrefix = "dlgreq";
+    private const string LslDialogBridgeReplyPrefix = "dlgrep";
+    private const string LslDialogBridgePermissionRequestPrefix = "perm:";
+    private static readonly IReadOnlyList<string> LslPermissionDialogOptions = new[] { "yes", "no", "yes always", "no always" };
 
     private const string BuiltInBridgePrompt =
         "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n" +
@@ -81,6 +103,7 @@ internal sealed partial class BotSession : IDisposable
         client.Network.Disconnected += OnDisconnected;
         client.Self.IM += OnInstantMessage;
         client.Self.ChatFromSimulator += OnChatFromSimulator;
+        client.Self.ScriptDialog += OnScriptDialog;
         client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
 
         var login = client.Network.DefaultLoginParams(
@@ -103,6 +126,7 @@ internal sealed partial class BotSession : IDisposable
             client.Network.Logout();
             client.Self.IM -= OnInstantMessage;
             client.Self.ChatFromSimulator -= OnChatFromSimulator;
+            client.Self.ScriptDialog -= OnScriptDialog;
             client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
             client.Network.Disconnected -= OnDisconnected;
             client.Network.LoginProgress -= OnLoginProgress;
@@ -1481,6 +1505,7 @@ internal sealed partial class BotSession : IDisposable
 
         client.Self.IM -= OnInstantMessage;
         client.Self.ChatFromSimulator -= OnChatFromSimulator;
+        client.Self.ScriptDialog -= OnScriptDialog;
         client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
         client.Network.Disconnected -= OnDisconnected;
         client.Network.LoginProgress -= OnLoginProgress;
@@ -1999,7 +2024,7 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private static async Task<Primitive?> WaitForCreatedPrimAsync(
+    private async Task<Primitive?> WaitForCreatedPrimAsync(
         GridClient client,
         Simulator simulator,
         Vector3 expectedPosition,
@@ -2053,7 +2078,8 @@ internal sealed partial class BotSession : IDisposable
         }
 
         if (e.IM.Dialog != InstantMessageDialog.MessageFromAgent
-            && e.IM.Dialog != InstantMessageDialog.SessionSend)
+            && e.IM.Dialog != InstantMessageDialog.SessionSend
+            && e.IM.Dialog != InstantMessageDialog.MessageFromObject)
         {
             return;
         }
@@ -2064,6 +2090,15 @@ internal sealed partial class BotSession : IDisposable
 
         if (string.IsNullOrWhiteSpace(text))
         {
+            return;
+        }
+
+        if (e.IM.Dialog == InstantMessageDialog.MessageFromObject)
+        {
+            _ = Task.Run(async () =>
+            {
+                await TryHandleLslDialogBridgeReplyAsync(client, text).ConfigureAwait(false);
+            });
             return;
         }
 
@@ -2095,6 +2130,14 @@ internal sealed partial class BotSession : IDisposable
         }
 
         var conversationKey = $"im:{e.IM.FromAgentID}";
+        _conversationAgentByKey[conversationKey] = e.IM.FromAgentID;
+        _conversationNameByKey[conversationKey] = from;
+        lock (_recentImSpeakerLock)
+        {
+            _lastImSpeakerAgentId = e.IM.FromAgentID;
+            _lastImSpeakerName = from;
+            _lastImConversationKey = conversationKey;
+        }
 
         _ = Task.Run(async () =>
         {
@@ -2102,6 +2145,8 @@ internal sealed partial class BotSession : IDisposable
             if (!await gate.WaitAsync(0).ConfigureAwait(false))
             {
                 if (text.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
+                    || text.StartsWith("*dialog", StringComparison.OrdinalIgnoreCase)
+                    || text.StartsWith("*dialogs", StringComparison.OrdinalIgnoreCase)
                     || text.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
                     || text.StartsWith("*question", StringComparison.OrdinalIgnoreCase))
                 {
@@ -2110,6 +2155,12 @@ internal sealed partial class BotSession : IDisposable
                     {
                         return;
                     }
+                }
+
+                var handledBusyDialog = TryHandlePendingScriptDialogBeforeRouting(client, e.IM.FromAgentID, from, conversationKey, text);
+                if (handledBusyDialog)
+                {
+                    return;
                 }
 
                 var handledBusyQuestion = await TryHandlePendingQuestionBeforeRoutingAsync(
@@ -2189,6 +2240,12 @@ internal sealed partial class BotSession : IDisposable
                     }
                 }
 
+                var handledDialog = TryHandlePendingScriptDialogBeforeRouting(client, e.IM.FromAgentID, from, conversationKey, text);
+                if (handledDialog)
+                {
+                    return;
+                }
+
                 var handledQuestion = await TryHandlePendingQuestionBeforeRoutingAsync(
                     client,
                     e.IM.FromAgentID,
@@ -2260,11 +2317,17 @@ internal sealed partial class BotSession : IDisposable
                 {
                     var latestPermission = reply.PendingPermissions
                         .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Id));
+                    var openedPermissionDialog = false;
                     if (latestPermission != null)
                     {
                         _latestPendingPermissionByConversation[conversationKey] = latestPermission.Id;
                         _announcedPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                        openedPermissionDialog = TryOfferPermissionViaLslDialogBridge(client, conversationKey, latestPermission);
                         responseText += "\n\n" + BuildFriendlyPermissionPrompt(latestPermission);
+                        if (openedPermissionDialog)
+                        {
+                            responseText += "\nI also opened an in-world dialog for this approval request.";
+                        }
                     }
 
                     if (reply.PendingPermissions.Count > 1)
@@ -2286,7 +2349,12 @@ internal sealed partial class BotSession : IDisposable
                                 || !announcedPermissionId.Equals(latestPermission.Id, StringComparison.OrdinalIgnoreCase))
                             {
                                 _announcedPendingPermissionByConversation[conversationKey] = latestPermission.Id;
+                                var openedPermissionDialog = TryOfferPermissionViaLslDialogBridge(client, conversationKey, latestPermission);
                                 responseText += "\n\n" + BuildFriendlyPermissionPrompt(latestPermission);
+                                if (openedPermissionDialog)
+                                {
+                                    responseText += "\nI also opened an in-world dialog for this approval request.";
+                                }
                             }
                         }
                     }
@@ -2296,10 +2364,12 @@ internal sealed partial class BotSession : IDisposable
                 {
                     var latestQuestion = reply.PendingQuestions
                         .FirstOrDefault(q => !string.IsNullOrWhiteSpace(q.Id));
+                    var openedLslDialog = false;
                     if (latestQuestion != null)
                     {
                         _latestPendingQuestionByConversation[conversationKey] = latestQuestion.Id;
                         _announcedPendingQuestionByConversation[conversationKey] = latestQuestion.Id;
+                        openedLslDialog = TryOfferQuestionViaLslDialogBridge(client, conversationKey, latestQuestion);
                     }
 
                     var questionLines = reply.PendingQuestions
@@ -2313,6 +2383,10 @@ internal sealed partial class BotSession : IDisposable
                         .ToList();
                     questionLines.Insert(0, "Pending question request(s):");
                     questionLines.Add("Reply in chat with your answer (or option number) to continue.");
+                    if (openedLslDialog)
+                    {
+                        questionLines.Add("I also opened an in-world dialog for this question.");
+                    }
                     responseText += "\n\n" + string.Join("\n", questionLines);
                 }
                 else
@@ -2331,7 +2405,12 @@ internal sealed partial class BotSession : IDisposable
                                 || !announcedQuestionId.Equals(polledQuestions[0].Id, StringComparison.OrdinalIgnoreCase))
                             {
                                 _announcedPendingQuestionByConversation[conversationKey] = polledQuestions[0].Id;
+                                var openedLslDialog = TryOfferQuestionViaLslDialogBridge(client, conversationKey, polledQuestions[0]);
                                 responseText += "\n\n" + BuildFriendlyQuestionPrompt(polledQuestions[0]);
+                                if (openedLslDialog)
+                                {
+                                    responseText += "\nI also opened an in-world dialog for this question.";
+                                }
                             }
                         }
                     }
@@ -2646,7 +2725,7 @@ internal sealed partial class BotSession : IDisposable
             return true;
         }
 
-        // HttpClient timeouts often arrive as TaskCanceledException/OperationCanceledException.
+        // HttpClient timeouts often arrive as a TaskCanceledException/OperationCanceledException.
         if (ex is TaskCanceledException)
         {
             return true;
@@ -2695,6 +2774,10 @@ internal sealed partial class BotSession : IDisposable
                 case "permission":
                 case "permissions":
                     await HandlePermissionCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
+                    return true;
+                case "dialog":
+                case "dialogs":
+                    HandleDialogCommand(client, agentId, from, conversationKey, arg);
                     return true;
                 case "question":
                 case "questions":
@@ -2746,6 +2829,7 @@ internal sealed partial class BotSession : IDisposable
                 "*status - Show active AI and prompt settings for this IM",
                 "*cancel - Abort current in-flight AI request for this IM",
                 "*prompt - Manage prompt layers (status/show/clear/reload)",
+                "*dialog - Manage pending script dialogs",
                 "*permission - Manage pending permission requests",
                 "*question - Manage pending question requests",
                 "*providers - List providers",
@@ -2783,6 +2867,7 @@ internal sealed partial class BotSession : IDisposable
                 BuildStarHelpText("status"),
                 BuildStarHelpText("cancel"),
                 BuildStarHelpText("prompt"),
+                BuildStarHelpText("dialog"),
                 BuildStarHelpText("permission"),
                 BuildStarHelpText("question"),
                 BuildStarHelpText("providers"),
@@ -2801,12 +2886,18 @@ internal sealed partial class BotSession : IDisposable
                 "*prompt show [effective|builtin|project|notecard] - Preview prompt text",
                 "*prompt clear-notecard - Remove active in-world AGENTS.md prompt layer",
                 "*prompt reload-project - Re-read project AGENTS.md from disk"),
+            "dialog" => string.Join(
+                "\n",
+                "*dialog variants:",
+                "*dialog list - Show the latest pending in-world script dialog",
+                "*dialog reply <option-number|button-label> - Reply to the latest script dialog"),
             "permission" => string.Join(
                 "\n",
                 "*permission variants:",
                 "*permission list - List pending permission requests",
                 "*permission allow <permission-id> [remember] - Approve",
-                "*permission deny <permission-id> [remember] - Reject"),
+                "*permission deny <permission-id> [remember] - Reject",
+                "Quick reply equivalents: 1=yes, 2=no, 3=yes always, 4=no always"),
             "question" => string.Join(
                 "\n",
                 "*question variants:",
@@ -3124,7 +3215,7 @@ internal sealed partial class BotSession : IDisposable
                 lines.Add($"... and {pending.Count - 12} more");
             }
 
-            lines.Add("Use *permission allow <permission-id> [remember] or *permission deny <permission-id> [remember].");
+            lines.Add("Use *permission allow <permission-id> [remember] or *permission deny <permission-id> [remember] (quick replies: 1=yes, 2=no, 3=yes always, 4=no always).");
             _latestPendingPermissionByConversation[conversationKey] = pending[0].Id;
             SendImText(client, agentId, from, string.Join("\n", lines));
             return;
@@ -3133,7 +3224,7 @@ internal sealed partial class BotSession : IDisposable
         var action = parts[0].ToLowerInvariant();
         if (action is not ("allow" or "deny" or "reject"))
         {
-            SendImText(client, agentId, from, "Usage: *permission list | *permission allow <permission-id> [remember] | *permission deny <permission-id> [remember]");
+            SendImText(client, agentId, from, "Usage: *permission list | *permission allow <permission-id> [remember] | *permission deny <permission-id> [remember] (or quick reply 1/2/3/4)");
             return;
         }
 
@@ -3240,6 +3331,141 @@ internal sealed partial class BotSession : IDisposable
             ? "Got it - approval sent and remembered."
             : "Got it - approval sent.");
         return true;
+    }
+
+    private void HandleDialogCommand(GridClient client, UUID agentId, string from, string conversationKey, string arg)
+    {
+        if (!_latestScriptDialogByConversation.TryGetValue(conversationKey, out var dialog))
+        {
+            SendImText(client, agentId, from, "No pending script dialog for this conversation.");
+            return;
+        }
+
+        var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0 || parts[0].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            SendImText(client, agentId, from, BuildFriendlyScriptDialogPrompt(dialog));
+            return;
+        }
+
+        var selectionText = parts[0].Equals("reply", StringComparison.OrdinalIgnoreCase)
+            ? arg[parts[0].Length..].Trim()
+            : arg.Trim();
+        if (!TryResolveScriptDialogChoice(dialog, selectionText, out var selectedIndex, out var selectedLabel))
+        {
+            SendImText(client, agentId, from, "Could not match that dialog option. Reply with option number or exact button label.");
+            return;
+        }
+
+        client.Self.ReplyToScriptDialog(dialog.Channel, selectedIndex, selectedLabel, dialog.ObjectId);
+        _latestScriptDialogByConversation.TryRemove(conversationKey, out _);
+        SendImText(client, agentId, from, $"Dialog response sent: {selectedLabel}");
+    }
+
+    private bool TryHandlePendingScriptDialogBeforeRouting(
+        GridClient client,
+        UUID agentId,
+        string from,
+        string conversationKey,
+        string text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || text.StartsWith('*'))
+        {
+            return false;
+        }
+
+        if (!_latestScriptDialogByConversation.TryGetValue(conversationKey, out var dialog))
+        {
+            return false;
+        }
+
+        if (!TryResolveScriptDialogChoice(dialog, text, out var selectedIndex, out var selectedLabel))
+        {
+            return false;
+        }
+
+        client.Self.ReplyToScriptDialog(dialog.Channel, selectedIndex, selectedLabel, dialog.ObjectId);
+        _latestScriptDialogByConversation.TryRemove(conversationKey, out _);
+        SendImText(client, agentId, from, $"Dialog response sent: {selectedLabel}");
+        return true;
+    }
+
+    private static bool TryResolveScriptDialogChoice(PendingScriptDialog dialog, string input, out int selectedIndex, out string selectedLabel)
+    {
+        selectedIndex = -1;
+        selectedLabel = string.Empty;
+        if (dialog.Buttons.Count == 0 || string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        var normalized = input.Trim();
+        if (int.TryParse(normalized, out var optionNumber)
+            && optionNumber >= 1
+            && optionNumber <= dialog.Buttons.Count)
+        {
+            selectedIndex = optionNumber - 1;
+            selectedLabel = dialog.Buttons[selectedIndex];
+            return true;
+        }
+
+        for (var i = 0; i < dialog.Buttons.Count; i++)
+        {
+            if (dialog.Buttons[i].Equals(normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                selectedIndex = i;
+                selectedLabel = dialog.Buttons[i];
+                return true;
+            }
+        }
+
+        var answer = normalized.ToLowerInvariant();
+        if (answer is "yes" or "y")
+        {
+            for (var i = 0; i < dialog.Buttons.Count; i++)
+            {
+                if (dialog.Buttons[i].Contains("yes", StringComparison.OrdinalIgnoreCase))
+                {
+                    selectedIndex = i;
+                    selectedLabel = dialog.Buttons[i];
+                    return true;
+                }
+            }
+        }
+
+        if (answer is "no" or "n")
+        {
+            for (var i = 0; i < dialog.Buttons.Count; i++)
+            {
+                if (dialog.Buttons[i].Contains("no", StringComparison.OrdinalIgnoreCase))
+                {
+                    selectedIndex = i;
+                    selectedLabel = dialog.Buttons[i];
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static string BuildFriendlyScriptDialogPrompt(PendingScriptDialog dialog)
+    {
+        var title = string.IsNullOrWhiteSpace(dialog.ObjectName) ? "Script dialog" : dialog.ObjectName;
+        var lines = new List<string>
+        {
+            "I received an in-world script dialog:",
+            title,
+            dialog.Message
+        };
+
+        for (var i = 0; i < dialog.Buttons.Count; i++)
+        {
+            lines.Add($"{i + 1}) {dialog.Buttons[i]}");
+        }
+
+        lines.Add("Reply with option number or exact button text.");
+        return string.Join("\n", lines);
     }
 
     private async Task HandleQuestionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
@@ -3370,9 +3596,294 @@ internal sealed partial class BotSession : IDisposable
         _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
         SendImText(client, agentId, from, ok
             ? "Got it - answered your pending question."
-            : "I sent your answer, but Opencode did not return an explicit success flag.");
+            : "I sent your dialog choice, but Opencode did not return an explicit success flag.");
         return true;
     }
+
+    private bool TryOfferQuestionViaLslDialogBridge(GridClient client, string conversationKey, OpencodePendingQuestion question)
+    {
+        if (question.Options.Count == 0)
+        {
+            Console.WriteLine($"[dialog-bridge] skip offer: no options for question {question.Id}.");
+            return false;
+        }
+
+        if (!_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
+            || targetAgentId == UUID.Zero)
+        {
+            Console.WriteLine($"[dialog-bridge] skip offer: no target agent mapped for conversation {conversationKey}.");
+            return false;
+        }
+
+        // Strict alpha payload format:
+        // dlgreq|conversation|questionId|target|header|optionCount|opt1|opt2|...
+        var payloadParts = new List<string>
+        {
+            LslDialogBridgeRequestPrefix,
+            EncodeDialogToken(conversationKey),
+            EncodeDialogToken(question.Id),
+            EncodeDialogToken(targetAgentId.ToString()),
+            EncodeDialogToken(question.Header),
+            question.Options.Count.ToString()
+        };
+        payloadParts.AddRange(question.Options.Select(EncodeDialogToken));
+        var payload = string.Join("|", payloadParts);
+
+        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Normal);
+        if (payload.Length > 240)
+        {
+            Console.WriteLine($"[dialog-bridge] warning: payload length {payload.Length} may be truncated by simulator chat limits.");
+        }
+        Console.WriteLine(
+            $"[dialog-bridge] offered question via channel {LslDialogBridgeRequestChannel}: conversation={conversationKey} question={question.Id} options={question.Options.Count} target={targetAgentId} payloadLength={payload.Length}");
+        return true;
+    }
+
+    private bool TryOfferPermissionViaLslDialogBridge(GridClient client, string conversationKey, OpencodePendingPermission permission)
+    {
+        var permissionId = permission.Id?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(permissionId))
+        {
+            Console.WriteLine("[dialog-bridge] skip offer: permission id is missing.");
+            return false;
+        }
+
+        if (!_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
+            || targetAgentId == UUID.Zero)
+        {
+            Console.WriteLine($"[dialog-bridge] skip offer: no target agent mapped for conversation {conversationKey}.");
+            return false;
+        }
+
+        var header = BuildPermissionDialogHeader(permission);
+        // Tag permission request IDs so dialog replies can be routed deterministically.
+        var bridgeRequestId = LslDialogBridgePermissionRequestPrefix + permissionId;
+        var payloadParts = new List<string>
+        {
+            LslDialogBridgeRequestPrefix,
+            EncodeDialogToken(conversationKey),
+            EncodeDialogToken(bridgeRequestId),
+            EncodeDialogToken(targetAgentId.ToString()),
+            EncodeDialogToken(header),
+            LslPermissionDialogOptions.Count.ToString()
+        };
+        payloadParts.AddRange(LslPermissionDialogOptions.Select(EncodeDialogToken));
+        var payload = string.Join("|", payloadParts);
+
+        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Normal);
+        if (payload.Length > 240)
+        {
+            Console.WriteLine($"[dialog-bridge] warning: payload length {payload.Length} may be truncated by simulator chat limits.");
+        }
+
+        Console.WriteLine(
+            $"[dialog-bridge] offered permission via channel {LslDialogBridgeRequestChannel}: conversation={conversationKey} permission={permissionId} target={targetAgentId} payloadLength={payload.Length}");
+        return true;
+    }
+
+    private async Task<bool> TryHandleLslDialogBridgeReplyAsync(GridClient client, string text)
+    {
+        if (!TryParseLslDialogBridgeReply(text, out var conversationKey, out var requestId, out var answer))
+        {
+            Console.WriteLine("[dialog-bridge] ignored object IM: not a dialog-bridge reply payload.");
+            return false;
+        }
+
+        Console.WriteLine($"[dialog-bridge] received reply payload: conversation={conversationKey} request={requestId} answer={answer}");
+
+        if (_opencodeChat == null || string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
+        {
+            Console.WriteLine("[dialog-bridge] dropped reply: opencode chat unavailable or payload missing conversation/request id.");
+            return false;
+        }
+
+        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            Console.WriteLine($"[dialog-bridge] dropped reply: no active opencode session for conversation {conversationKey}.");
+            return false;
+        }
+
+        if (await TryHandleLslDialogBridgePermissionReplyAsync(client, conversationKey, sessionId, requestId, answer).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        var resolvedAnswer = await ResolveLslDialogBridgeAnswerAsync(sessionId, requestId, answer).ConfigureAwait(false);
+        var ok = await _opencodeChat.ReplyToQuestionAsync(sessionId, requestId, new[] { resolvedAnswer }, CancellationToken.None).ConfigureAwait(false);
+        Console.WriteLine($"[dialog-bridge] forwarded reply to opencode: session={sessionId} question={requestId} success={ok} answer={resolvedAnswer}");
+        _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
+        _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
+
+        if (_conversationAgentByKey.TryGetValue(conversationKey, out var agentId)
+            && agentId != UUID.Zero)
+        {
+            var from = _conversationNameByKey.TryGetValue(conversationKey, out var displayName)
+                ? displayName
+                : "handler";
+            SendImText(client, agentId, from, ok
+                ? $"Got it - answered your pending question with: {resolvedAnswer}"
+                : "I sent your dialog choice, but Opencode did not return an explicit success flag.");
+        }
+
+        return true;
+    }
+
+    private async Task<bool> TryHandleLslDialogBridgePermissionReplyAsync(
+        GridClient client,
+        string conversationKey,
+        string sessionId,
+        string requestId,
+        string answer)
+    {
+        var permissionId = requestId.Trim();
+        var taggedPermissionRequest = false;
+        if (permissionId.StartsWith(LslDialogBridgePermissionRequestPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            taggedPermissionRequest = true;
+            permissionId = permissionId[LslDialogBridgePermissionRequestPrefix.Length..].Trim();
+        }
+
+        var isPermissionId = IsCanonicalPermissionRequestId(permissionId);
+        if (!isPermissionId)
+        {
+            var pending = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var match = pending.FirstOrDefault(p => p.Id.Equals(permissionId, StringComparison.OrdinalIgnoreCase));
+            if (match == null)
+            {
+                if (!taggedPermissionRequest)
+                {
+                    return false;
+                }
+
+                match = pending.FirstOrDefault();
+                if (match == null)
+                {
+                    Console.WriteLine($"[dialog-bridge] tagged permission reply could not resolve pending permission for session={sessionId} request={requestId}");
+                    return false;
+                }
+            }
+
+            permissionId = match.Id;
+        }
+
+        if (!TryParseSimplePermissionResponse(answer, out var response, out var remember))
+        {
+            Console.WriteLine($"[dialog-bridge] permission reply not understood for {permissionId}: '{answer}'");
+            if (_conversationAgentByKey.TryGetValue(conversationKey, out var agentId) && agentId != UUID.Zero)
+            {
+                var from = _conversationNameByKey.TryGetValue(conversationKey, out var displayName)
+                    ? displayName
+                    : "handler";
+                SendImText(client, agentId, from,
+                    "I could not understand that approval choice. Reply with: 1) yes, 2) no, 3) yes always, 4) no always (or use *permission list).");
+            }
+
+            return true;
+        }
+
+        var ok = await _opencodeChat!.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
+        Console.WriteLine($"[dialog-bridge] forwarded permission reply to opencode: session={sessionId} permission={permissionId} success={ok} response={response} remember={remember}");
+        _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
+        _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
+
+        if (_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
+            && targetAgentId != UUID.Zero)
+        {
+            var from = _conversationNameByKey.TryGetValue(conversationKey, out var displayName)
+                ? displayName
+                : "handler";
+            SendImText(client, targetAgentId, from, ok
+                ? (remember ? "Got it - approval sent and remembered." : "Got it - approval sent.")
+                : "I sent your approval response, but Opencode did not return an explicit success flag.");
+        }
+
+        return true;
+    }
+
+    private async Task<string> ResolveLslDialogBridgeAnswerAsync(string sessionId, string questionId, string answer)
+    {
+        var trimmedAnswer = answer?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(trimmedAnswer))
+        {
+            return string.Empty;
+        }
+
+        var pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        var question = pending.FirstOrDefault(q => q.Id.Equals(questionId, StringComparison.OrdinalIgnoreCase));
+        if (question == null || question.Options.Count == 0)
+        {
+            return trimmedAnswer;
+        }
+
+        if (TryResolveQuestionAnswer(question, trimmedAnswer, out var resolvedAnswer))
+        {
+            return resolvedAnswer;
+        }
+
+        var onceDecoded = DecodeDialogToken(trimmedAnswer);
+        if (!onceDecoded.Equals(trimmedAnswer, StringComparison.Ordinal)
+            && TryResolveQuestionAnswer(question, onceDecoded, out resolvedAnswer))
+        {
+            return resolvedAnswer;
+        }
+
+        foreach (var option in question.Options)
+        {
+            if (option.StartsWith(trimmedAnswer, StringComparison.OrdinalIgnoreCase))
+            {
+                return option;
+            }
+
+            var encodedOption = EncodeDialogToken(option);
+            if (encodedOption.StartsWith(trimmedAnswer, StringComparison.OrdinalIgnoreCase)
+                || trimmedAnswer.StartsWith(encodedOption, StringComparison.OrdinalIgnoreCase))
+            {
+                return option;
+            }
+        }
+
+        return onceDecoded;
+    }
+
+    private static bool TryParseLslDialogBridgeReply(string text, out string conversationKey, out string requestId, out string answer)
+    {
+        conversationKey = string.Empty;
+        requestId = string.Empty;
+        answer = string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var parts = text.Split('|');
+        if (parts.Length < 4 || !parts[0].Equals(LslDialogBridgeReplyPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        conversationKey = DecodeDialogToken(parts[1]);
+        requestId = DecodeDialogToken(parts[2]);
+        answer = DecodeDialogToken(parts[3]);
+        return !string.IsNullOrWhiteSpace(conversationKey)
+            && !string.IsNullOrWhiteSpace(requestId)
+            && !string.IsNullOrWhiteSpace(answer);
+    }
+
+    private static string BuildPermissionDialogHeader(OpencodePendingPermission permission)
+    {
+        var title = permission.Title?.Trim() ?? string.Empty;
+        var hasHumanTitle = !string.IsNullOrWhiteSpace(title)
+            && !title.StartsWith("per", StringComparison.OrdinalIgnoreCase)
+            && !title.StartsWith("que", StringComparison.OrdinalIgnoreCase);
+        return hasHumanTitle ? title : "Approval required";
+    }
+
+    private static string EncodeDialogToken(string? value)
+        => Uri.EscapeDataString(value ?? string.Empty);
+
+    private static string DecodeDialogToken(string value)
+        => Uri.UnescapeDataString(value ?? string.Empty);
 
     private async Task<bool> TryHandlePendingQuestionBeforeRoutingAsync(
         GridClient client,
@@ -3394,27 +3905,73 @@ internal sealed partial class BotSession : IDisposable
 
         // TEMP(event-first migration): this pre-routing poll can be deleted after session-correlated
         // question events are consumed directly from /event and mapped to conversationKey.
-        var pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-        if (pending.Count == 0)
+        // Keep this short to avoid stale prompts, but long enough for async question.asked emission.
+        for (var attempt = 0; attempt < 10; attempt++)
         {
-            return false;
+            await Task.Delay(500).ConfigureAwait(false);
+
+            var pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            if (pendingPermissions.Count == 0)
+            {
+                return false;
+            }
+
+            var permission = pendingPermissions.FirstOrDefault();
+            if (permission != null && !string.IsNullOrWhiteSpace(permission.Id))
+            {
+                _latestPendingPermissionByConversation[conversationKey] = permission.Id;
+                if (_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
+                    && announcedPermissionId.Equals(permission.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                _announcedPendingPermissionByConversation[conversationKey] = permission.Id;
+                var openedPermissionDialog = TryOfferPermissionViaLslDialogBridge(client, conversationKey, permission);
+                var prompt = BuildFriendlyPermissionPrompt(permission);
+                if (openedPermissionDialog)
+                {
+                    prompt += "\nI also opened an in-world dialog for this approval request.";
+                }
+
+                SendImText(client, agentId, from, prompt);
+                continue;
+            }
+
+            IReadOnlyList<OpencodePendingQuestion> pendingQuestions;
+            try
+            {
+                pendingQuestions = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                continue;
+            }
+
+            var question = pendingQuestions.FirstOrDefault();
+            if (question == null || string.IsNullOrWhiteSpace(question.Id))
+            {
+                continue;
+            }
+
+            _latestPendingQuestionByConversation[conversationKey] = question.Id;
+            if (!_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedQuestionId)
+                || !announcedQuestionId.Equals(question.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                _announcedPendingQuestionByConversation[conversationKey] = question.Id;
+                var openedLslDialog = TryOfferQuestionViaLslDialogBridge(client, conversationKey, question);
+                var prompt = BuildFriendlyQuestionPrompt(question);
+                if (openedLslDialog)
+                {
+                    prompt += "\nI also opened an in-world dialog for this question.";
+                }
+
+                SendImText(client, agentId, from, prompt);
+                continue;
+            }
         }
 
-        var question = pending[0];
-        _latestPendingQuestionByConversation[conversationKey] = question.Id;
-
-        if (TryResolveQuestionAnswer(question, text, out var resolvedAnswer))
-        {
-            var ok = await _opencodeChat.ReplyToQuestionAsync(sessionId, question.Id, new[] { resolvedAnswer }, CancellationToken.None).ConfigureAwait(false);
-            _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
-            SendImText(client, agentId, from, ok
-                ? $"Got it - answered your pending question with: {resolvedAnswer}"
-                : "I tried to answer your pending question, but Opencode did not return an explicit success flag.");
-            return true;
-        }
-
-        SendImText(client, agentId, from, BuildFriendlyQuestionPrompt(question));
-        return true;
+        return false;
     }
 
     private static bool TryResolveQuestionAnswer(OpencodePendingQuestion question, string text, out string answer)
@@ -3509,7 +4066,11 @@ internal sealed partial class BotSession : IDisposable
         {
             "I need your approval before I can continue:",
             primaryText,
-            "Reply with yes/no to continue."
+            "Reply with one of:",
+            "1) yes",
+            "2) no",
+            "3) yes always",
+            "4) no always"
         };
 
         if (!string.IsNullOrWhiteSpace(title)
@@ -3648,7 +4209,14 @@ internal sealed partial class BotSession : IDisposable
                 }
 
                 _announcedPendingPermissionByConversation[conversationKey] = permission.Id;
-                SendImText(client, agentId, from, BuildFriendlyPermissionPrompt(permission));
+                var openedPermissionDialog = TryOfferPermissionViaLslDialogBridge(client, conversationKey, permission);
+                var prompt = BuildFriendlyPermissionPrompt(permission);
+                if (openedPermissionDialog)
+                {
+                    prompt += "\nI also opened an in-world dialog for this approval request.";
+                }
+
+                SendImText(client, agentId, from, prompt);
                 return;
             }
 
@@ -3669,16 +4237,20 @@ internal sealed partial class BotSession : IDisposable
             }
 
             _latestPendingQuestionByConversation[conversationKey] = question.Id;
-            if (_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedId)
-                && announcedId.Equals(question.Id, StringComparison.OrdinalIgnoreCase))
+            if (!_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedQuestionId)
+                || !announcedQuestionId.Equals(question.Id, StringComparison.OrdinalIgnoreCase))
             {
-                return;
-            }
+                _announcedPendingQuestionByConversation[conversationKey] = question.Id;
+                var openedLslDialog = TryOfferQuestionViaLslDialogBridge(client, conversationKey, question);
+                var prompt = BuildFriendlyQuestionPrompt(question);
+                if (openedLslDialog)
+                {
+                    prompt += "\nI also opened an in-world dialog for this question.";
+                }
 
-            _announcedPendingQuestionByConversation[conversationKey] = question.Id;
-            var prompt = BuildFriendlyQuestionPrompt(question);
-            SendImText(client, agentId, from, prompt);
-            return;
+                SendImText(client, agentId, from, prompt);
+                continue;
+            }
         }
     }
 
@@ -3735,21 +4307,28 @@ internal sealed partial class BotSession : IDisposable
                 }
 
                 _announcedPendingPermissionByConversation[conversationKey] = permission.Id;
-                SendImText(client, agentId, from, BuildFriendlyPermissionPrompt(permission));
+                var openedPermissionDialog = TryOfferPermissionViaLslDialogBridge(client, conversationKey, permission);
+                var permissionPrompt = BuildFriendlyPermissionPrompt(permission);
+                if (openedPermissionDialog)
+                {
+                    permissionPrompt += "\nI also opened an in-world dialog for this approval request.";
+                }
+
+                SendImText(client, agentId, from, permissionPrompt);
                 continue;
             }
 
-            IReadOnlyList<OpencodePendingQuestion> pending;
+            IReadOnlyList<OpencodePendingQuestion> pendingQuestions;
             try
             {
-                pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+                pendingQuestions = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {
                 continue;
             }
 
-            var question = pending.FirstOrDefault();
+            var question = pendingQuestions.FirstOrDefault();
             if (question == null || string.IsNullOrWhiteSpace(question.Id))
             {
                 continue;
@@ -3763,7 +4342,14 @@ internal sealed partial class BotSession : IDisposable
             }
 
             _announcedPendingQuestionByConversation[conversationKey] = question.Id;
-            SendImText(client, agentId, from, BuildFriendlyQuestionPrompt(question));
+            var openedLslDialog = TryOfferQuestionViaLslDialogBridge(client, conversationKey, question);
+            var questionPrompt = BuildFriendlyQuestionPrompt(question);
+            if (openedLslDialog)
+            {
+                questionPrompt += "\nI also opened an in-world dialog for this question.";
+            }
+
+            SendImText(client, agentId, from, questionPrompt);
             continue;
         }
     }
@@ -4498,26 +5084,32 @@ internal sealed partial class BotSession : IDisposable
         }
 
         var normalized = text.Trim().ToLowerInvariant();
-        if (normalized is "yes" or "y")
+        var compact = normalized
+            .Replace("(", string.Empty, StringComparison.Ordinal)
+            .Replace(")", string.Empty, StringComparison.Ordinal)
+            .Replace(",", " ", StringComparison.Ordinal);
+        compact = string.Join(" ", compact.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+        if (compact is "1" or "yes" or "y" or "allow")
         {
             response = "allow";
             return true;
         }
 
-        if (normalized is "yes always" or "always yes" or "yes remember" or "y always")
+        if (compact is "3" or "yes always" or "always yes" or "yes remember" or "y always" or "allow always")
         {
             response = "allow";
             remember = true;
             return true;
         }
 
-        if (normalized is "no" or "n")
+        if (compact is "2" or "no" or "n" or "reject" or "deny")
         {
             response = "reject";
             return true;
         }
 
-        if (normalized is "no always" or "always no" or "no remember" or "n always")
+        if (compact is "4" or "no always" or "always no" or "no remember" or "n always" or "reject always" or "deny always")
         {
             response = "reject";
             remember = true;
@@ -4785,6 +5377,51 @@ internal sealed partial class BotSession : IDisposable
         // TODO(ai-chat): add group chat routing once we define session mapping semantics for groups.
     }
 
+    private void OnScriptDialog(object? sender, ScriptDialogEventArgs e)
+    {
+        var client = _client;
+        if (client == null)
+        {
+            return;
+        }
+
+        string? conversationKey;
+        UUID targetAgentId;
+        string from;
+        lock (_recentImSpeakerLock)
+        {
+            conversationKey = _lastImConversationKey;
+            targetAgentId = _lastImSpeakerAgentId;
+            from = _lastImSpeakerName ?? "handler";
+        }
+
+        if (string.IsNullOrWhiteSpace(conversationKey) || targetAgentId == UUID.Zero)
+        {
+            Console.WriteLine($"[dialog] received script dialog from '{e.ObjectName}' but no active IM target is known.");
+            return;
+        }
+
+        var labels = e.ButtonLabels
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .Select(label => label.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(12)
+            .ToList();
+        var dialogId = $"dlg_{Interlocked.Increment(ref _scriptDialogSequence)}";
+        var pending = new PendingScriptDialog(
+            dialogId,
+            e.Message?.Trim() ?? string.Empty,
+            e.ObjectName?.Trim() ?? string.Empty,
+            e.ObjectID,
+            e.Channel,
+            labels,
+            DateTimeOffset.UtcNow);
+        _latestScriptDialogByConversation[conversationKey] = pending;
+
+        SendImText(client, targetAgentId, from, BuildFriendlyScriptDialogPrompt(pending));
+        Console.WriteLine($"[dialog] forwarded script dialog from '{pending.ObjectName}' to {from} ({conversationKey}).");
+    }
+
     private static IReadOnlyList<string> SplitForInstantMessage(string message, int maxChunkLength)
     {
         if (string.IsNullOrWhiteSpace(message))
@@ -4881,6 +5518,17 @@ internal sealed record PrimCreateResult(bool Ok, string Message, uint LocalId)
 
 internal sealed record PrimFaceTextureInfo(int FaceIndex, string TextureId);
 
+internal sealed record PrimSummary(
+    uint LocalId,
+    string Uuid,
+    uint ParentId,
+    string? Name,
+    string PrimType,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    float DistanceMeters);
+
 internal sealed record PrimInfo(
     uint LocalId,
     string Uuid,
@@ -4911,17 +5559,6 @@ internal sealed record PrimInspectResult(bool Ok, string Message, PrimInfo? Prim
     public static PrimInspectResult OkResult(PrimInfo prim) => new(true, "OK", prim);
     public static PrimInspectResult FailResult(string message) => new(false, message, null);
 }
-
-internal sealed record PrimSummary(
-    uint LocalId,
-    string Uuid,
-    uint ParentId,
-    string? Name,
-    string PrimType,
-    float PositionX,
-    float PositionY,
-    float PositionZ,
-    float DistanceMeters);
 
 internal sealed record PrimQueryResult(bool Ok, string Message, IReadOnlyList<PrimSummary> Prims)
 {
