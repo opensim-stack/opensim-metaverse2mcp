@@ -38,6 +38,10 @@ internal sealed class AppOptions
     public bool LslDialogBridgeRequireTrustedSender { get; set; } = true;
     public string? LslDialogBridgeTrustStateFile { get; set; } = "/workspace/state/dialog-bridge-trust.json";
 
+    // When true, the bot will check for a present dialog bridge when it first
+    // enters a new region and attempt to auto-install the bridge if missing.
+    public bool DialogBridgeAutoProvisionOnRegionEnter { get; set; } = true;
+
     public bool PromptHandlingEnabled { get; set; } = true;
     public bool PromptBuiltInEnabled { get; set; } = true;
     public bool PromptProjectAgentsEnabled { get; set; } = true;

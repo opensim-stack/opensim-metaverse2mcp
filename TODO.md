@@ -38,18 +38,8 @@ Scope notes:
 
 ### Dialog Bridge Hardening Status
 
-- [x] **[P0] Viewer-parity script create transaction behavior**
-  - Script inventory create uses zero transaction UUID (`UUID.Zero`) to match viewer behavior.
-- [x] **[P0] Persisted trusted bridge sender pins**
-  - Trusted bridge object/owner pin state persists and survives restart.
-- [x] **[P1] Bridge uninstall cleanup flow**
-  - Uninstall clears runtime trust pins and removes bridge assets/prim paths.
-- [x] **[P1] Permission prompt fallback via IM**
-  - Permission approvals can be actioned through chat (`1/2/3/4` mapping) when needed.
 - [ ] **[P0] Add channel randomization + nonce challenge**
   - Randomize dialog bridge channel and validate per-request nonce to reduce replay/spoof risk.
-- [ ] **[P0] Add periodic health-check and automatic re-provision if bridge is missing**
-  - Periodically verify bridge object/script/runtime presence and auto-reinstall when absent.
 
 ## 2) Eventing and Reactive Workflows
 
@@ -68,8 +58,6 @@ Scope notes:
 - [-] **[P1] Connection lifecycle controls**
   - Add explicit MCP tools for logout/reconnect and connection diagnostics.
   - Add login profile switching at runtime (safe rebind) instead of startup-only login.
-- [x] **[P1] Rich movement controls**
-  - Continuous movement start/stop in each axis (`StartMovement`/`StopMovement` with optional auto-stop duration), camera direction control (`LookAt`, `SetCameraHeading`, `GetCameraState`), follow target avatar/object (`Follow`/`StopFollow`, same region only).
 - [ ] **[P1] Advanced animation controls**
   - Start/stop arbitrary animation UUIDs (not only `DANCE1`).
   - Query active animations.

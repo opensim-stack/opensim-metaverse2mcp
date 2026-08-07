@@ -131,7 +131,7 @@ internal sealed partial class BotSession : IDisposable
 
     public string LastLoginMessage => _lastLoginMessage;
 
-    public async Task<bool> ConnectAsync(CancellationToken cancellationToken)
+        public async Task<bool> ConnectAsync(CancellationToken cancellationToken)
     {
         if (_connected)
         {
@@ -141,10 +141,17 @@ internal sealed partial class BotSession : IDisposable
         var client = new GridClient();
         client.Network.LoginProgress += OnLoginProgress;
         client.Network.Disconnected += OnDisconnected;
+        client.Network.SimChanged += OnNetworkSimChanged;
         client.Self.IM += OnInstantMessage;
         client.Self.ChatFromSimulator += OnChatFromSimulator;
         client.Self.ScriptDialog += OnScriptDialog;
         client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
+
+            // Assign the field-backed client early so event handlers that run during
+            // the login process (for example SimChanged) can reference a non-null
+            // _client. If login ultimately fails we'll clear this field during
+            // cleanup below.
+            _client = client;
 
         var login = client.Network.DefaultLoginParams(
             _options.BotFirstName!,
@@ -163,18 +170,21 @@ internal sealed partial class BotSession : IDisposable
 
         if (!success)
         {
-            client.Network.Logout();
+            try { client.Network.Logout(); } catch { }
             client.Self.IM -= OnInstantMessage;
             client.Self.ChatFromSimulator -= OnChatFromSimulator;
             client.Self.ScriptDialog -= OnScriptDialog;
             client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
             client.Network.Disconnected -= OnDisconnected;
+            client.Network.SimChanged -= OnNetworkSimChanged;
             client.Network.LoginProgress -= OnLoginProgress;
+            // Clear the shared client field since login failed.
+            _client = null;
             client.Dispose();
             return false;
         }
 
-        _client = client;
+        // client already assigned to _client above; mark connected.
         _connected = true;
 
         // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
@@ -1982,6 +1992,7 @@ internal sealed partial class BotSession : IDisposable
         client.Self.ScriptDialog -= OnScriptDialog;
         client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
         client.Network.Disconnected -= OnDisconnected;
+        client.Network.SimChanged -= OnNetworkSimChanged;
         client.Network.LoginProgress -= OnLoginProgress;
 
         try
@@ -6223,6 +6234,108 @@ internal sealed partial class BotSession : IDisposable
         {
             Console.WriteLine($"[bot] login failed: {e.Message}");
         }
+    }
+
+    private void OnNetworkSimChanged(object? sender, LibreMetaverse.SimChangedEventArgs e)
+    {
+        // Fire-and-forget: run the health-check on a background task so we don't block
+        // the network event loop.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var client = _client;
+                if (client == null) {
+                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: no client! autoProvisionEnabled={_options.DialogBridgeAutoProvisionOnRegionEnter}");
+                    return;
+                }
+
+                // Diagnostic: report auto-provision option and current trusted pin state so we can
+                // understand why automatic install may be skipped.
+                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: autoProvisionEnabled={_options.DialogBridgeAutoProvisionOnRegionEnter}");
+                lock (_dialogBridgeTrustLock)
+                {
+                    Console.WriteLine($"[dialog-bridge] current trusted bridge pin: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId}");
+                }
+
+                // Wait until the client appears fully initialized before attempting any automatic
+                // provisioning. In containerized/docker startup scenarios the GridClient may have
+                // connected at the UDP level but higher-level subsystems (inventory store, agent
+                // identity, appearance) may still be initializing. Attempt a brief readiness wait
+                // (total ~12s) and then allow a short extra delay for simulator object updates to
+                // arrive in the local cache.
+                var ready = false;
+                var readinessDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(12);
+                while (DateTime.UtcNow < readinessDeadline)
+                {
+                    // If the client field was replaced concurrently, prefer the current field.
+                    var checkClient = _client ?? client;
+                    if (checkClient != null
+                        && checkClient.Network.CurrentSim != null
+                        && checkClient.Self.AgentID != UUID.Zero
+                        && checkClient.Inventory?.Store != null)
+                    {
+                        ready = true;
+                        // ensure the variable used below references the field-backed client
+                        client = checkClient;
+                        break;
+                    }
+
+                    await Task.Delay(500).ConfigureAwait(false);
+                }
+
+                if (!ready)
+                {
+                    Console.WriteLine("[dialog-bridge] OnNetworkSimChanged: client not fully initialized yet; postponing auto-provision until next sim change.");
+                    return;
+                }
+
+                // Allow some time for the simulator to populate object updates in the client's
+                // local cache after we've become ready.
+                await Task.Delay(1500).ConfigureAwait(false);
+
+                var sim = client.Network.CurrentSim;
+                if (sim == null) return;
+
+                Console.WriteLine($"[dialog-bridge] current sim: name={sim.Name} handle={sim.Handle} primitives={sim.ObjectsPrimitives?.Count ?? 0}");
+
+                // If we already have a pinned bridge object in this sim, nothing to do.
+                if (TryGetPinnedBridgeObjectInCurrentSim(out _, out _))
+                {
+                    Console.WriteLine("[dialog-bridge] pinned bridge object present in new region; no auto-provision needed.");
+                    return;
+                }
+
+                // Also check for any existing bridge prim by name (best-effort).
+                var expectedName = "Opencode Dialog Bridge";
+                if (sim.ObjectsPrimitives.Values.Any(p => p?.Properties?.Name != null && p.Properties.Name.Equals(expectedName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    Console.WriteLine("[dialog-bridge] bridge prim found in new region by name; no auto-provision needed.");
+                    return;
+                }
+
+                if (!_options.DialogBridgeAutoProvisionOnRegionEnter)
+                {
+                    Console.WriteLine("[dialog-bridge] bridge missing in new region but auto-provision is disabled.");
+                    return;
+                }
+
+                Console.WriteLine("[dialog-bridge] bridge missing in new region; attempting automatic install...");
+                var install = await DialogBridgeInstallAsync(null, null, null, null, 1f, 0f, 0f, pinAsTrustedSender: true, CancellationToken.None).ConfigureAwait(false);
+                if (install.Ok)
+                {
+                    Console.WriteLine($"[dialog-bridge] auto-installed bridge: {install.Message}");
+                }
+                else
+                {
+                    Console.WriteLine($"[dialog-bridge] auto-install failed: {install.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[dialog-bridge] auto-provision error: {ex.Message}");
+            }
+        });
     }
 
     private void OnDisconnected(object? sender, DisconnectedEventArgs e)

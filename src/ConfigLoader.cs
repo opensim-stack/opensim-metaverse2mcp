@@ -35,6 +35,7 @@ internal static class ConfigLoader
             LslDialogBridgeTrustedOwnerId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID"),
             LslDialogBridgeRequireTrustedSender = ParseBool(FirstDefined("LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER", "OPENCODE_LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER"), true),
             LslDialogBridgeTrustStateFile = FirstDefined("LSL_DIALOG_BRIDGE_TRUST_STATE_FILE", "OPENCODE_LSL_DIALOG_BRIDGE_TRUST_STATE_FILE") ?? "/workspace/state/dialog-bridge-trust.json",
+            DialogBridgeAutoProvisionOnRegionEnter = ParseBool(Env("DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER"), true),
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
             PromptBuiltInEnabled = ParseBool(Env("PROMPT_BUILTIN_ENABLED"), true),
             PromptProjectAgentsEnabled = ParseBool(Env("PROMPT_PROJECT_AGENTS_ENABLED"), true),
@@ -103,6 +104,9 @@ internal static class ConfigLoader
             "                                Optional JSON file used to persist runtime bridge trust pins",
             "                                Supports {bot_uuid} in path templates for multi-bot deployments",
             "                                (env: LSL_DIALOG_BRIDGE_TRUST_STATE_FILE, default: /workspace/state/dialog-bridge-trust.json)",
+            "  --dialog-bridge-auto-provision-on-region-enter <bool>",
+            "                                When true, automatically install a dialog bridge when the bot first enters a new region",
+            "                                (env: DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER, default: true)",
             string.Empty,
             "Prompt handling:",
             "  --prompt-handling-enabled <bool>",
@@ -213,6 +217,9 @@ internal static class ConfigLoader
                     break;
                 case "--lsl-dialog-bridge-trust-state-file":
                     options.LslDialogBridgeTrustStateFile = RequireValue(args, ref i, arg);
+                    break;
+                case "--dialog-bridge-auto-provision-on-region-enter":
+                    options.DialogBridgeAutoProvisionOnRegionEnter = ParseBool(RequireValue(args, ref i, arg), options.DialogBridgeAutoProvisionOnRegionEnter);
                     break;
                 case "--prompt-handling-enabled":
                     options.PromptHandlingEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptHandlingEnabled);

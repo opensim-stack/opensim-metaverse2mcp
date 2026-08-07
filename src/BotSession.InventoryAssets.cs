@@ -406,7 +406,220 @@ internal sealed partial class BotSession
         var objectId = inspect.Prim?.Uuid;
         var ownerId = inspect.Prim?.OwnerId;
 
-        if (pinAsTrustedSender && !string.IsNullOrWhiteSpace(objectId) && UUID.TryParse(objectId, out var objectUuid))
+        // Scale the created bridge prim to half its current size (best-effort).
+        if (inspect.Ok && inspect.Prim != null)
+        {
+            try
+            {
+                var halfX = inspect.Prim.ScaleX / 2f;
+                var halfY = inspect.Prim.ScaleY / 2f;
+                var halfZ = inspect.Prim.ScaleZ / 2f;
+                // Request uniform scaling to preserve proportions.
+                await SetPrimScaleAsync(create.LocalId, halfX, halfY, halfZ, childOnly: false, uniform: true, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[dialog-bridge] failed to set half scale on created prim {create.LocalId}: {ex.Message}");
+            }
+        }
+
+        // Take (de-rez) the object into the bot's inventory so it's owned by the bot and safe from region resets.
+        var pinnedToAttached = false;
+        try
+        {
+            await DeletePrimAsync(create.LocalId, cancellationToken).ConfigureAwait(false);
+
+            // After requesting de-rez we expect the simulator to create an inventory item for the bot.
+            // Listen for the TaskItemReceived event which contains the actual ItemID.
+            try
+            {
+                var client = EnsureClient();
+                var received = await WaitForTaskItemReceivedAsync(client, TimeSpan.FromSeconds(8), CancellationToken.None).ConfigureAwait(false);
+                if (received != null)
+                {
+                    var itemId = received.ItemID;
+                    Console.WriteLine($"[dialog-bridge] TaskItemReceived: item={received.ItemID} asset={received.AssetID} folder={received.FolderID}");
+                    try
+                    {
+                        Console.WriteLine($"[dialog-bridge] attempting to attach inventory item {itemId} to RightHand (replace=true)");
+                        await AppearanceAttachItemAsync(itemId.ToString(), "RightHand", replace: true, cancellationToken).ConfigureAwait(false);
+                        Console.WriteLine($"[dialog-bridge] took and attached bridge inventory item {itemId} to RightHand.");
+
+                        // The attachment creates a new in-world object with a different UUID. Attempt to find
+                        // that attached object in the current simulator cache and update the trusted bridge pin
+                        // so subsequent dialog replies from the worn bridge are accepted.
+                        try
+                        {
+                            UUID? attachedObjectId = null;
+                            var expectedName = string.IsNullOrWhiteSpace(objectName) ? "Opencode Dialog Bridge" : objectName;
+                            // Try to parse uploaded asset id so we can match task inventory entries.
+                            var uploadedAssetUuid = UUID.Zero;
+                            if (!string.IsNullOrWhiteSpace(upload.AssetId))
+                            {
+                                UUID.TryParse(upload.AssetId, out uploadedAssetUuid);
+                            }
+
+                            // Poll for the attached object; when found, inspect it for indicators that
+                            // correlate it to the inventory item we just attached. We use multiple
+                            // strategies in order of confidence:
+                            //  1) NameValue "AttachItemID" == inventory ItemID returned by TaskItemReceived
+                            //  2) Task-inventory entries on the prim matching the uploaded script AssetUUID
+                            //     or the expected script filename (dialog-bridge.lsl)
+                            //  3) Prim name matches expectedName (least confident)
+                            // Increase attempts/delay to allow slower simulators to propagate caches.
+                            var maxAttempts = 40; // ~20s total (40 * 500ms)
+                            for (var attempt = 0; attempt < maxAttempts && attachedObjectId == null; attempt++)
+                            {
+                                await Task.Delay(500).ConfigureAwait(false);
+                                var sim = client.Network.CurrentSim;
+                                if (sim == null) continue;
+
+                                try
+                                {
+                                    var attachedCandidates = sim.ObjectsPrimitives.Values
+                                        .Where(p => p != null && (p.ParentID == client.Self.LocalID || (p.Properties != null && p.Properties.OwnerID == client.Self.AgentID)))
+                                        .OrderByDescending(p => p.LocalID)
+                                        .ToList();
+
+                                    Console.WriteLine($"[dialog-bridge] attach-detect attempt {attempt + 1}/{maxAttempts}: found {attachedCandidates.Count} candidate attached primitives in sim cache.");
+
+                                    foreach (var prim in attachedCandidates)
+                                    {
+                                        try
+                                        {
+                                            var primId = prim.ID;
+                                            var primLocal = prim.LocalID;
+                                            var primParent = prim.ParentID;
+                                            var primOwner = prim.Properties?.OwnerID ?? UUID.Zero;
+                                            var primName = prim.Properties?.Name ?? string.Empty;
+
+                                            Console.WriteLine($"[dialog-bridge] candidate: id={primId} local={primLocal} parent={primParent} owner={primOwner} name='{primName}'");
+
+                                            // Dump NameValues if present (shortened) for diagnostics.
+                                            if (prim.NameValues != null && prim.NameValues.Any())
+                                            {
+                                                foreach (var nv in prim.NameValues.Take(8))
+                                                {
+                                                    var valueStr = nv.Value?.ToString() ?? "(null)";
+                                                    if (valueStr.Length > 200) valueStr = valueStr.Substring(0, 200) + "...";
+                                                    Console.WriteLine($"[dialog-bridge]   NameValue: {nv.Name} = {valueStr}");
+                                                }
+                                            }
+
+                                            // 1) Primary: AttachItemID NameValue points to the inventory item UUID we attached.
+                                            if (prim.NameValues != null && prim.NameValues.Any())
+                                            {
+                                                var nameValue = prim.NameValues.SingleOrDefault(nv => nv.Name.Equals("AttachItemID", StringComparison.OrdinalIgnoreCase));
+                                                var nvStr = nameValue.Value?.ToString();
+                                                if (!nameValue.Equals(default(NameValue)) && !string.IsNullOrWhiteSpace(nvStr))
+                                                {
+                                                    if (UUID.TryParse(nvStr, out var attachedItemId))
+                                                    {
+                                                        Console.WriteLine($"[dialog-bridge] candidate AttachItemID={attachedItemId}");
+                                                        if (attachedItemId == received.ItemID)
+                                                        {
+                                                            attachedObjectId = primId;
+                                                            Console.WriteLine($"[dialog-bridge] matched AttachItemID -> prim {primId}");
+                                                            break;
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        Console.WriteLine($"[dialog-bridge] AttachItemID value on prim {primId} could not be parsed as UUID: '{nvStr}'");
+                                                    }
+                                                }
+                                            }
+
+                                            // 2) Secondary: inspect task-inventory entries for the uploaded script asset or script filename.
+                                            try
+                                            {
+                                                var entries = await client.Inventory.GetTaskInventoryAsync(primId, primLocal, sim, cancellationToken).ConfigureAwait(false);
+                                                if (entries != null && entries.Count > 0)
+                                                {
+                                                    foreach (var entry in entries.OfType<InventoryItem>())
+                                                    {
+                                                        var entryName = entry.Name ?? string.Empty;
+                                                        var matchesAsset = (uploadedAssetUuid != UUID.Zero && entry.AssetUUID == uploadedAssetUuid);
+                                                        var matchesName = string.Equals(entryName.Trim(), "dialog-bridge.lsl", StringComparison.OrdinalIgnoreCase);
+                                                        if (matchesAsset || matchesName)
+                                                        {
+                                                            attachedObjectId = primId;
+                                                            Console.WriteLine($"[dialog-bridge] matched task-inventory entry '{entryName}' (asset={entry.AssetUUID}) on prim {primId}");
+                                                            break;
+                                                        }
+                                                    }
+                                                    if (attachedObjectId != null) break;
+                                                }
+                                            }
+                                            catch (Exception invEx)
+                                            {
+                                                // Task inventory may not be available yet; ignore and continue polling.
+                                                Console.WriteLine($"[dialog-bridge] task-inventory check failed for prim {primId}: {invEx.Message}");
+                                            }
+
+                                            // 3) Least confident: prim name matches expectedName.
+                                            if (!string.IsNullOrWhiteSpace(primName) && primName.Equals(expectedName, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                Console.WriteLine($"[dialog-bridge] prim name matches expected name; tentatively selecting prim {primId} (name='{primName}')");
+                                                attachedObjectId = primId;
+                                                break;
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[dialog-bridge] error inspecting candidate prim: {ex.Message}");
+                                            // Ignore transient inspect errors and keep trying.
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[dialog-bridge] error while enumerating sim primitives: {ex.Message}");
+                                }
+                            }
+
+                            if (attachedObjectId.HasValue)
+                            {
+                                lock (_dialogBridgeTrustLock)
+                                {
+                                    _trustedDialogBridgeObjectId = attachedObjectId.Value;
+                                    _trustedDialogBridgeOwnerId = client.Self.AgentID;
+                                }
+                                pinnedToAttached = true;
+                                TrySaveDialogBridgeTrustStateToFile();
+                                Console.WriteLine($"[dialog-bridge] updated trusted bridge pin to attached object {attachedObjectId} owner={client.Self.AgentID}");
+                            }
+                            else
+                            {
+                                Console.WriteLine("[dialog-bridge] could not find attached bridge object in sim cache after attach (checked task inventories); trust pin remains unchanged.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[dialog-bridge] error while searching for attached object after attach: {ex.Message}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[dialog-bridge] failed to attach bridge inventory item {itemId}: {ex.Message} \n{ex}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("[dialog-bridge] timed out waiting for TaskItemReceived after de-rez; the item may still be in inventory.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[dialog-bridge] error while waiting for TaskItemReceived: {ex.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dialog-bridge] error while attempting to take/attach created prim {create.LocalId}: {ex.Message}");
+        }
+
+        if (!pinnedToAttached && pinAsTrustedSender && !string.IsNullOrWhiteSpace(objectId) && UUID.TryParse(objectId, out var objectUuid))
         {
             lock (_dialogBridgeTrustLock)
             {
@@ -1937,6 +2150,33 @@ internal sealed partial class BotSession
         finally
         {
             client.Inventory.ScriptRunningReply -= Handler;
+        }
+    }
+
+    private static async Task<TaskItemReceivedEventArgs?> WaitForTaskItemReceivedAsync(GridClient client, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var tcs = new TaskCompletionSource<TaskItemReceivedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Handler(object? _, TaskItemReceivedEventArgs e)
+        {
+            tcs.TrySetResult(e);
+        }
+
+        client.Inventory.TaskItemReceived += Handler;
+        try
+        {
+            var timeoutTask = Task.Delay(timeout, cancellationToken);
+            var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
+            if (completed != tcs.Task)
+            {
+                return null;
+            }
+
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            client.Inventory.TaskItemReceived -= Handler;
         }
     }
 
