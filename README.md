@@ -142,6 +142,12 @@ The server publishes tools including:
 - `TeleportTo`
 - `TeleportToRegionHandle`
 - `StopMovement`
+- `StartMovement`
+- `LookAt`
+- `SetCameraHeading`
+- `GetCameraState`
+- `Follow`
+- `StopFollow`
 - `PrimCreate`
 - `PrimSetPosition`
 - `PrimSetScale`

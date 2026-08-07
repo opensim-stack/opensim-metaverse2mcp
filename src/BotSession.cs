@@ -74,6 +74,12 @@ internal sealed partial class BotSession : IDisposable
     private bool _connected;
     private string _lastLoginMessage = string.Empty;
 
+    private readonly object _movementLock = new();
+    private CancellationTokenSource? _movementAutoStopCts;
+    private CancellationTokenSource? _followCts;
+    private Task? _followTask;
+    private string? _followTargetDescription;
+
     public BotSession(AppOptions options)
     {
         _options = options;
@@ -1520,13 +1526,442 @@ internal sealed partial class BotSession : IDisposable
 
     public async Task<BotToolResult> StopMovementAsync(CancellationToken cancellationToken)
     {
+        StopFollowInternal();
+        CancelMovementAutoStop();
         return await ExecuteLockedAsync((client, _) =>
         {
             client.Self.AutoPilotCancel();
             client.Self.Movement.ResetControlFlags();
             client.Self.Movement.SendUpdate(true);
-            return Task.FromResult(BotToolResult.OkResult("Movement stopped (autopilot canceled, control flags reset)."));
+            return Task.FromResult(BotToolResult.OkResult("Movement stopped (autopilot canceled, control flags reset, follow stopped)."));
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> StartMovementAsync(string axis, bool fast, float? durationSeconds, CancellationToken cancellationToken)
+    {
+        if (!TryResolveMovementAxis(axis, fast, out var flags, out var axisError))
+        {
+            return BotToolResult.Fail(axisError);
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var movement = client.Self.Movement;
+            movement.AtPos = (flags & AgentManager.ControlFlags.AGENT_CONTROL_AT_POS) != 0;
+            movement.AtNeg = (flags & AgentManager.ControlFlags.AGENT_CONTROL_AT_NEG) != 0;
+            movement.LeftPos = (flags & AgentManager.ControlFlags.AGENT_CONTROL_LEFT_POS) != 0;
+            movement.LeftNeg = (flags & AgentManager.ControlFlags.AGENT_CONTROL_LEFT_NEG) != 0;
+            movement.UpPos = (flags & AgentManager.ControlFlags.AGENT_CONTROL_UP_POS) != 0;
+            movement.UpNeg = (flags & AgentManager.ControlFlags.AGENT_CONTROL_UP_NEG) != 0;
+            movement.FastAt = (flags & AgentManager.ControlFlags.AGENT_CONTROL_FAST_AT) != 0;
+            movement.FastLeft = (flags & AgentManager.ControlFlags.AGENT_CONTROL_FAST_LEFT) != 0;
+            movement.FastUp = (flags & AgentManager.ControlFlags.AGENT_CONTROL_FAST_UP) != 0;
+            movement.SendUpdate(true);
+
+            var durationNote = "until StopMovement";
+            if (durationSeconds.HasValue && durationSeconds.Value > 0f)
+            {
+                var clamped = Math.Clamp(durationSeconds.Value, 0.25f, 300f);
+                ScheduleMovementAutoStop(TimeSpan.FromSeconds(clamped));
+                durationNote = $"for up to {clamped:F1}s (auto-stop)";
+            }
+
+            return Task.FromResult(BotToolResult.OkResult(
+                $"Continuous movement started on axis '{axis}'{(fast ? " (fast)" : string.Empty)} {durationNote}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> LookAtAsync(float x, float y, float z, CancellationToken cancellationToken)
+    {
+        var target = ClampLocalPosition(new Vector3(x, y, z));
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var ok = client.Self.Movement.TurnToward(target, true);
+            return Task.FromResult(ok
+                ? BotToolResult.OkResult($"Turned body and camera toward {FormatVector(target)}.")
+                : BotToolResult.Fail("TurnToward failed (agent updates disabled or parent prim missing)."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SetCameraHeadingAsync(float headingDegrees, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var headingRadians = headingDegrees * Utils.DEG_TO_RAD;
+            client.Self.Movement.UpdateFromHeading(headingRadians, true);
+            return Task.FromResult(BotToolResult.OkResult($"Camera heading set to {headingDegrees:F1} degrees."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<CameraStateResult> GetCameraStateAsync(CancellationToken cancellationToken)
+    {
+        var client = EnsureClient();
+        var cam = client.Self.Movement.Camera;
+        var pos = client.Self.SimPosition;
+        var state = new CameraState(
+            cam.Position.X, cam.Position.Y, cam.Position.Z,
+            cam.AtAxis.X, cam.AtAxis.Y, cam.AtAxis.Z,
+            cam.LeftAxis.X, cam.LeftAxis.Y, cam.LeftAxis.Z,
+            cam.UpAxis.X, cam.UpAxis.Y, cam.UpAxis.Z,
+            cam.Far,
+            pos.X, pos.Y, pos.Z);
+        return Task.FromResult(new CameraStateResult(true, "OK", state));
+    }
+
+    public async Task<BotToolResult> FollowAsync(string targetType, string target, float distanceBuffer, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return BotToolResult.Fail("target is required.");
+        }
+
+        var buffer = distanceBuffer <= 0f ? 3.0f : Math.Clamp(distanceBuffer, 0.5f, 50f);
+        var isObject = string.Equals(targetType, "object", StringComparison.OrdinalIgnoreCase);
+        var isAvatar = string.Equals(targetType, "avatar", StringComparison.OrdinalIgnoreCase);
+        if (!isObject && !isAvatar)
+        {
+            return BotToolResult.Fail("targetType must be 'avatar' or 'object'.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+            }
+
+            uint localId;
+            string label;
+            if (isAvatar)
+            {
+                if (!TryResolveAvatar(sim, target, out localId, out label))
+                {
+                    return Task.FromResult(BotToolResult.Fail(
+                        $"Avatar '{target}' not found in current simulator. Use full name or UUID."));
+                }
+            }
+            else
+            {
+                if (!TryResolveObject(sim, target, out localId, out label))
+                {
+                    return Task.FromResult(BotToolResult.Fail(
+                        $"Object '{target}' not found in current simulator. Use name, local ID, or UUID."));
+                }
+            }
+
+            StartFollowLoop(client, sim, isObject, localId, label, buffer);
+            return Task.FromResult(BotToolResult.OkResult(
+                $"Following {targetType} {label} (buffer {buffer:F1}m, same region only). Use StopFollow or StopMovement to end."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<BotToolResult> StopFollowAsync(CancellationToken cancellationToken)
+    {
+        var hadFollow = StopFollowInternal();
+        return Task.FromResult(hadFollow
+            ? BotToolResult.OkResult("Follow stopped.")
+            : BotToolResult.OkResult("No active follow to stop."));
+    }
+
+    private void StartFollowLoop(GridClient client, Simulator sim, bool isObject, uint localId, string label, float buffer)
+    {
+        StopFollowInternal();
+
+        var cts = new CancellationTokenSource();
+        lock (_movementLock)
+        {
+            _followCts = cts;
+            _followTargetDescription = $"{(isObject ? "object" : "avatar")} {label}";
+            _followTask = Task.Run(() => FollowLoopAsync(client, sim, isObject, localId, label, buffer, cts.Token));
+        }
+    }
+
+    private async Task FollowLoopAsync(
+        GridClient client,
+        Simulator sim,
+        bool isObject,
+        uint localId,
+        string label,
+        float buffer,
+        CancellationToken cancellationToken)
+    {
+        var lastPilotAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(500, cancellationToken).ConfigureAwait(false);
+
+                if (!ReferenceEquals(client.Network.CurrentSim, sim))
+                {
+                    Console.WriteLine($"[follow] target region changed; stopping follow of {label}.");
+                    break;
+                }
+
+                Vector3 targetPos;
+                if (isObject)
+                {
+                    if (!sim.ObjectsPrimitives.TryGetValue(localId, out var prim))
+                    {
+                        Console.WriteLine($"[follow] object {label} no longer in cache; stopping.");
+                        break;
+                    }
+
+                    targetPos = prim.Position;
+                }
+                else
+                {
+                    if (!sim.ObjectsAvatars.TryGetValue(localId, out var avatar))
+                    {
+                        Console.WriteLine($"[follow] avatar {label} no longer in cache; stopping.");
+                        break;
+                    }
+
+                    targetPos = avatar.Position;
+                }
+
+                var distance = Vector3.Distance(targetPos, client.Self.SimPosition);
+                if (distance > buffer)
+                {
+                    // Re-issue autopilot at most once per second to avoid packet spam.
+                    if ((DateTime.UtcNow - lastPilotAt) >= TimeSpan.FromSeconds(1))
+                    {
+                        client.Self.AutoPilotLocal(
+                            (int)MathF.Round(targetPos.X),
+                            (int)MathF.Round(targetPos.Y),
+                            targetPos.Z);
+                        lastPilotAt = DateTime.UtcNow;
+                    }
+                }
+                else
+                {
+                    client.Self.AutoPilotCancel();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[follow] error while following {label}: {ex.Message}");
+                break;
+            }
+        }
+
+        try
+        {
+            client.Self.AutoPilotCancel();
+        }
+        catch
+        {
+            // Best-effort cleanup.
+        }
+
+        lock (_movementLock)
+        {
+            _followTargetDescription = null;
+        }
+    }
+
+    private bool StopFollowInternal()
+    {
+        CancellationTokenSource? cts;
+        lock (_movementLock)
+        {
+            cts = _followCts;
+            _followCts = null;
+            _followTask = null;
+            _followTargetDescription = null;
+        }
+
+        if (cts == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            cts.Cancel();
+        }
+        catch
+        {
+            // Ignore cancellation races.
+        }
+
+        cts.Dispose();
+        return true;
+    }
+
+    private void ScheduleMovementAutoStop(TimeSpan delay)
+    {
+        CancelMovementAutoStop();
+        var cts = new CancellationTokenSource();
+        lock (_movementLock)
+        {
+            _movementAutoStopCts = cts;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, cts.Token).ConfigureAwait(false);
+                var client = _client;
+                if (client != null && _connected)
+                {
+                    client.Self.Movement.ResetControlFlags();
+                    client.Self.Movement.SendUpdate(true);
+                    Console.WriteLine("[movement] auto-stop fired after configured duration.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when movement is stopped manually.
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[movement] auto-stop error: {ex.Message}");
+            }
+        });
+    }
+
+    private void CancelMovementAutoStop()
+    {
+        CancellationTokenSource? cts;
+        lock (_movementLock)
+        {
+            cts = _movementAutoStopCts;
+            _movementAutoStopCts = null;
+        }
+
+        if (cts != null)
+        {
+            try
+            {
+                cts.Cancel();
+            }
+            catch
+            {
+                // Ignore cancellation races.
+            }
+
+            cts.Dispose();
+        }
+    }
+
+    private static bool TryResolveMovementAxis(string axis, bool fast, out AgentManager.ControlFlags flags, out string error)
+    {
+        flags = AgentManager.ControlFlags.NONE;
+        error = string.Empty;
+        var normalized = (axis ?? string.Empty).Trim().ToLowerInvariant();
+
+        switch (normalized)
+        {
+            case "forward":
+            case "forwards":
+                flags = AgentManager.ControlFlags.AGENT_CONTROL_AT_POS;
+                if (fast) flags |= AgentManager.ControlFlags.AGENT_CONTROL_FAST_AT;
+                return true;
+            case "back":
+            case "backward":
+            case "backwards":
+                flags = AgentManager.ControlFlags.AGENT_CONTROL_AT_NEG;
+                if (fast) flags |= AgentManager.ControlFlags.AGENT_CONTROL_FAST_AT;
+                return true;
+            case "left":
+                flags = AgentManager.ControlFlags.AGENT_CONTROL_LEFT_POS;
+                if (fast) flags |= AgentManager.ControlFlags.AGENT_CONTROL_FAST_LEFT;
+                return true;
+            case "right":
+                flags = AgentManager.ControlFlags.AGENT_CONTROL_LEFT_NEG;
+                if (fast) flags |= AgentManager.ControlFlags.AGENT_CONTROL_FAST_LEFT;
+                return true;
+            case "up":
+                flags = AgentManager.ControlFlags.AGENT_CONTROL_UP_POS;
+                if (fast) flags |= AgentManager.ControlFlags.AGENT_CONTROL_FAST_UP;
+                return true;
+            case "down":
+                flags = AgentManager.ControlFlags.AGENT_CONTROL_UP_NEG;
+                if (fast) flags |= AgentManager.ControlFlags.AGENT_CONTROL_FAST_UP;
+                return true;
+            default:
+                error = "Unsupported axis. Use: forward, back, left, right, up, down.";
+                return false;
+        }
+    }
+
+    private static bool TryResolveAvatar(Simulator sim, string target, out uint localId, out string label)
+    {
+        localId = 0;
+        label = string.Empty;
+
+        if (UUID.TryParse(target, out var uuid))
+        {
+            var match = sim.ObjectsAvatars.FirstOrDefault(kvp => kvp.Value.ID == uuid);
+            if (match.Value != null)
+            {
+                localId = match.Value.LocalID;
+                label = $"{match.Value.Name} ({match.Value.ID})";
+                return true;
+            }
+
+            return false;
+        }
+
+        var byName = sim.ObjectsAvatars.FirstOrDefault(kvp =>
+            kvp.Value != null
+            && !string.IsNullOrWhiteSpace(kvp.Value.Name)
+            && kvp.Value.Name.Equals(target.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (byName.Value != null)
+        {
+            localId = byName.Value.LocalID;
+            label = $"{byName.Value.Name} ({byName.Value.ID})";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryResolveObject(Simulator sim, string target, out uint localId, out string label)
+    {
+        localId = 0;
+        label = string.Empty;
+        var trimmed = target.Trim();
+
+        if (uint.TryParse(trimmed, out var parsedLocalId)
+            && sim.ObjectsPrimitives.TryGetValue(parsedLocalId, out var byLocalId))
+        {
+            localId = byLocalId.LocalID;
+            label = $"{byLocalId.Properties?.Name ?? "(unnamed)"} (localId {byLocalId.LocalID})";
+            return true;
+        }
+
+        if (UUID.TryParse(trimmed, out var uuid))
+        {
+            var match = sim.ObjectsPrimitives.FirstOrDefault(kvp => kvp.Value.ID == uuid);
+            if (match.Value != null)
+            {
+                localId = match.Value.LocalID;
+                label = $"{match.Value.Properties?.Name ?? "(unnamed)"} ({match.Value.ID})";
+                return true;
+            }
+
+            return false;
+        }
+
+        var byName = sim.ObjectsPrimitives.FirstOrDefault(kvp =>
+            kvp.Value?.Properties?.Name != null
+            && kvp.Value.Properties.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase));
+        if (byName.Value != null)
+        {
+            localId = byName.Value.LocalID;
+            label = $"{byName.Value.Properties!.Name} (localId {byName.Value.LocalID})";
+            return true;
+        }
+
+        return false;
     }
 
     public void Dispose()
@@ -1534,6 +1969,8 @@ internal sealed partial class BotSession : IDisposable
         var client = _client;
         _client = null;
         _connected = false;
+        StopFollowInternal();
+        CancelMovementAutoStop();
 
         if (client == null)
         {
@@ -5791,6 +6228,8 @@ internal sealed partial class BotSession : IDisposable
     private void OnDisconnected(object? sender, DisconnectedEventArgs e)
     {
         _connected = false;
+        StopFollowInternal();
+        CancelMovementAutoStop();
         Console.WriteLine($"[bot] disconnected: {e.Reason} - {e.Message}");
     }
 }
@@ -5870,6 +6309,29 @@ internal sealed record PrimQueryResult(bool Ok, string Message, IReadOnlyList<Pr
 {
     public static PrimQueryResult OkResult(IReadOnlyList<PrimSummary> prims, string message) => new(true, message, prims);
     public static PrimQueryResult FailResult(string message) => new(false, message, Array.Empty<PrimSummary>());
+}
+
+internal sealed record CameraState(
+    float CameraX,
+    float CameraY,
+    float CameraZ,
+    float AtAxisX,
+    float AtAxisY,
+    float AtAxisZ,
+    float LeftAxisX,
+    float LeftAxisY,
+    float LeftAxisZ,
+    float UpAxisX,
+    float UpAxisY,
+    float UpAxisZ,
+    float Far,
+    float AgentX,
+    float AgentY,
+    float AgentZ);
+
+internal sealed record CameraStateResult(bool Ok, string Message, CameraState? State)
+{
+    public static CameraStateResult FailResult(string message) => new(false, message, null);
 }
 
 internal sealed class ImConversationConfig

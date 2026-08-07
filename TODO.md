@@ -68,8 +68,8 @@ Scope notes:
 - [-] **[P1] Connection lifecycle controls**
   - Add explicit MCP tools for logout/reconnect and connection diagnostics.
   - Add login profile switching at runtime (safe rebind) instead of startup-only login.
-- [ ] **[P1] Rich movement controls**
-  - Continuous movement start/stop in each axis, camera direction control, follow target avatar/object.
+- [x] **[P1] Rich movement controls**
+  - Continuous movement start/stop in each axis (`StartMovement`/`StopMovement` with optional auto-stop duration), camera direction control (`LookAt`, `SetCameraHeading`, `GetCameraState`), follow target avatar/object (`Follow`/`StopFollow`, same region only).
 - [ ] **[P1] Advanced animation controls**
   - Start/stop arbitrary animation UUIDs (not only `DANCE1`).
   - Query active animations.

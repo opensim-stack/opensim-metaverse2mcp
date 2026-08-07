@@ -197,6 +197,56 @@ internal sealed class BotMcpTools
         return _bot.StopMovementAsync(cancellationToken);
     }
 
+    [McpServerTool, Description("Start continuous movement on an axis until StopMovement or an optional auto-stop duration elapses.")]
+    public Task<BotToolResult> StartMovement(
+        [Description("Axis: forward, back, left, right, up, down.")] string axis,
+        [Description("True for fast/run speed, false for normal walk speed.")] bool fast,
+        [Description("Optional auto-stop duration in seconds (0.25-300). Omit or 0 to run until StopMovement.")] float? durationSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.StartMovementAsync(axis, fast, durationSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Turn the bot body and camera toward a local position.")]
+    public Task<BotToolResult> LookAt(
+        [Description("Local X coordinate (0..256).")] float x,
+        [Description("Local Y coordinate (0..256).")] float y,
+        [Description("Local Z coordinate.")] float z,
+        CancellationToken cancellationToken)
+    {
+        return _bot.LookAtAsync(x, y, z, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set camera heading in degrees (0 = east, 90 = north, 180 = west, 270 = south).")]
+    public Task<BotToolResult> SetCameraHeading(
+        [Description("Heading in degrees.")] float headingDegrees,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetCameraHeadingAsync(headingDegrees, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get current camera position, orientation axes, and agent position.")]
+    public Task<CameraStateResult> GetCameraState(CancellationToken cancellationToken)
+    {
+        return _bot.GetCameraStateAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Follow a target avatar or object in the current region using autopilot.")]
+    public Task<BotToolResult> Follow(
+        [Description("Target type: avatar or object.")] string targetType,
+        [Description("Avatar full name or UUID, or object name, local ID, or UUID.")] string target,
+        [Description("Distance buffer in meters; follow pauses inside this range (default 3).")] float distanceBuffer,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FollowAsync(targetType, target, distanceBuffer, cancellationToken);
+    }
+
+    [McpServerTool, Description("Stop an active follow started by Follow.")]
+    public Task<BotToolResult> StopFollow(CancellationToken cancellationToken)
+    {
+        return _bot.StopFollowAsync(cancellationToken);
+    }
+
     [McpServerTool, Description("Create a new prim shape at a position with scale and rotation.")]
     public Task<PrimCreateResult> PrimCreate(
         [Description("Shape: box, cylinder, prism, sphere, torus, tube, ring.")] string shape,
