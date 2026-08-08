@@ -101,6 +101,7 @@ internal sealed partial class BotSession : IDisposable
     private const string BuiltInBridgePrompt =
         "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n" +
         "Environment basics:\n" +
+        "- Make sure you say 'I did ...' instead of 'You did ..' when you as the bot are affected by the action.\n" +
         "- Avatars, regions, parcels, prim objects, inventory, scripts, and environment settings are stateful and shared.\n" +
         "- Simulator/cache state may be stale; verify current state before mutating it.\n" +
         "Tooling basics:\n" +
@@ -184,6 +185,8 @@ internal sealed partial class BotSession : IDisposable
         }
 
         var client = new GridClient();
+        // Must be set before login/simulator creation; enabling later does not backfill Terrain arrays.
+        client.Settings.World.StoreLandPatches = true;
         client.Network.LoginProgress += OnLoginProgress;
         client.Network.Disconnected += OnDisconnected;
         client.Network.SimChanged += OnNetworkSimChanged;
@@ -2305,6 +2308,26 @@ internal sealed partial class BotSession : IDisposable
         catch (Exception ex)
         {
             return EnvironmentToolResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<DataToolResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<DataToolResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return DataToolResult.FailResult(ex.Message);
         }
         finally
         {

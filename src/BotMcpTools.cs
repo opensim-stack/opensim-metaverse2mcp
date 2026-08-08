@@ -159,6 +159,244 @@ internal sealed class BotMcpTools
         return _bot.ResetLegacyEnvironmentAsync(cancellationToken);
     }
 
+    [McpServerTool, Description("Get parcel details for the parcel under the bot's current position.")]
+    public Task<DataToolResult> ParcelGetCurrent(
+        [Description("Include allow/ban list entries when true.")] bool includeAccessLists,
+        [Description("Force a fresh simulator parcel-map refresh before resolving current parcel.")] bool forceRefresh,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelGetCurrentAsync(includeAccessLists, forceRefresh, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get parcel details by parcel local ID in the current simulator.")]
+    public Task<DataToolResult> ParcelGetByLocalId(
+        [Description("Parcel local ID.")] int localId,
+        [Description("Include allow/ban list entries when true.")] bool includeAccessLists,
+        [Description("Force a fresh simulator parcel-map refresh before reading parcel data.")] bool forceRefresh,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelGetByLocalIdAsync(localId, includeAccessLists, forceRefresh, cancellationToken);
+    }
+
+    [McpServerTool, Description("Edit parcel text/media fields (name, description, music URL, media URL).")]
+    public Task<BotToolResult> ParcelSetInfo(
+        [Description("Parcel local ID.")] int localId,
+        [Description("Optional new parcel name (null leaves unchanged).") ] string? name,
+        [Description("Optional new parcel description (null leaves unchanged).") ] string? description,
+        [Description("Optional new parcel music stream URL (null leaves unchanged).") ] string? musicUrl,
+        [Description("Optional new parcel media URL (null leaves unchanged).") ] string? mediaUrl,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelSetInfoAsync(localId, name, description, musicUrl, mediaUrl, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set parcel landing behavior and optional landing/look-at vectors.")]
+    public Task<BotToolResult> ParcelSetLanding(
+        [Description("Parcel local ID.")] int localId,
+        [Description("Landing type: none, landingpoint, direct.")] string landingType,
+        [Description("Optional landing X (required for landingpoint).") ] float? x,
+        [Description("Optional landing Y (required for landingpoint).") ] float? y,
+        [Description("Optional landing Z (required for landingpoint).") ] float? z,
+        [Description("Optional look-at X.") ] float? lookAtX,
+        [Description("Optional look-at Y.") ] float? lookAtY,
+        [Description("Optional look-at Z.") ] float? lookAtZ,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelSetLandingAsync(localId, landingType, x, y, z, lookAtX, lookAtY, lookAtZ, cancellationToken);
+    }
+
+    [McpServerTool, Description("Fetch parcel allowlist/banlist entries by parcel local ID.")]
+    public Task<DataToolResult> ParcelAccessListGet(
+        [Description("Parcel local ID.")] int localId,
+        [Description("List type: both, access, ban.")] string listType,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelAccessListGetAsync(localId, listType, cancellationToken);
+    }
+
+    [McpServerTool, Description("Eject an avatar from the current parcel, with optional ban.")]
+    public Task<BotToolResult> ParcelEjectUser(
+        [Description("Target avatar UUID.")] string targetAgentId,
+        [Description("True to ban while ejecting.")] bool ban,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelEjectUserAsync(targetAgentId, ban, cancellationToken);
+    }
+
+    [McpServerTool, Description("Join adjacent parcels in the current simulator using a bounding rectangle.")]
+    public Task<BotToolResult> ParcelJoin(
+        [Description("West bound (0..256).") ] float west,
+        [Description("South bound (0..256).") ] float south,
+        [Description("East bound (0..256).") ] float east,
+        [Description("North bound (0..256).") ] float north,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelJoinAsync(west, south, east, north, cancellationToken);
+    }
+
+    [McpServerTool, Description("Subdivide parcels in the current simulator using a bounding rectangle.")]
+    public Task<BotToolResult> ParcelSubdivide(
+        [Description("West bound (0..256).") ] float west,
+        [Description("South bound (0..256).") ] float south,
+        [Description("East bound (0..256).") ] float east,
+        [Description("North bound (0..256).") ] float north,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelSubdivideAsync(west, south, east, north, cancellationToken);
+    }
+
+    [McpServerTool, Description("Inspect parcel permission signals and likely authorization blockers for parcel operations.")]
+    public Task<DataToolResult> ParcelPermissionDiagnostics(
+        [Description("Optional parcel local ID. If omitted, uses current parcel under the bot.")] int? localId,
+        [Description("If true, refresh parcel map cache before diagnostics.")] bool forceRefresh,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ParcelPermissionDiagnosticsAsync(localId, forceRefresh, cancellationToken);
+    }
+
+    [McpServerTool, Description("Sample terrain heights from cached land patches on a regular grid.")]
+    public Task<DataToolResult> TerrainHeightmapSample(
+        [Description("Grid sampling step in meters (1..64).") ] int stepMeters,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainHeightmapSampleAsync(stepMeters, cancellationToken);
+    }
+
+    [McpServerTool, Description("Export current terrain heightmap as 256x256 float32 RAW (.r32) file.")]
+    public Task<DataToolResult> TerrainHeightmapExportRaw(
+        [Description("Optional output path. If omitted, a temp file path is generated.")] string? outputPath,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainHeightmapExportRawAsync(outputPath, cancellationToken);
+    }
+
+    [McpServerTool, Description("Import and upload a 256x256 float32 RAW terrain heightmap (.r32) to the current region.")]
+    public Task<BotToolResult> TerrainHeightmapImportRaw(
+        [Description("Source file path or HTTP/HTTPS URL for .r32 data.")] string source,
+        [Description("Optional uploaded file name hint; '.r32' is appended if missing.")] string? fileNameHint,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainHeightmapImportRawAsync(source, fileNameHint, cancellationToken);
+    }
+
+    [McpServerTool, Description("Verify terrain patch-cache coverage by sampling until a target coverage ratio or timeout is reached.")]
+    public Task<DataToolResult> TerrainPatchCacheVerify(
+        [Description("Grid sampling step in meters (1..64).") ] int stepMeters,
+        [Description("Required successful sample ratio (0..1].") ] float minimumCoverageRatio,
+        [Description("Maximum verification time in seconds (1..120).") ] int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainPatchCacheVerifyAsync(stepMeters, minimumCoverageRatio, timeoutSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Diff two terrain RAW sources (or 'current') and return changed-point summary plus sample deltas.")]
+    public Task<DataToolResult> TerrainPatchDiffRaw(
+        [Description("First source: file path, HTTP/HTTPS URL, or 'current'.")] string sourceA,
+        [Description("Second source: file path, HTTP/HTTPS URL, or 'current'.")] string sourceB,
+        [Description("Minimum absolute delta in meters to count as changed.")] float minDeltaMeters,
+        [Description("Maximum sample deltas to include in response (0..1000).") ] int maxSamples,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainPatchDiffRawAsync(sourceA, sourceB, minDeltaMeters, maxSamples, cancellationToken);
+    }
+
+    [McpServerTool, Description("Apply a constant terrain height offset in a bounding rectangle, then upload as RAW terrain patch.")]
+    public Task<BotToolResult> TerrainPatchApplyOffset(
+        [Description("West bound (0..256).") ] float west,
+        [Description("South bound (0..256).") ] float south,
+        [Description("East bound (0..256).") ] float east,
+        [Description("North bound (0..256).") ] float north,
+        [Description("Height delta in meters (positive raises, negative lowers).") ] float deltaMeters,
+        [Description("Optional minimum clamp height after offset.")] float? minHeight,
+        [Description("Optional maximum clamp height after offset.")] float? maxHeight,
+        [Description("Optional upload filename hint; '.r32' is appended if missing.")] string? fileNameHint,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainPatchApplyOffsetAsync(west, south, east, north, deltaMeters, minHeight, maxHeight, fileNameHint, cancellationToken);
+    }
+
+    [McpServerTool, Description("Apply a constant terrain height offset in a bounding rectangle using a provided RAW base source, then upload as terrain RAW.")]
+    public Task<BotToolResult> TerrainPatchApplyOffsetRaw(
+        [Description("Base source: file path, HTTP/HTTPS URL, or 'current'.")] string source,
+        [Description("West bound (0..256).") ] float west,
+        [Description("South bound (0..256).") ] float south,
+        [Description("East bound (0..256).") ] float east,
+        [Description("North bound (0..256).") ] float north,
+        [Description("Height delta in meters (positive raises, negative lowers).") ] float deltaMeters,
+        [Description("Optional minimum clamp height after offset.")] float? minHeight,
+        [Description("Optional maximum clamp height after offset.")] float? maxHeight,
+        [Description("Optional upload filename hint; '.r32' is appended if missing.")] string? fileNameHint,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainPatchApplyOffsetRawAsync(source, west, south, east, north, deltaMeters, minHeight, maxHeight, fileNameHint, cancellationToken);
+    }
+
+    [McpServerTool, Description("Run a terrain terraform operation on a parcel local ID or explicit area bounds.")]
+    public Task<BotToolResult> TerrainTerraform(
+        [Description("Optional parcel local ID. If omitted, west/south/east/north are required.")] int? localId,
+        [Description("Optional west bound when localId is omitted.")] float? west,
+        [Description("Optional south bound when localId is omitted.")] float? south,
+        [Description("Optional east bound when localId is omitted.")] float? east,
+        [Description("Optional north bound when localId is omitted.")] float? north,
+        [Description("Action: level, raise, lower, smooth, noise, revert.")] string action,
+        [Description("Brush size: small, medium, large.")] string brushSize,
+        [Description("Terraform duration/intensity seconds (1..120).") ] int seconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TerrainTerraformAsync(localId, west, south, east, north, action, brushSize, seconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Fetch estate metadata (name, owner, flags, sun hour) from current region.")]
+    public Task<DataToolResult> EstateGetInfo(CancellationToken cancellationToken)
+    {
+        return _bot.EstateGetInfoAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Fetch estate covenant metadata (covenant asset ID, owner, timestamp).")]
+    public Task<DataToolResult> EstateGetCovenant(CancellationToken cancellationToken)
+    {
+        return _bot.EstateGetCovenantAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Request a region restart countdown.")]
+    public Task<BotToolResult> EstateRestartRegion(
+        [Description("Delay in seconds; simulator clamps to 30..240.")] int delaySeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.EstateRestartRegionAsync(delaySeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Cancel a pending region restart countdown.")]
+    public Task<BotToolResult> EstateCancelRestart(CancellationToken cancellationToken)
+    {
+        return _bot.EstateCancelRestartAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Broadcast an administrative notice message to the current region or full estate.")]
+    public Task<BotToolResult> EstateBroadcastMessage(
+        [Description("Message body.")] string message,
+        [Description("True for estate-wide notice, false for current region only.")] bool estateWide,
+        CancellationToken cancellationToken)
+    {
+        return _bot.EstateBroadcastMessageAsync(message, estateWide, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get the region automatic restart schedule (RegionSchedule capability).")]
+    public Task<DataToolResult> EstateRestartScheduleGet(CancellationToken cancellationToken)
+    {
+        return _bot.EstateRestartScheduleGetAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Set or clear the region automatic restart schedule.")]
+    public Task<BotToolResult> EstateRestartScheduleSet(
+        [Description("Mode: daily, weekly, off.")] string mode,
+        [Description("CSV day list for weekly mode (sun,mon,tue,wed,thu,fri,sat).") ] string? daysCsv,
+        [Description("UTC time as HH:mm or HH:mm:ss.")] string timeUtc,
+        CancellationToken cancellationToken)
+    {
+        return _bot.EstateRestartScheduleSetAsync(mode, daysCsv, timeUtc, cancellationToken);
+    }
+
     [McpServerTool, Description("Move by a relative amount in a direction using walk or fly mode.")]
     public Task<BotToolResult> MoveBy(
         [Description("Direction: north, south, east, west, up, down, forward, back, left, right.")] string direction,

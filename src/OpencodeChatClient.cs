@@ -405,7 +405,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 _pendingPermissionsBySession[group.Key] = _eventPendingPermissionsBySession[group.Key];
             }
         }
-        else if (normalizedType.Contains("permission", StringComparison.OrdinalIgnoreCase)
+        else if (ShouldClearPermissionPendingStateForEvent(normalizedType)
             && !string.IsNullOrWhiteSpace(hintedSessionId))
         {
             _eventPendingPermissionsBySession.TryRemove(hintedSessionId, out _);
@@ -429,11 +429,72 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 _pendingQuestionsBySession[group.Key] = _eventPendingQuestionsBySession[group.Key];
             }
         }
-        else if (normalizedType.Contains("question", StringComparison.OrdinalIgnoreCase)
+        else if (ShouldClearQuestionPendingStateForEvent(normalizedType)
             && !string.IsNullOrWhiteSpace(hintedSessionId))
         {
             _eventPendingQuestionsBySession.TryRemove(hintedSessionId, out _);
         }
+    }
+
+    private static bool ShouldClearPermissionPendingStateForEvent(string normalizedType)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedType)
+            || !normalizedType.Contains("permission", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Keep pending state for ask/list/update snapshots; only clear on explicit terminal outcomes.
+        if (normalizedType.Equals("permission.asked", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("permission.ask", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("permission.pending", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("permission.updated", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("permission.list", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return normalizedType.Contains("replied", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("answered", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("approved", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("denied", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("rejected", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("resolved", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("completed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("closed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("dismissed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("removed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("cleared", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldClearQuestionPendingStateForEvent(string normalizedType)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedType)
+            || !normalizedType.Contains("question", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (normalizedType.Equals("question.asked", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("question.ask", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("question.pending", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("question.updated", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Equals("question.list", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return normalizedType.Contains("replied", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("answered", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("approved", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("denied", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("rejected", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("resolved", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("completed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("closed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("dismissed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("removed", StringComparison.OrdinalIgnoreCase)
+            || normalizedType.Contains("cleared", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryExtractSessionId(JsonElement element, out string? sessionId)

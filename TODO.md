@@ -13,6 +13,7 @@ Scope notes:
 - `[P2]` Nice-to-have or specialist feature
 - `[ ]` Not implemented
 - `[-]` Partial or incomplete
+- `[x]` Implemented
 
 ---
 
@@ -64,7 +65,7 @@ Scope notes:
 ## 4) Objects, Building, and World Editing
 
 - [-] **[P1] Primitive inspection depth**
-  - Add explicit object property fetch/wait tool (creator/permissions/sale/info freshness guarantees).
+  - Add explicit object property fetch/wait tool (creator/permissions/sale/sittable/info freshness guarantees).
   - Surface sculpt/mesh/light/flexible/path/profile/material detail parity with `Primitive` data.
 - [ ] **[P1] Complete build parameter editing**
   - Hollow, taper, twist, cut/path begin/end, shear, skew, profile hole, flexible/light/sculpt params.
@@ -118,12 +119,14 @@ Scope notes:
 
 ## 8) Environment, Land, and Region Features
 
-- [ ] **[P1] Parcel management tools (`ParcelManager`)**
+- [-] **[P1] Parcel management tools (`ParcelManager`)**
+  - Implemented MCP tools: parcel query (`ParcelGetCurrent`, `ParcelGetByLocalId`), parcel edit (`ParcelSetInfo`, `ParcelSetLanding`), access/ban list read (`ParcelAccessListGet`), eject+ban (`ParcelEjectUser`), parcel merge/split (`ParcelJoin`, `ParcelSubdivide`), and permission heuristics (`ParcelPermissionDiagnostics`).
   - Parcel info query/edit, media/music URL, access list, ban list, landing point.
-- [ ] **[P1] Terrain tools (`TerrainManager`)**
-  - Terrain heightmap read/write and region terrain patch operations.
-- [ ] **[P1] Estate/admin surfaces (where permissions allow)**
+  - Remaining: full ACL write/edit/remove primitives (library gap in current surfaced API path).
+- [-] **[P1] Estate/admin surfaces (where permissions allow)**
+  - Implemented MCP tools: estate info/covenant query (`EstateGetInfo`, `EstateGetCovenant`), restart/cancel (`EstateRestartRegion`, `EstateCancelRestart`), notice broadcast (`EstateBroadcastMessage`), and schedule get/set (`EstateRestartScheduleGet`, `EstateRestartScheduleSet`).
   - Region restart notices, covenant/estate settings read, restart scheduling helpers.
+  - Remaining: richer estate settings mutation coverage and stronger capability/permission-specific error classification.
 - [-] **[P1] EEP/Windlight usability layer**
   - High-level presets and patch operations instead of raw LLSD only.
 
@@ -197,18 +200,6 @@ Scope notes:
 - Event stream foundation
 - Tool schema normalization
 - Integration/failure-path tests
-
-#### Event-first migration cleanup targets
-
-- [ ] Remove temporary polling fallback methods in `src/BotSession.cs` after event-first reliability is proven:
-  - `NotifyPendingQuestionIfAppearsAsync`
-  - `NotifyPendingQuestionDuringInFlightRequestAsync`
-  - pre-routing poll in `TryHandlePendingQuestionBeforeRoutingAsync`
-  - post-reply `/question` fallback branch in `OnInstantMessage`
-- [ ] Remove temporary event-discovery logging scaffolding in `src/OpencodeChatClient.cs`:
-  - `_eventLogCounts`
-  - probe-oriented logging in `LogObservedEvent`
-  - dual-probe behavior in `ObserveEventStreamsLoopAsync` once a single canonical stream is selected
 
 ### Phase 2 (P1 capability expansion)
 
