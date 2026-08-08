@@ -28,7 +28,7 @@ internal static class ConfigLoader
             OpencodePassword = FirstDefined("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
             OpencodeInitialProvider = Env("OPENCODE_INITIAL_PROVIDER"),
             OpencodeInitialModel = Env("OPENCODE_INITIAL_MODEL"),
-            OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 60),
+            OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 1800),
             OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
             OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
             LslDialogBridgeTrustedObjectId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID"),

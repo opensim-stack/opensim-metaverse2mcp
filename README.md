@@ -104,7 +104,7 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `OPENCODE_USERNAME` (optional Basic auth username)
 - `OPENCODE_PASSWORD` (optional Basic auth password)
 - `OPENCODE_SERVER_PASSWORD` (optional fallback alias for `OPENCODE_PASSWORD`)
-- `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `240`)
+- `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `1800`)
 - `OPENCODE_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
 - `OPENCODE_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
 
