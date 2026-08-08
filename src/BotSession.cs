@@ -23,6 +23,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentImEvents = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _imConversationLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ImConversationConfig> _imConversationConfigs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, OpencodeUsageSummary> _latestUsageByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingPermissionByConversation = new(StringComparer.Ordinal);
@@ -2736,6 +2737,7 @@ internal sealed partial class BotSession : IDisposable
             if (!await gate.WaitAsync(0).ConfigureAwait(false))
             {
                 if (text.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
+                    || text.StartsWith("*usage", StringComparison.OrdinalIgnoreCase)
                     || text.StartsWith("*dialog", StringComparison.OrdinalIgnoreCase)
                     || text.StartsWith("*dialogs", StringComparison.OrdinalIgnoreCase)
                     || text.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
@@ -2897,6 +2899,10 @@ internal sealed partial class BotSession : IDisposable
                     message: text,
                     options: sendOptions,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                if (reply.Usage != null)
+                {
+                    _latestUsageByConversation[conversationKey] = reply.Usage;
+                }
                 startedAt.Stop();
                 Console.WriteLine($"[im] opencode reply received in {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey} replyLength={reply.Text.Length}");
 
@@ -3351,9 +3357,13 @@ internal sealed partial class BotSession : IDisposable
                 case "status":
                     SendImText(client, agentId, from, BuildConversationStatusText(conversationKey));
                     return true;
+                case "usage":
+                    SendImText(client, agentId, from, BuildUsageText(conversationKey));
+                    return true;
                 case "reset":
                     _imConversationConfigs.TryRemove(conversationKey, out _);
                     _opencodeChat?.ResetConversation(conversationKey);
+                    _latestUsageByConversation.TryRemove(conversationKey, out _);
                     SendImText(client, agentId, from, "Conversation AI settings reset for this IM. Using server defaults.");
                     return true;
                 case "cancel":
@@ -3422,6 +3432,7 @@ internal sealed partial class BotSession : IDisposable
                 "*help <command> - Show detailed help for one command",
                 "*help all - Show detailed help for all commands",
                 "*status - Show active AI and prompt settings for this IM",
+                "*usage - Show latest Opencode usage (cost/tokens) for this IM",
                 "*cancel - Abort current in-flight AI request for this IM",
                 "*prompt - Manage prompt layers (status/show/clear/reload)",
                 "*bridge - Manage dialog-bridge install/trust status",
@@ -3462,6 +3473,7 @@ internal sealed partial class BotSession : IDisposable
             "all" => string.Join(
                 "\n\n",
                 BuildStarHelpText("status"),
+                BuildStarHelpText("usage"),
                 BuildStarHelpText("cancel"),
                 BuildStarHelpText("prompt"),
                 BuildStarHelpText("bridge"),
@@ -3476,6 +3488,7 @@ internal sealed partial class BotSession : IDisposable
                 BuildStarHelpText("configure"),
                 BuildStarHelpText("reset")),
             "status" => "*status - Show current provider/model/thinking/session and prompt source state for this IM.",
+            "usage" => "*usage - Show the latest Opencode response usage for this IM conversation (cost/input/output/reasoning/cache).",
             "cancel" => "*cancel - Abort the current in-flight AI request for this IM conversation.",
             "prompt" => string.Join(
                 "\n",
@@ -3555,6 +3568,36 @@ internal sealed partial class BotSession : IDisposable
         };
 
     }
+
+    private string BuildUsageText(string conversationKey)
+    {
+        var sessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
+        if (!_latestUsageByConversation.TryGetValue(conversationKey, out var usage))
+        {
+            return string.Join(
+                "\n",
+                "No usage data has been captured for this IM conversation yet.",
+                $"sessionId: {sessionId}",
+                "Send a normal chat message first, then run *usage.");
+        }
+
+        return string.Join(
+            "\n",
+            "Latest Opencode usage:",
+            $"sessionId: {sessionId}",
+            $"cost: {FormatUsageDouble(usage.Cost)}",
+            $"input tokens: {FormatUsageInt(usage.InputTokens)}",
+            $"output tokens: {FormatUsageInt(usage.OutputTokens)}",
+            $"reasoning tokens: {FormatUsageInt(usage.ReasoningTokens)}",
+            $"cache read tokens: {FormatUsageInt(usage.CacheReadTokens)}",
+            $"cache write tokens: {FormatUsageInt(usage.CacheWriteTokens)}");
+    }
+
+    private static string FormatUsageInt(int? value)
+        => value.HasValue ? value.Value.ToString() : "n/a";
+
+    private static string FormatUsageDouble(double? value)
+        => value.HasValue ? value.Value.ToString("0.########") : "n/a";
 
     private string BuildConversationStatusText(string conversationKey)
     {

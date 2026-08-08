@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using NOpenCode;
+using System.Text.Json.Serialization;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -44,7 +44,8 @@ internal sealed record OpencodeChatReply(
     string Text,
     bool IsConfirmationPrompt,
     IReadOnlyList<OpencodePendingPermission>? PendingPermissions = null,
-    IReadOnlyList<OpencodePendingQuestion>? PendingQuestions = null);
+    IReadOnlyList<OpencodePendingQuestion>? PendingQuestions = null,
+    OpencodeUsageSummary? Usage = null);
 internal sealed record OpencodeSendOptions(string? ModelId, string? ThinkingLevel, string? SystemPrompt);
 internal sealed record OpencodeProviderSummary(string Id, string Name, bool? Connected);
 internal sealed record OpencodeModelSummary(string Id, string Name, string? Provider);
@@ -115,7 +116,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         var workers = new[]
         {
             ObserveEventStreamLoopAsync("/event", cancellationToken),
-            ObserveEventStreamLoopAsync("/global/event", cancellationToken)
+            //ObserveEventStreamLoopAsync("/global/event", cancellationToken)
         };
 
         await Task.WhenAll(workers).ConfigureAwait(false);
@@ -224,6 +225,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         try
         {
+            LogRawJson($"event:{eventType}", rawData);
             using var doc = JsonDocument.Parse(rawData);
             var root = doc.RootElement;
             if (root.ValueKind == JsonValueKind.Object)
@@ -1566,9 +1568,13 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         };
 
         var rawReply = await PostJsonRawAsync($"/session/{sessionId}/message", body, cancellationToken).ConfigureAwait(false);
-        var reply = string.IsNullOrWhiteSpace(rawReply)
-            ? null
-            : JsonSerializer.Deserialize<OpenCodeReply>(rawReply, _jsonOptions);
+        var reply = DeserializeStrictChatReply(rawReply, $"/session/{sessionId}/message");
+
+        var usage = ExtractUsage(reply);
+        if (usage != null)
+        {
+            Console.WriteLine($"[opencode:usage] session={sessionId} cost={usage.Cost?.ToString() ?? "n/a"} input={usage.InputTokens?.ToString() ?? "n/a"} output={usage.OutputTokens?.ToString() ?? "n/a"} reasoning={usage.ReasoningTokens?.ToString() ?? "n/a"} cacheRead={usage.CacheReadTokens?.ToString() ?? "n/a"} cacheWrite={usage.CacheWriteTokens?.ToString() ?? "n/a"}");
+        }
 
         var text = ExtractReplyText(reply, rawReply, out var hasUsableText);
         if (TryGetEmbeddedError(rawReply, out var embeddedError))
@@ -1585,9 +1591,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         var isConfirmationPrompt = IsLikelyConfirmationPrompt(text);
-        var pendingPermissions = ParsePendingPermissions(rawReply)
-            .Where(p => p.SessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        var pendingPermissions = TryGetPendingPermissionsFromEvents(sessionId, out var fromEventPermissions)
+            ? fromEventPermissions
+            : Array.Empty<OpencodePendingPermission>();
         if (pendingPermissions.Count > 0)
         {
             _pendingPermissionsBySession[sessionId] = pendingPermissions;
@@ -1597,9 +1603,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             _pendingPermissionsBySession.TryRemove(sessionId, out _);
         }
 
-        var pendingQuestions = ParsePendingQuestions(rawReply)
-            .Where(q => q.SessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        var pendingQuestions = TryGetPendingQuestionsFromEvents(sessionId, out var fromEventQuestions)
+            ? fromEventQuestions
+            : Array.Empty<OpencodePendingQuestion>();
         if (pendingQuestions.Count > 0)
         {
             _pendingQuestionsBySession[sessionId] = pendingQuestions;
@@ -1609,7 +1615,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             _pendingQuestionsBySession.TryRemove(sessionId, out _);
         }
 
-        return new OpencodeChatReply(text, isConfirmationPrompt, pendingPermissions, pendingQuestions);
+        return new OpencodeChatReply(text, isConfirmationPrompt, pendingPermissions, pendingQuestions, usage);
     }
 
     private static Dictionary<string, object?> BuildSessionCreateBody(string title, string? configuredModelId)
@@ -1698,7 +1704,98 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return string.Join("\n\n", pieces);
     }
 
-    private string ExtractReplyText(OpenCodeReply? reply, string? rawReply, out bool hasUsableText)
+    private OpencodeChatResponse? DeserializeStrictChatReply(string? rawReply, string path)
+    {
+        if (string.IsNullOrWhiteSpace(rawReply))
+        {
+            throw new InvalidOperationException($"Opencode returned an empty response for {path}.");
+        }
+
+        LogRawJson($"response:{path}", rawReply);
+
+        OpencodeChatResponse? reply;
+        try
+        {
+            reply = JsonSerializer.Deserialize<OpencodeChatResponse>(rawReply, _jsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException($"Failed to parse Opencode response JSON from {path}: {ex.Message}", ex);
+        }
+
+        if (reply?.Parts == null || reply.Parts.Count == 0)
+        {
+            throw new InvalidOperationException($"Opencode response from {path} did not include a valid 'parts' array.");
+        }
+
+        for (var i = 0; i < reply.Parts.Count; i++)
+        {
+            var part = reply.Parts[i];
+            if (part == null || string.IsNullOrWhiteSpace(part.Type))
+            {
+                throw new InvalidOperationException($"Opencode response from {path} contains part[{i}] without a valid 'type'.");
+            }
+
+            var kind = part.Type.Trim().ToLowerInvariant();
+            if (kind == "text" && string.IsNullOrWhiteSpace(part.Text))
+            {
+                throw new InvalidOperationException($"Opencode response from {path} contains text part[{i}] without 'text'.");
+            }
+
+            if (kind == "reasoning" && string.IsNullOrWhiteSpace(part.Text))
+            {
+                throw new InvalidOperationException($"Opencode response from {path} contains reasoning part[{i}] without 'text'.");
+            }
+
+            if (kind == "tool" && string.IsNullOrWhiteSpace(part.ToolName))
+            {
+                throw new InvalidOperationException($"Opencode response from {path} contains tool part[{i}] without 'toolName'.");
+            }
+
+            if (kind != "text"
+                && kind != "tool"
+                && kind != "reasoning"
+                && kind != "step-start"
+                && kind != "step-finish")
+            {
+                throw new InvalidOperationException($"Opencode response from {path} contains unsupported part type '{part.Type}'.");
+            }
+        }
+
+        return reply;
+    }
+
+    private static OpencodeUsageSummary? ExtractUsage(OpencodeChatResponse? reply)
+    {
+        var info = reply?.Info;
+        var tokens = info?.Tokens;
+        if (info == null && tokens == null)
+        {
+            return null;
+        }
+
+        var usage = new OpencodeUsageSummary(
+            info?.Cost,
+            tokens?.Input,
+            tokens?.Output,
+            tokens?.Reasoning,
+            tokens?.Cache?.Read,
+            tokens?.Cache?.Write);
+
+        if (usage.Cost is null
+            && usage.InputTokens is null
+            && usage.OutputTokens is null
+            && usage.ReasoningTokens is null
+            && usage.CacheReadTokens is null
+            && usage.CacheWriteTokens is null)
+        {
+            return null;
+        }
+
+        return usage;
+    }
+
+    private string ExtractReplyText(OpencodeChatResponse? reply, string? rawReply, out bool hasUsableText)
     {
         hasUsableText = false;
         if (reply?.Parts != null && reply.Parts.Count > 0)
@@ -1724,13 +1821,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 hasUsableText = true;
                 return $"(Opencode ran tool actions: {string.Join(", ", toolParts)})";
             }
-        }
-
-        var fallbackText = ExtractReplyTextFromRawJson(rawReply);
-        if (!string.IsNullOrWhiteSpace(fallbackText))
-        {
-            hasUsableText = true;
-            return fallbackText;
         }
 
         if (!string.IsNullOrWhiteSpace(rawReply))
@@ -2450,6 +2540,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return value[..maxLength] + "...";
     }
 
+    private static void LogRawJson(string context, string raw)
+    {
+        Console.WriteLine($"[opencode:json] {context}: {TruncateForLog(raw, 1600)}");
+    }
+
     private async Task<T?> PostJsonAsync<T>(string path, object body, CancellationToken cancellationToken)
     {
         var raw = await PostJsonRawAsync(path, body, cancellationToken).ConfigureAwait(false);
@@ -2756,6 +2851,49 @@ internal sealed class OpencodeProvidersResponse
 {
     public List<OpencodeProviderEntry>? Providers { get; set; }
 }
+
+internal sealed class OpencodeChatResponse
+{
+    public OpencodeChatInfo? Info { get; set; }
+    public List<OpencodeChatPart>? Parts { get; set; }
+}
+
+internal sealed class OpencodeChatInfo
+{
+    public double? Cost { get; set; }
+    public OpencodeChatTokens? Tokens { get; set; }
+}
+
+internal sealed class OpencodeChatTokens
+{
+    public int? Input { get; set; }
+    public int? Output { get; set; }
+    public int? Reasoning { get; set; }
+    public OpencodeChatCacheTokens? Cache { get; set; }
+}
+
+internal sealed class OpencodeChatCacheTokens
+{
+    public int? Read { get; set; }
+    public int? Write { get; set; }
+}
+
+internal sealed class OpencodeChatPart
+{
+    public string? Type { get; set; }
+    public string? Text { get; set; }
+
+    [JsonPropertyName("toolName")]
+    public string? ToolName { get; set; }
+}
+
+internal sealed record OpencodeUsageSummary(
+    double? Cost,
+    int? InputTokens,
+    int? OutputTokens,
+    int? ReasoningTokens,
+    int? CacheReadTokens,
+    int? CacheWriteTokens);
 
 internal sealed class OpencodeAllProvidersResponse
 {
