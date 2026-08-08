@@ -41,6 +41,7 @@ internal sealed class AppOptions
     // When true, the bot will check for a present dialog bridge when it first
     // enters a new region and attempt to auto-install the bridge if missing.
     public bool DialogBridgeAutoProvisionOnRegionEnter { get; set; } = true;
+    public int DialogBridgePromptResponseTimeoutSeconds { get; set; } = 120;
 
     public bool PromptHandlingEnabled { get; set; } = true;
     public bool PromptBuiltInEnabled { get; set; } = true;
@@ -133,6 +134,11 @@ internal sealed class AppOptions
                         errors.Add("Prompt project AGENTS file path is invalid.");
                     }
                 }
+            }
+
+            if (DialogBridgePromptResponseTimeoutSeconds < 5)
+            {
+                errors.Add("Dialog bridge prompt response timeout must be at least 5 seconds.");
             }
 
             var hasHandlerFirst = !string.IsNullOrWhiteSpace(OpencodeHandlerFirstName);

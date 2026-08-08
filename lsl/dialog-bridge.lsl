@@ -6,7 +6,10 @@
 //   - question id
 //   - permission id tagged as perm:<permissionId>
 // Expects strict request payload format:
-//   dlgreq|conversation|requestId|target|header|optionCount|opt1|opt2|...
+//   dlgreq|conversation|requestId|target|header|prompt|optionCount|opt1|opt2|...
+// Hover text control payload:
+//   hovreq|targetObjectId|mode|text
+// mode: set or clear
 
 integer REQUEST_CHANNEL = -919191;
 
@@ -109,16 +112,54 @@ default
 
         list parts = llParseStringKeepNulls(message, ["|"], []);
         string prefix = llList2String(parts, 0);
-        if (prefix == "dlgreq" && llGetListLength(parts) >= 7)
+        if (prefix == "hovreq" && llGetListLength(parts) >= 3)
+        {
+            string targetObjectId = decode(llList2String(parts, 1));
+            string mode = llToLower(decode(llList2String(parts, 2)));
+            string hoverText = "";
+            if (llGetListLength(parts) >= 4)
+            {
+                hoverText = decode(llList2String(parts, 3));
+            }
+
+            if (targetObjectId != "" && targetObjectId != (string)llGetKey())
+            {
+                return;
+            }
+
+            if (mode == "clear")
+            {
+                llSetText("", <1.0, 1.0, 1.0>, 0.0);
+                return;
+            }
+
+            if (mode == "set")
+            {
+                if (hoverText == "")
+                {
+                    hoverText = "Thinking...";
+                }
+
+                llSetText(hoverText, <1.0, 1.0, 1.0>, 1.0);
+                return;
+            }
+        }
+
+        if (prefix == "dlgreq" && llGetListLength(parts) >= 8)
         {
             string conversationKey = decode(llList2String(parts, 1));
             // Opaque request id; can represent a question or a permission request.
             string questionId = decode(llList2String(parts, 2));
             key targetAvatar = (key)decode(llList2String(parts, 3));
             string header = decode(llList2String(parts, 4));
-            string prompt = "Choose an option:";
-            integer expectedCount = (integer)llList2String(parts, 5);
-            list optionTokens = llList2List(parts, 6, -1);
+            string prompt = decode(llList2String(parts, 5));
+            if (prompt == "")
+            {
+                prompt = "Choose an option:";
+            }
+
+            integer expectedCount = (integer)llList2String(parts, 6);
+            list optionTokens = llList2List(parts, 7, -1);
             if (expectedCount <= 0 || llGetListLength(optionTokens) != expectedCount)
             {
                 // Reject truncated or malformed payloads to avoid showing incomplete choices.

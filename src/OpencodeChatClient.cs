@@ -38,6 +38,8 @@ internal interface IOpencodeChatClient
     Task<bool> AbortSessionAsync(string sessionId, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken);
     Task<OpencodeProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken);
+    event Action<OpencodeSessionStatusEvent>? SessionStatusChanged;
+    event Action<OpencodeMessagePartUpdatedEvent>? MessagePartUpdated;
 }
 
 internal sealed record OpencodeChatReply(
@@ -56,9 +58,14 @@ internal sealed record OpencodePendingQuestion(string Id, string SessionId, stri
 internal sealed record OpencodeProviderAuthMethod(int MethodIndex, string Type, string Label);
 internal sealed record OpencodeOAuthStartResult(string Url, string? Method, string? Instructions);
 internal sealed record OpencodeOAuthCompleteResult(bool CallbackAccepted, bool ProviderConfigured, string Message);
+internal sealed record OpencodeSessionStatusEvent(string SessionId, string StatusType);
+internal sealed record OpencodeMessagePartUpdatedEvent(string SessionId, string PartType);
 
 internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 {
+    public event Action<OpencodeSessionStatusEvent>? SessionStatusChanged;
+    public event Action<OpencodeMessagePartUpdatedEvent>? MessagePartUpdated;
+
     private readonly HttpClient _http;
     private readonly HttpClient? _eventHttp;
     private readonly CancellationTokenSource? _eventLoopCts;
@@ -244,12 +251,137 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             }
 
             IngestEventDerivedPendingState(eventType, sessionId, root);
+            if (TryParseSessionStatusEvent(root, eventType, sessionId, out var statusEvent))
+            {
+                try
+                {
+                    SessionStatusChanged?.Invoke(statusEvent!);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[opencode:event] session status callback error: {ex.Message}");
+                }
+            }
+
+            if (TryParseMessagePartUpdatedEvent(root, eventType, sessionId, out var partUpdatedEvent))
+            {
+                try
+                {
+                    MessagePartUpdated?.Invoke(partUpdatedEvent!);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[opencode:event] message part callback error: {ex.Message}");
+                }
+            }
         }
         catch (JsonException)
         {
             // Ignore non-JSON heartbeat/control frames.
         }
 
+    }
+
+    private static bool TryParseSessionStatusEvent(JsonElement root, string eventType, string? hintedSessionId, out OpencodeSessionStatusEvent? statusEvent)
+    {
+        statusEvent = null;
+        if (!eventType.Equals("session.status", StringComparison.OrdinalIgnoreCase)
+            || root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var source = root;
+        if (root.TryGetProperty("properties", out var properties)
+            && properties.ValueKind == JsonValueKind.Object)
+        {
+            source = properties;
+        }
+
+        var sessionId = TryGetStringPropertyAny(source, out var parsedSessionId, "sessionID", "sessionId")
+            && !string.IsNullOrWhiteSpace(parsedSessionId)
+            ? parsedSessionId!.Trim()
+            : (hintedSessionId?.Trim() ?? string.Empty);
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        string? statusType = null;
+        if (source.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.Object
+            && TryGetStringPropertyAny(status, out var nestedStatus, "type", "status")
+            && !string.IsNullOrWhiteSpace(nestedStatus))
+        {
+            statusType = nestedStatus!.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(statusType)
+            && TryGetStringPropertyAny(source, out var directStatus, "status", "type")
+            && !string.IsNullOrWhiteSpace(directStatus))
+        {
+            statusType = directStatus!.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(statusType))
+        {
+            return false;
+        }
+
+        statusEvent = new OpencodeSessionStatusEvent(sessionId, statusType);
+        return true;
+    }
+
+    private static bool TryParseMessagePartUpdatedEvent(JsonElement root, string eventType, string? hintedSessionId, out OpencodeMessagePartUpdatedEvent? partUpdatedEvent)
+    {
+        partUpdatedEvent = null;
+        if (!eventType.Equals("message.part.updated", StringComparison.OrdinalIgnoreCase)
+            || root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var source = root;
+        if (root.TryGetProperty("properties", out var properties)
+            && properties.ValueKind == JsonValueKind.Object)
+        {
+            source = properties;
+        }
+
+        var sessionId = TryGetStringPropertyAny(source, out var parsedSessionId, "sessionID", "sessionId")
+            && !string.IsNullOrWhiteSpace(parsedSessionId)
+            ? parsedSessionId!.Trim()
+            : (hintedSessionId?.Trim() ?? string.Empty);
+
+        if (string.IsNullOrWhiteSpace(sessionId)
+            && source.TryGetProperty("part", out var partObj)
+            && partObj.ValueKind == JsonValueKind.Object
+            && TryGetStringPropertyAny(partObj, out var nestedSessionId, "sessionID", "sessionId")
+            && !string.IsNullOrWhiteSpace(nestedSessionId))
+        {
+            sessionId = nestedSessionId!.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var partType = source.TryGetProperty("part", out var part)
+            && part.ValueKind == JsonValueKind.Object
+            && TryGetStringPropertyAny(part, out var parsedPartType, "type", "partType")
+            && !string.IsNullOrWhiteSpace(parsedPartType)
+                ? parsedPartType!.Trim()
+                : string.Empty;
+
+        if (string.IsNullOrWhiteSpace(partType))
+        {
+            return false;
+        }
+
+        partUpdatedEvent = new OpencodeMessagePartUpdatedEvent(sessionId, partType);
+        return true;
     }
 
     private void IngestEventDerivedPendingState(string eventType, string? hintedSessionId, JsonElement root)
@@ -940,7 +1072,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         var questionKey = questionId.Trim();
-        var path = $"/question/{Uri.EscapeDataString(questionKey)}/reply";
         var payload = new
         {
             answers = new[]
@@ -949,7 +1080,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             }
         };
 
-        var raw = await PostJsonRawAsync(path, payload, cancellationToken).ConfigureAwait(false);
+        var raw = await PostJsonRawAsync($"/question/{Uri.EscapeDataString(questionKey)}/reply", payload, cancellationToken).ConfigureAwait(false);
         var ok = TryInterpretBooleanResponse(raw, true);
         if (ok)
         {
@@ -1001,8 +1132,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         var questionKey = questionId.Trim();
-        var path = $"/question/{Uri.EscapeDataString(questionKey)}/reject";
-        var raw = await PostJsonRawAsync(path, new { }, cancellationToken).ConfigureAwait(false);
+        var raw = await PostJsonRawAsync($"/question/{Uri.EscapeDataString(questionKey)}/reject", new { }, cancellationToken).ConfigureAwait(false);
         var ok = TryInterpretBooleanResponse(raw, true);
         if (ok)
         {
@@ -2039,7 +2169,8 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             return false;
         }
 
-        var title = TryGetStringPropertyAny(element, out var parsedTitle, "title", "name", "type") && !string.IsNullOrWhiteSpace(parsedTitle)
+        var title = TryGetStringPropertyAny(element, out var parsedTitle, "title", "name", "permission", "tool", "action", "type")
+            && !string.IsNullOrWhiteSpace(parsedTitle)
             ? parsedTitle!.Trim()
             : id;
         var sessionId = TryGetStringPropertyAny(element, out var parsedSessionId, "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedSessionId)
@@ -2054,32 +2185,122 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             sessionId = nestedParsedSessionId!.Trim();
         }
 
-        string? description = null;
-        if (TryGetStringProperty(element, "pattern", out var parsedPattern) && !string.IsNullOrWhiteSpace(parsedPattern))
-        {
-            description = parsedPattern.Trim();
-        }
-        else if (element.TryGetProperty("pattern", out var patternArray) && patternArray.ValueKind == JsonValueKind.Array)
-        {
-            var parts = patternArray.EnumerateArray()
-                .Where(v => v.ValueKind == JsonValueKind.String)
-                .Select(v => v.GetString())
-                .Where(v => !string.IsNullOrWhiteSpace(v))
-                .Select(v => v!.Trim())
-                .ToArray();
-            if (parts.Length > 0)
-            {
-                description = string.Join(", ", parts);
-            }
-        }
-        else if (TryGetStringPropertyAny(element, out var parsedScope, "path", "command", "permission", "tool", "rule")
-            && !string.IsNullOrWhiteSpace(parsedScope))
-        {
-            description = parsedScope!.Trim();
-        }
+        var description = BuildPermissionDescription(element);
 
         permission = new OpencodePendingPermission(id, sessionId, title, description);
         return true;
+    }
+
+    private static string? BuildPermissionDescription(JsonElement element)
+    {
+        var patterns = new List<string>();
+        AddStringOrStringArrayPropertyValues(element, "patterns", patterns);
+        AddStringOrStringArrayPropertyValues(element, "pattern", patterns);
+
+        if (patterns.Count == 0
+            && element.TryGetProperty("tool", out var toolElement)
+            && toolElement.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetStringProperty(toolElement, "command", out var toolCommand) && !string.IsNullOrWhiteSpace(toolCommand))
+            {
+                patterns.Add(toolCommand.Trim());
+            }
+
+            if (toolElement.TryGetProperty("state", out var stateElement)
+                && stateElement.ValueKind == JsonValueKind.Object
+                && stateElement.TryGetProperty("input", out var inputElement)
+                && inputElement.ValueKind == JsonValueKind.Object
+                && TryGetStringProperty(inputElement, "command", out var inputCommand)
+                && !string.IsNullOrWhiteSpace(inputCommand))
+            {
+                patterns.Add(inputCommand.Trim());
+            }
+        }
+
+        patterns = patterns
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var alwaysPatterns = new List<string>();
+        AddStringOrStringArrayPropertyValues(element, "always", alwaysPatterns);
+        alwaysPatterns = alwaysPatterns
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var scope = TryGetStringPropertyAny(element, out var parsedScope, "permission", "tool", "rule")
+            && !string.IsNullOrWhiteSpace(parsedScope)
+            ? parsedScope!.Trim()
+            : null;
+
+        if (patterns.Count == 0)
+        {
+            if (TryGetStringPropertyAny(element, out var fallbackScope, "path", "command")
+                && !string.IsNullOrWhiteSpace(fallbackScope))
+            {
+                return fallbackScope!.Trim();
+            }
+
+            return scope;
+        }
+
+        var lines = new List<string>();
+        lines.Add(scope == null ? "Command pattern(s):" : $"{scope} command pattern(s):");
+        foreach (var pattern in patterns)
+        {
+            lines.Add("- " + pattern);
+        }
+
+        if (alwaysPatterns.Count > 0)
+        {
+            lines.Add("Remembered pattern(s) if approved always:");
+            foreach (var alwaysPattern in alwaysPatterns)
+            {
+                lines.Add("- " + alwaysPattern);
+            }
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    private static void AddStringOrStringArrayPropertyValues(JsonElement element, string propertyName, List<string> output)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || !element.TryGetProperty(propertyName, out var property))
+        {
+            return;
+        }
+
+        if (property.ValueKind == JsonValueKind.String)
+        {
+            var value = property.GetString();
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                output.Add(value.Trim());
+            }
+
+            return;
+        }
+
+        if (property.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in property.EnumerateArray())
+            {
+                if (entry.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                var value = entry.GetString();
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    output.Add(value.Trim());
+                }
+            }
+        }
     }
 
     private static IReadOnlyList<OpencodePendingQuestion> ParsePendingQuestions(string? raw)

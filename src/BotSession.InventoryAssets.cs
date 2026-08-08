@@ -441,9 +441,18 @@ internal sealed partial class BotSession
                     Console.WriteLine($"[dialog-bridge] TaskItemReceived: item={received.ItemID} asset={received.AssetID} folder={received.FolderID}");
                     try
                     {
-                        Console.WriteLine($"[dialog-bridge] attempting to attach inventory item {itemId} to RightHand (replace=true)");
-                        await AppearanceAttachItemAsync(itemId.ToString(), "RightHand", replace: true, cancellationToken).ConfigureAwait(false);
-                        Console.WriteLine($"[dialog-bridge] took and attached bridge inventory item {itemId} to RightHand.");
+                        Console.WriteLine($"[dialog-bridge] attempting to attach inventory item {itemId} to RightEar (replace=true)");
+                        try
+                        {
+                            await AppearanceAttachItemAsync(itemId.ToString(), "RightEar", replace: true, cancellationToken).ConfigureAwait(false);
+                            Console.WriteLine($"[dialog-bridge] took and attached bridge inventory item {itemId} to RightEar.");
+                        }
+                        catch (Exception earEx)
+                        {
+                            Console.WriteLine($"[dialog-bridge] attach to RightEar failed ({earEx.Message}); retrying with Skull.");
+                            await AppearanceAttachItemAsync(itemId.ToString(), "Skull", replace: true, cancellationToken).ConfigureAwait(false);
+                            Console.WriteLine($"[dialog-bridge] took and attached bridge inventory item {itemId} to Skull fallback.");
+                        }
 
                         // The attachment creates a new in-world object with a different UUID. Attempt to find
                         // that attached object in the current simulator cache and update the trusted bridge pin
@@ -882,9 +891,53 @@ internal sealed partial class BotSession
 
             if (TryGetPinnedBridgeObjectInCurrentSim(out var pinnedObjectId, out var pinnedLocalId))
             {
-                client.Inventory.RequestDeRezToInventory(pinnedLocalId);
-                bridgeDeleted = true;
-                details.Add($"Requested bridge prim delete (de-rez): object={pinnedObjectId}, localId={pinnedLocalId}.");
+                var sim = client.Network.CurrentSim;
+                Primitive? pinnedPrim = null;
+                if (sim != null)
+                {
+                    foreach (var prim in sim.ObjectsPrimitives.Values)
+                    {
+                        if (prim.ID == pinnedObjectId)
+                        {
+                            pinnedPrim = prim;
+                            break;
+                        }
+                    }
+                }
+
+                var appearsAttached = pinnedPrim != null && pinnedPrim.ParentID == client.Self.LocalID;
+                if (appearsAttached)
+                {
+                    if (TryGetAttachItemIdFromPrimNameValues(pinnedPrim!, out var attachItemId))
+                    {
+                        client.Appearance.Detach(attachItemId);
+                        details.Add($"Requested detach for worn bridge attachment item {attachItemId}.");
+
+                        // Give simulator a moment to process detach before removing inventory item.
+                        await Task.Delay(TimeSpan.FromMilliseconds(350), token).ConfigureAwait(false);
+
+                        try
+                        {
+                            await client.Inventory.RemoveItemAsync(attachItemId, token).ConfigureAwait(false);
+                            bridgeDeleted = true;
+                            details.Add($"Delete request sent for bridge attachment inventory item {attachItemId}.");
+                        }
+                        catch (Exception ex)
+                        {
+                            details.Add($"Detach sent for bridge attachment item {attachItemId}, but delete request failed: {ex.Message}");
+                        }
+                    }
+                    else
+                    {
+                        details.Add($"Pinned bridge object {pinnedObjectId} appears attached, but AttachItemID was not found in NameValues.");
+                    }
+                }
+                else
+                {
+                    client.Inventory.RequestDeRezToInventory(pinnedLocalId);
+                    bridgeDeleted = true;
+                    details.Add($"Requested bridge prim delete (de-rez): object={pinnedObjectId}, localId={pinnedLocalId}.");
+                }
             }
             else
             {
@@ -953,6 +1006,31 @@ internal sealed partial class BotSession
 
             return BotToolResult.OkResult(string.Join(" ", details));
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryGetAttachItemIdFromPrimNameValues(Primitive prim, out UUID attachItemId)
+    {
+        attachItemId = UUID.Zero;
+        if (prim.NameValues == null || !prim.NameValues.Any())
+        {
+            return false;
+        }
+
+        foreach (var nameValue in prim.NameValues)
+        {
+            if (!nameValue.Name.Equals("AttachItemID", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var raw = nameValue.Value?.ToString();
+            if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out attachItemId) && attachItemId != UUID.Zero)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public async Task<InventoryQueryResult> TaskInventoryListAsync(

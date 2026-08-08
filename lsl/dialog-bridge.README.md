@@ -9,7 +9,7 @@ This prototype lets `opensim-metaverse2mcp` show Opencode multiple-choice questi
 ## How it works
 
 1. Bot emits request on private chat channel `-919191`:
-   - `dlgreq|<conversationKey>|<questionId>|<targetAvatar>|<header>|<question>|<opt1;opt2;...>`
+   - `dlgreq|<conversationKey>|<requestId>|<targetAvatar>|<header>|<prompt>|<optionCount>|<opt1>|<opt2>|...`
 2. LSL script shows `llDialog(targetAvatar, ...)` with those buttons.
 3. User clicks a button.
 4. LSL script sends IM back to bot object endpoint:
@@ -27,4 +27,4 @@ This prototype lets `opensim-metaverse2mcp` show Opencode multiple-choice questi
 
 - This is intentionally minimal and currently routes to the latest active IM conversation.
 - It does not yet include auth/signing; keep the bridge object controlled and trusted.
-- Question prompts still appear in IM as fallback in case dialog delivery fails.
+- Question and permission prompts are delivered primarily via in-world dialog bridge events; use `*question` / `*permission` commands as manual fallback controls.
