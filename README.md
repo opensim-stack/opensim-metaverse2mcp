@@ -133,7 +133,10 @@ The server publishes tools including:
 - `Stand`
 - `Fly`
 - `Jump`
-- `Dance`
+- `AnimationStart`
+- `AnimationStop`
+- `AnimationsList`
+- `ActiveAnimations`
 - `Chat`
 - `SendInstantMessage`
 - `MoveBy`
@@ -271,6 +274,11 @@ UV preset notes:
 Movement notes:
 - `WalkTo`/`FlyTo` use stepped autopilot waypoints for improved reliability over larger distances.
 - `TeleportTo` resolves named regions to handles before teleporting for stricter targeting.
+
+Animation notes:
+- `AnimationStart`/`AnimationStop` accept either a built-in animation name (e.g. `DANCE1`, `WAVE`, `CLAP`, `SIT`) or a raw animation UUID.
+- `AnimationsList` returns all built-in animation names/UUIDs from LibreMetaverse's `Animations` class.
+- `ActiveAnimations` returns the bot's currently signaled animations with their sequence IDs.
 
 Environment notes:
 - `EnvGetRegion`/`EnvGetParcel` return a structured result with `PayloadJson` containing the LLSD object as JSON.

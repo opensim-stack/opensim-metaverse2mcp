@@ -58,7 +58,7 @@ Scope notes:
 - [-] **[P1] Connection lifecycle controls**
   - Add explicit MCP tools for logout/reconnect and connection diagnostics.
   - Add login profile switching at runtime (safe rebind) instead of startup-only login.
-- [ ] **[P1] Advanced animation controls**
+- [x] **[P1] Advanced animation controls**
   - Start/stop arbitrary animation UUIDs (not only `DANCE1`).
   - Query active animations.
 - [ ] **[P2] Gestures and typing state controls**

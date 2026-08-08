@@ -45,12 +45,32 @@ internal sealed class BotMcpTools
         return _bot.JumpAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("Start or stop dance animation DANCE1.")]
-    public Task<BotToolResult> Dance(
-        [Description("True to start dancing, false to stop.")] bool enabled,
+    [McpServerTool, Description("Start playing an animation by built-in name (e.g. DANCE1, WAVE, SIT) or UUID.")]
+    public Task<BotToolResult> AnimationStart(
+        [Description("Animation name from the Animations class (e.g. DANCE1, CLAP, SIT) or a UUID string.")] string animation,
         CancellationToken cancellationToken)
     {
-        return _bot.DanceAsync(enabled, cancellationToken);
+        return _bot.AnimationStartAsync(animation, cancellationToken);
+    }
+
+    [McpServerTool, Description("Stop playing an animation by built-in name or UUID.")]
+    public Task<BotToolResult> AnimationStop(
+        [Description("Animation name from the Animations class (e.g. DANCE1, CLAP, SIT) or a UUID string.")] string animation,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AnimationStopAsync(animation, cancellationToken);
+    }
+
+    [McpServerTool, Description("List all built-in animation names and UUIDs from the Animations class.")]
+    public Task<AnimationListResult> AnimationsList(CancellationToken cancellationToken)
+    {
+        return _bot.AnimationsListAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("List currently active/signaled animations for the bot.")]
+    public Task<AnimationListResult> ActiveAnimations(CancellationToken cancellationToken)
+    {
+        return _bot.ActiveAnimationsAsync(cancellationToken);
     }
 
     [McpServerTool, Description("Send a local chat message.")]
