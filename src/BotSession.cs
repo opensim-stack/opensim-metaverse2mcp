@@ -67,6 +67,8 @@ internal sealed partial class BotSession : IDisposable
     private readonly object _dialogBridgeTrustLock = new();
     private readonly object _typingStateLock = new();
     private readonly object _hoverStateLock = new();
+    private readonly SemaphoreSlim _connectGate = new(1, 1);
+    private readonly CancellationTokenSource _lifecycleCts = new();
 
     private string? _projectAgentsPromptCache;
     private DateTime _projectAgentsPromptCacheLastWriteUtc;
@@ -117,6 +119,7 @@ internal sealed partial class BotSession : IDisposable
     private GridClient? _client;
     private bool _connected;
     private string _lastLoginMessage = string.Empty;
+    private int _reconnectLoopActive;
 
     private readonly object _movementLock = new();
     private CancellationTokenSource? _movementAutoStopCts;
@@ -179,21 +182,33 @@ internal sealed partial class BotSession : IDisposable
 
         public async Task<bool> ConnectAsync(CancellationToken cancellationToken)
     {
-        if (_connected)
+        await _connectGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            return true;
-        }
+            if (_connected && _client != null)
+            {
+                return true;
+            }
 
-        var client = new GridClient();
-        // Must be set before login/simulator creation; enabling later does not backfill Terrain arrays.
-        client.Settings.World.StoreLandPatches = true;
-        client.Network.LoginProgress += OnLoginProgress;
-        client.Network.Disconnected += OnDisconnected;
-        client.Network.SimChanged += OnNetworkSimChanged;
-        client.Self.IM += OnInstantMessage;
-        client.Self.ChatFromSimulator += OnChatFromSimulator;
-        client.Self.ScriptDialog += OnScriptDialog;
-        client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
+            // If a stale client exists (e.g. after simulator restart), fully recycle it before reconnect.
+            var staleClient = _client;
+            if (staleClient != null)
+            {
+                CleanupClient(staleClient, logout: true);
+                _client = null;
+                _connected = false;
+            }
+
+            var client = new GridClient();
+            // Must be set before login/simulator creation; enabling later does not backfill Terrain arrays.
+            client.Settings.World.StoreLandPatches = true;
+            client.Network.LoginProgress += OnLoginProgress;
+            client.Network.Disconnected += OnDisconnected;
+            client.Network.SimChanged += OnNetworkSimChanged;
+            client.Self.IM += OnInstantMessage;
+            client.Self.ChatFromSimulator += OnChatFromSimulator;
+            client.Self.ScriptDialog += OnScriptDialog;
+            client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
 
             // Assign the field-backed client early so event handlers that run during
             // the login process (for example SimChanged) can reference a non-null
@@ -201,50 +216,60 @@ internal sealed partial class BotSession : IDisposable
             // cleanup below.
             _client = client;
 
-        var login = client.Network.DefaultLoginParams(
-            _options.BotFirstName!,
-            _options.BotLastName!,
-            _options.BotPassword!,
-            "opensim-metaverse2mcp",
-            "0.1.0");
+            var login = client.Network.DefaultLoginParams(
+                _options.BotFirstName!,
+                _options.BotLastName!,
+                _options.BotPassword!,
+                "opensim-metaverse2mcp",
+                "0.1.0");
 
-        login.URI = _options.BotLoginUri;
-        login.Start = _options.BotStartLocation;
+            login.URI = _options.BotLoginUri;
+            login.Start = _options.BotStartLocation;
 
-        Console.WriteLine($"[bot] logging in as {_options.BotFirstName} {_options.BotLastName} ...");
+            Console.WriteLine($"[bot] logging in as {_options.BotFirstName} {_options.BotLastName} ...");
 
-        var success = await client.Network.LoginAsync(login, cancellationToken).ConfigureAwait(false);
-        _lastLoginMessage = client.Network.LoginMessage ?? string.Empty;
+            var success = await client.Network.LoginAsync(login, cancellationToken).ConfigureAwait(false);
+            _lastLoginMessage = client.Network.LoginMessage ?? string.Empty;
 
-        if (!success)
-        {
-            try { client.Network.Logout(); } catch { }
-            client.Self.IM -= OnInstantMessage;
-            client.Self.ChatFromSimulator -= OnChatFromSimulator;
-            client.Self.ScriptDialog -= OnScriptDialog;
-            client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
-            client.Network.Disconnected -= OnDisconnected;
-            client.Network.SimChanged -= OnNetworkSimChanged;
-            client.Network.LoginProgress -= OnLoginProgress;
-            // Clear the shared client field since login failed.
-            _client = null;
-            client.Dispose();
-            return false;
+            if (!success)
+            {
+                CleanupClient(client, logout: true);
+                // Clear the shared client field since login failed.
+                _client = null;
+                return false;
+            }
+
+            // client already assigned to _client above; mark connected.
+            _connected = true;
+
+            // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
+            TryLoadDialogBridgeTrustStateFromFile();
+
+            await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
+            return true;
         }
-
-        // client already assigned to _client above; mark connected.
-        _connected = true;
-
-        // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
-        TryLoadDialogBridgeTrustStateFromFile();
-
-        await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
-        return true;
+        finally
+        {
+            _connectGate.Release();
+        }
     }
 
     public BotStatus GetStatus()
     {
-        var client = EnsureClient();
+        var client = _client;
+        if (!_connected || client == null)
+        {
+            EnsureReconnectLoop("status-check");
+            return new BotStatus(
+                false,
+                "disconnected",
+                0f,
+                0f,
+                0f,
+                client?.Self.AgentID.ToString() ?? string.Empty,
+                _lastLoginMessage);
+        }
+
         var sim = client.Network.CurrentSim;
         var pos = client.Self.SimPosition;
 
@@ -2101,6 +2126,15 @@ internal sealed partial class BotSession : IDisposable
 
     public void Dispose()
     {
+        try
+        {
+            _lifecycleCts.Cancel();
+        }
+        catch
+        {
+            // No-op during shutdown.
+        }
+
         var client = _client;
         if (_opencodeChat != null)
         {
@@ -2152,27 +2186,18 @@ internal sealed partial class BotSession : IDisposable
 
         if (client == null)
         {
+            _connectGate.Dispose();
+            _lifecycleCts.Dispose();
+            if (_opencodeChat is IDisposable disposableWhenNoClient)
+            {
+                disposableWhenNoClient.Dispose();
+            }
             return;
         }
 
-        client.Self.IM -= OnInstantMessage;
-        client.Self.ChatFromSimulator -= OnChatFromSimulator;
-        client.Self.ScriptDialog -= OnScriptDialog;
-        client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered;
-        client.Network.Disconnected -= OnDisconnected;
-        client.Network.SimChanged -= OnNetworkSimChanged;
-        client.Network.LoginProgress -= OnLoginProgress;
-
-        try
-        {
-            client.Network.Logout();
-        }
-        catch
-        {
-            // No-op during shutdown.
-        }
-
-        client.Dispose();
+        CleanupClient(client, logout: true);
+        _connectGate.Dispose();
+        _lifecycleCts.Dispose();
         if (_opencodeChat is IDisposable disposableOpencodeChat)
         {
             disposableOpencodeChat.Dispose();
@@ -2339,6 +2364,7 @@ internal sealed partial class BotSession : IDisposable
     {
         if (!_connected || _client == null)
         {
+            EnsureReconnectLoop("ensure-client");
             throw new InvalidOperationException("Bot is not connected.");
         }
 
@@ -7053,6 +7079,104 @@ internal sealed partial class BotSession : IDisposable
         StopFollowInternal();
         CancelMovementAutoStop();
         Console.WriteLine($"[bot] disconnected: {e.Reason} - {e.Message}");
+        EnsureReconnectLoop("network-disconnect");
+    }
+
+    private void EnsureReconnectLoop(string reason)
+    {
+        if (_lifecycleCts.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _reconnectLoopActive, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ReconnectLoopAsync(reason, _lifecycleCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _reconnectLoopActive, 0);
+            }
+        });
+    }
+
+    private async Task ReconnectLoopAsync(string reason, CancellationToken cancellationToken)
+    {
+        Console.WriteLine($"[bot] reconnect loop started (reason={reason}).");
+        var attempt = 0;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (_connected && _client != null)
+            {
+                Console.WriteLine("[bot] reconnect loop exiting: client is connected.");
+                return;
+            }
+
+            attempt++;
+            var backoffSeconds = Math.Min(30, Math.Max(2, attempt * 2));
+            Console.WriteLine($"[bot] reconnect attempt {attempt} starting...");
+
+            try
+            {
+                using var attemptTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(10, _options.BotLoginTimeoutSeconds)));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, attemptTimeout.Token);
+                var connected = await ConnectAsync(linked.Token).ConfigureAwait(false);
+                if (connected)
+                {
+                    Console.WriteLine("[bot] reconnect successful.");
+                    return;
+                }
+
+                Console.WriteLine("[bot] reconnect attempt failed (login returned false).");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                Console.WriteLine("[bot] reconnect attempt timed out.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[bot] reconnect attempt error: {ex.Message}");
+            }
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+    }
+
+    private void CleanupClient(GridClient client, bool logout)
+    {
+        try { client.Self.IM -= OnInstantMessage; } catch { }
+        try { client.Self.ChatFromSimulator -= OnChatFromSimulator; } catch { }
+        try { client.Self.ScriptDialog -= OnScriptDialog; } catch { }
+        try { client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered; } catch { }
+        try { client.Network.Disconnected -= OnDisconnected; } catch { }
+        try { client.Network.SimChanged -= OnNetworkSimChanged; } catch { }
+        try { client.Network.LoginProgress -= OnLoginProgress; } catch { }
+
+        if (logout)
+        {
+            try { client.Network.Logout(); } catch { }
+        }
+
+        try { client.Dispose(); } catch { }
     }
 }
 

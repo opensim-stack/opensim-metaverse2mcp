@@ -77,6 +77,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _eventPendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _eventPendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _modelOverrideGate = new(1, 1);
+    private readonly bool _opencodeEventDebug;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -85,6 +86,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
     public OpencodeChatClient(AppOptions options)
     {
+        _opencodeEventDebug = options.OpencodeEventDebug;
         var baseUrl = BuildBaseUrl(options.OpencodeScheme, options.OpencodeHost, options.OpencodePort);
 
         _http = new HttpClient
@@ -232,7 +234,6 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         try
         {
-            LogRawJson($"event:{eventType}", rawData);
             using var doc = JsonDocument.Parse(rawData);
             var root = doc.RootElement;
             if (root.ValueKind == JsonValueKind.Object)
@@ -248,6 +249,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 {
                     sessionId = parsedSessionId!.Trim();
                 }
+            }
+
+            if (ShouldLogEventJson(eventType, root))
+            {
+                LogRawJson($"event:{eventType}", rawData);
             }
 
             IngestEventDerivedPendingState(eventType, sessionId, root);
@@ -280,6 +286,49 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             // Ignore non-JSON heartbeat/control frames.
         }
 
+    }
+
+    private bool ShouldLogEventJson(string eventType, JsonElement root)
+    {
+        var normalizedEventType = (eventType ?? string.Empty).Trim();
+        if (_opencodeEventDebug)
+        {
+            return true;
+        }
+
+        if (normalizedEventType.Equals("reasoning", StringComparison.OrdinalIgnoreCase)
+            || normalizedEventType.Equals("text", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!normalizedEventType.Equals("message.part.updated", StringComparison.OrdinalIgnoreCase)
+            || root.ValueKind != JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        var source = root;
+        if (root.TryGetProperty("properties", out var properties)
+            && properties.ValueKind == JsonValueKind.Object)
+        {
+            source = properties;
+        }
+
+        if (source.TryGetProperty("part", out var part)
+            && part.ValueKind == JsonValueKind.Object
+            && TryGetStringPropertyAny(part, out var parsedPartType, "type", "partType")
+            && !string.IsNullOrWhiteSpace(parsedPartType))
+        {
+            var normalizedPartType = parsedPartType!.Trim();
+            if (normalizedPartType.Equals("reasoning", StringComparison.OrdinalIgnoreCase)
+                || normalizedPartType.Equals("text", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool TryParseSessionStatusEvent(JsonElement root, string eventType, string? hintedSessionId, out OpencodeSessionStatusEvent? statusEvent)

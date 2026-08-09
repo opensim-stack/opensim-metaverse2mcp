@@ -397,6 +397,234 @@ internal sealed class BotMcpTools
         return _bot.EstateRestartScheduleSetAsync(mode, daysCsv, timeUtc, cancellationToken);
     }
 
+    [McpServerTool, Description("List current groups the bot is a member of.")]
+    public Task<DataToolResult> GroupListCurrent(
+        [Description("Include detailed group profile fields in the result payload.")] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupListCurrentAsync(includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get full profile data for a group UUID.")]
+    public Task<DataToolResult> GroupGetProfile(
+        [Description("Group UUID.")] string groupId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupGetProfileAsync(groupId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get members for a group UUID.")]
+    public Task<DataToolResult> GroupGetMembers(
+        [Description("Group UUID.")] string groupId,
+        [Description("Include detailed member fields (powers, contribution, online status).") ] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupGetMembersAsync(groupId, includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get roles for a group UUID.")]
+    public Task<DataToolResult> GroupGetRoles(
+        [Description("Group UUID.")] string groupId,
+        [Description("Include detailed role fields (description, powers).") ] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupGetRolesAsync(groupId, includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get role-to-member mappings for a group UUID.")]
+    public Task<DataToolResult> GroupGetRoleMembers(
+        [Description("Group UUID.")] string groupId,
+        [Description("Include full per-role member UUID lists.")] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupGetRoleMembersAsync(groupId, includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get title definitions for a group UUID.")]
+    public Task<DataToolResult> GroupGetTitles(
+        [Description("Group UUID.")] string groupId,
+        [Description("Include detailed title fields.")] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupGetTitlesAsync(groupId, includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set the active group for the bot avatar.")]
+    public Task<BotToolResult> GroupSetActive(
+        [Description("Group UUID.")] string groupId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupSetActiveAsync(groupId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set the active title role for the bot in a group.")]
+    public Task<BotToolResult> GroupSetActiveTitle(
+        [Description("Group UUID.")] string groupId,
+        [Description("Role UUID used as active title.")] string roleId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupSetActiveTitleAsync(groupId, roleId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Create a group role from a structured role payload.")]
+    public Task<BotToolResult> GroupRoleCreate(
+        [Description("Group UUID.")] string groupId,
+        [Description("Structured role payload: name, optional title/description, and optional powers (CSV enum names or numeric bitmask).") ] GroupRoleUpdateInput role,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupRoleCreateAsync(groupId, role, cancellationToken);
+    }
+
+    [McpServerTool, Description("Update an existing group role from a structured role payload.")]
+    public Task<BotToolResult> GroupRoleUpdate(
+        [Description("Group UUID.")] string groupId,
+        [Description("Role UUID.")] string roleId,
+        [Description("Structured role payload: name, optional title/description, and optional powers (CSV enum names or numeric bitmask).") ] GroupRoleUpdateInput role,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupRoleUpdateAsync(groupId, roleId, role, cancellationToken);
+    }
+
+    [McpServerTool, Description("Delete a role from a group.")]
+    public Task<BotToolResult> GroupRoleDelete(
+        [Description("Group UUID.")] string groupId,
+        [Description("Role UUID.")] string roleId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupRoleDeleteAsync(groupId, roleId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Assign a group member avatar UUID to a role.")]
+    public Task<BotToolResult> GroupRoleAddMember(
+        [Description("Group UUID.")] string groupId,
+        [Description("Role UUID.")] string roleId,
+        [Description("Member avatar UUID.")] string memberAgentId,
+        [Description("When true, perform read-back verification after submit.")] bool verifyAfterSubmit,
+        [Description("Seconds to wait for verification when verifyAfterSubmit is true (1..60).") ] int verifyWaitSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupRoleAddMemberAsync(groupId, roleId, memberAgentId, verifyAfterSubmit, verifyWaitSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Remove a group member avatar UUID from a role.")]
+    public Task<BotToolResult> GroupRoleRemoveMember(
+        [Description("Group UUID.")] string groupId,
+        [Description("Role UUID.")] string roleId,
+        [Description("Member avatar UUID.")] string memberAgentId,
+        [Description("When true, perform read-back verification after submit.")] bool verifyAfterSubmit,
+        [Description("Seconds to wait for verification when verifyAfterSubmit is true (1..60).") ] int verifyWaitSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupRoleRemoveMemberAsync(groupId, roleId, memberAgentId, verifyAfterSubmit, verifyWaitSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Invite an avatar to a group with one or more role UUIDs.")]
+    public Task<DataToolResult> GroupInviteUser(
+        [Description("Group UUID.")] string groupId,
+        [Description("Structured invite payload: targetAgentId, optional roleIdsCsv, and fallback useEveryoneRoleIfEmpty.") ] GroupInviteInput invite,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupInviteUserAsync(groupId, invite, cancellationToken);
+    }
+
+    [McpServerTool, Description("List currently banned agents for a group UUID.")]
+    public Task<DataToolResult> GroupBanListGet(
+        [Description("Group UUID.")] string groupId,
+        [Description("Include detailed ban timestamps.")] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupBanListGetAsync(groupId, includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Ban or unban one or more agents from a group, with optional read-back verification.")]
+    public Task<DataToolResult> GroupBanSet(
+        [Description("Group UUID.")] string groupId,
+        [Description("Structured payload: action (ban|unban) and agentIdsCsv.") ] GroupBanActionInput request,
+        [Description("When true, verify post-submit state by re-reading group ban list.")] bool verifyAfterSubmit,
+        [Description("Seconds to wait for verification when verifyAfterSubmit is true (1..60).") ] int verifyWaitSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupBanSetAsync(groupId, request, verifyAfterSubmit, verifyWaitSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("List notices for a group.")]
+    public Task<DataToolResult> GroupNoticesList(
+        [Description("Group UUID.")] string groupId,
+        [Description("Include detailed notice fields (sender, timestamps, attachment type).") ] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupNoticesListAsync(groupId, includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Send a group notice from a structured notice payload.")]
+    public Task<BotToolResult> GroupNoticeSend(
+        [Description("Group UUID.")] string groupId,
+        [Description("Structured notice payload: subject, message, optional attachment item/owner IDs.") ] GroupNoticeInput notice,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupNoticeSendAsync(groupId, notice, cancellationToken);
+    }
+
+    [McpServerTool, Description("Join a group chat session and optionally wait for join confirmation.")]
+    public Task<BotToolResult> GroupChatJoin(
+        [Description("Group/session UUID.")] string groupId,
+        [Description("Seconds to wait for GroupChatJoined confirmation (0 = no wait).") ] int waitForJoinSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupChatJoinAsync(groupId, waitForJoinSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Leave a group chat session.")]
+    public Task<BotToolResult> GroupChatLeave(
+        [Description("Group/session UUID.")] string groupId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupChatLeaveAsync(groupId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Send a message to an active group chat session.")]
+    public Task<BotToolResult> GroupChatSend(
+        [Description("Group/session UUID.")] string groupId,
+        [Description("Message text.")] string message,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupChatSendAsync(groupId, message, cancellationToken);
+    }
+
+    [McpServerTool, Description("List active group chat sessions tracked by the client.")]
+    public Task<DataToolResult> GroupChatSessionsList(
+        [Description("Include detailed member state per session.")] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupChatSessionsListAsync(includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("Accept a pending chat-session invitation by session UUID.")]
+    public Task<BotToolResult> GroupChatAcceptInvite(
+        [Description("Chat session UUID.")] string sessionId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupChatAcceptInviteAsync(sessionId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Create a group using a structured group payload.")]
+    public Task<BotToolResult> GroupCreate(
+        [Description("Structured group payload (name, charter, insigniaId, membership flags, and fee).") ] GroupCreateInput group,
+        [Description("Seconds to wait for GroupCreatedReply (0 = no wait).") ] int waitForCreateSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupCreateAsync(group, waitForCreateSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Update group profile/settings from a structured group payload.")]
+    public Task<BotToolResult> GroupUpdate(
+        [Description("Group UUID to update.")] string groupId,
+        [Description("Structured group payload used to update group settings.") ] GroupCreateInput group,
+        CancellationToken cancellationToken)
+    {
+        return _bot.GroupUpdateAsync(groupId, group, cancellationToken);
+    }
+
     [McpServerTool, Description("Move by a relative amount in a direction using walk or fly mode.")]
     public Task<BotToolResult> MoveBy(
         [Description("Direction: north, south, east, west, up, down, forward, back, left, right.")] string direction,

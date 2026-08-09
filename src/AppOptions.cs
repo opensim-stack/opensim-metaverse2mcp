@@ -30,6 +30,7 @@ internal sealed class AppOptions
     public string? OpencodePassword { get; set; }
     public string? OpencodeInitialProvider { get; set; }
     public string? OpencodeInitialModel { get; set; }
+    public bool OpencodeEventDebug { get; set; }
     public int OpencodeRequestTimeoutSeconds { get; set; } = 60;
     public string? OpencodeHandlerFirstName { get; set; }
     public string? OpencodeHandlerLastName { get; set; }

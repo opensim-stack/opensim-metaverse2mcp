@@ -28,6 +28,7 @@ internal static class ConfigLoader
             OpencodePassword = FirstDefined("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
             OpencodeInitialProvider = Env("OPENCODE_INITIAL_PROVIDER"),
             OpencodeInitialModel = Env("OPENCODE_INITIAL_MODEL"),
+            OpencodeEventDebug = ParseBool(Env("OPENCODE_EVENT_DEBUG"), false),
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 1800),
             OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
             OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
@@ -88,6 +89,9 @@ internal static class ConfigLoader
             "  --opencode-initial-model <provider/model|model>",
             "                                Optional startup model for IM conversations without runtime overrides",
             "                                (env: OPENCODE_INITIAL_MODEL)",
+            "  --opencode-event-debug <bool>",
+            "                                Enable verbose Opencode event JSON logging (including message.part.updated reasoning/text)",
+            "                                (env: OPENCODE_EVENT_DEBUG, default: false)",
             "  --opencode-timeout-seconds <int>",
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
             "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
@@ -200,6 +204,9 @@ internal static class ConfigLoader
                     break;
                 case "--opencode-initial-model":
                     options.OpencodeInitialModel = RequireValue(args, ref i, arg);
+                    break;
+                case "--opencode-event-debug":
+                    options.OpencodeEventDebug = ParseBool(RequireValue(args, ref i, arg), options.OpencodeEventDebug);
                     break;
                 case "--opencode-timeout-seconds":
                     options.OpencodeRequestTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.OpencodeRequestTimeoutSeconds);

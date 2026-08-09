@@ -20,7 +20,6 @@ Scope notes:
 ## 1) Platform, Reliability, and Security
 
 - [ ] **[P0] Auto-reconnect and session recovery**
-  - Re-login strategy with exponential backoff.
   - Recover event subscriptions and MCP-ready state after disconnect.
   - Preserve/restore per-conversation AI session mapping safely.
 - [ ] **[P0] AI responder access policy (beyond handler mode)**
@@ -47,7 +46,7 @@ Scope notes:
 - [ ] **[P0] MCP event/notification stream**
   - Expose event subscriptions for login/disconnect, object updates, IM/chat, inventory offers, teleport status.
   - Include backpressure and bounded buffers.
-- [-] **[P1] Local chat and group chat AI routing**
+- [ ] **[P1] Local chat and group chat AI routing**
   - Local and group routing are explicitly TODO in code; currently IM-focused.
 - [ ] **[P1] Event filtering tools**
   - Subscribe by radius, object UUID/local ID, chat source, event type.
@@ -56,7 +55,7 @@ Scope notes:
 
 ## 3) Connection and Avatar Control
 
-- [-] **[P1] Connection lifecycle controls**
+- [ ] **[P1] Connection lifecycle controls**
   - Add explicit MCP tools for logout/reconnect and connection diagnostics.
   - Add login profile switching at runtime (safe rebind) instead of startup-only login.
 - [ ] **[P2] Gestures and typing state controls**
@@ -64,7 +63,7 @@ Scope notes:
 
 ## 4) Objects, Building, and World Editing
 
-- [-] **[P1] Primitive inspection depth**
+- [ ] **[P1] Primitive inspection depth**
   - Add explicit object property fetch/wait tool (creator/permissions/sale/sittable/info freshness guarantees).
   - Surface sculpt/mesh/light/flexible/path/profile/material detail parity with `Primitive` data.
 - [ ] **[P1] Complete build parameter editing**
@@ -81,10 +80,10 @@ Scope notes:
 
 ## 5) Inventory and Asset Management
 
-- [-] **[P1] Inventory browsing ergonomics**
+- [ ] **[P1] Inventory browsing ergonomics**
   - Add search/filter by name/type/date/creator.
   - Return paginated results with cursors for large inventories.
-- [-] **[P1] Inventory CRUD tools**
+- [ ] **[P1] Inventory CRUD tools**
   - Create/rename/move/delete folders and items.
   - Copy/link items and folder-level organization tools.
 - [ ] **[P1] Notecard and script text editing workflows**
@@ -98,7 +97,7 @@ Scope notes:
 
 ## 6) Appearance and Wearables
 
-- [-] **[P1] Outfit management completeness**
+- [ ] **[P1] Outfit management completeness**
   - Save current outfit to folder.
   - Replace/add semantics with wearable category conflict resolution feedback.
 - [ ] **[P1] Wearables direct controls**
@@ -109,7 +108,7 @@ Scope notes:
 
 ## 7) Scripts and Task Inventory
 
-- [-] **[P1] Script lifecycle coverage**
+- [ ] **[P1] Script lifecycle coverage**
   - Add script reset and script event queue stats where supported.
   - Add compile result normalization for common viewer/server compiler messages.
 - [ ] **[P1] Multi-script object workflows**
@@ -119,21 +118,15 @@ Scope notes:
 
 ## 8) Environment, Land, and Region Features
 
-- [-] **[P1] Parcel management tools (`ParcelManager`)**
-  - Implemented MCP tools: parcel query (`ParcelGetCurrent`, `ParcelGetByLocalId`), parcel edit (`ParcelSetInfo`, `ParcelSetLanding`), access/ban list read (`ParcelAccessListGet`), eject+ban (`ParcelEjectUser`), parcel merge/split (`ParcelJoin`, `ParcelSubdivide`), and permission heuristics (`ParcelPermissionDiagnostics`).
-  - Parcel info query/edit, media/music URL, access list, ban list, landing point.
-  - Remaining: full ACL write/edit/remove primitives (library gap in current surfaced API path).
-- [-] **[P1] Estate/admin surfaces (where permissions allow)**
-  - Implemented MCP tools: estate info/covenant query (`EstateGetInfo`, `EstateGetCovenant`), restart/cancel (`EstateRestartRegion`, `EstateCancelRestart`), notice broadcast (`EstateBroadcastMessage`), and schedule get/set (`EstateRestartScheduleGet`, `EstateRestartScheduleSet`).
-  - Region restart notices, covenant/estate settings read, restart scheduling helpers.
-  - Remaining: richer estate settings mutation coverage and stronger capability/permission-specific error classification.
-- [-] **[P1] EEP/Windlight usability layer**
+- [ ] **[P1] Parcel management tools (`ParcelManager`)**
+  - full ACL write/edit/remove primitives (library gap in current surfaced API path).
+- [ ] **[P1] Estate/admin surfaces (where permissions allow)**
+  - Richer estate settings mutation coverage and stronger capability/permission-specific error classification.
+- [ ] **[P1] EEP/Windlight usability layer**
   - High-level presets and patch operations instead of raw LLSD only.
 
 ## 9) Social, Groups, Search, and Directory
 
-- [ ] **[P1] Group operations (`GroupManager`)**
-  - List groups, group chat/session controls, role/title actions, notices.
 - [ ] **[P1] Friends operations (`FriendsManager`)**
   - Friends list, friendship offers, online status, teleport offers/requests.
 - [ ] **[P1] Directory/search (`DirectoryManager`)**
@@ -143,7 +136,7 @@ Scope notes:
 
 ## 10) Communications Beyond IM
 
-- [-] **[P1] Chat modalities**
+- [ ] **[P1] Chat modalities**
   - Add explicit whisper/shout tools and receive-side filters.
 - [ ] **[P1] Group chat and conference session control**
   - Start/join/leave group chat sessions; route safely to AI session model.
@@ -195,7 +188,6 @@ Scope notes:
 
 ### Phase 1 (P0 hardening)
 
-- Auto-reconnect + state recovery
 - Access policy enforcement
 - Event stream foundation
 - Tool schema normalization
@@ -203,7 +195,7 @@ Scope notes:
 
 ### Phase 2 (P1 capability expansion)
 
-- Parcel/group/friends/directory tools
+- Parcel/friends/directory tools
 - Rich inventory CRUD + pagination
 - Advanced object build/edit properties
 - Local/group chat routing and controls
