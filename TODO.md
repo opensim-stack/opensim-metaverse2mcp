@@ -73,8 +73,6 @@ Scope notes:
 - [ ] **[P1] Permissions/ownership tools**
   - Set next-owner/copy/mod/transfer perms where allowed.
   - Set sale info, for-sale toggles, deed/share with group.
-- [ ] **[P2] Object lifecycle utilities**
-  - Return to owner, take copy/take, rez from inventory with transform options.
 - [ ] **[P2] Parcel object discovery helpers**
   - Query objects by parcel, owner, scripted status, physics status.
 

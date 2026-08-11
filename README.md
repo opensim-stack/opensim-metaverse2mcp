@@ -181,6 +181,8 @@ The server publishes tools including:
 - `AssetUploadInventory`
 - `AssetDownload`
 - `TextureDownload`
+- `MeshInspectGltf`
+- `MeshUploadGltf`
 - `InventoryOfferPolicyRuleAdd`
 - `InventoryOfferPolicyRulesList`
 - `InventoryOfferPolicyRulesClear`
@@ -290,6 +292,9 @@ Inventory and asset notes:
 - `AssetUploadInventory` accepts either a local file path or an `http/https` URL as `source`.
 - `AssetUploadInventory` accepts `assetType`/`inventoryType` as explicit values or `auto` (inferred from source/name extension such as `.lsl`, `.txt`, `.jp2`, `.ogg`, `.bvh`).
 - `AssetDownload` and `TextureDownload` use `outputMode`: `both` (default), `base64`, or `tempfile`.
+- `MeshInspectGltf` preflights `.glb`/`.gltf` content and reports what can upload, what will be skipped, and texture ingest/transcode diagnostics.
+- `MeshUploadGltf` uploads mesh assets from local paths or HTTP sources and returns created inventory/asset IDs plus conversion warnings when present.
+- For production workflows, run `MeshInspectGltf` in strict mode before `MeshUploadGltf` to prevent partial uploads.
 - Incoming inventory offers are policy-driven: first matching rule decides `accept` or `decline`; unmatched offers are declined by default.
 - `TaskInventoryTake` requests transfer from object (task) inventory into avatar inventory; server permissions determine copy-vs-move behavior.
 - Cross-avatar "take/copy" is offer-based: you can receive what another avatar offers, but cannot arbitrarily pull from another avatar inventory.

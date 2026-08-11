@@ -995,6 +995,56 @@ internal sealed class BotMcpTools
         return _bot.DeleteManyPrimsAsync(localIdsCsv, cancellationToken);
     }
 
+    [McpServerTool, Description("Return object(s) to their owner inventory by comma-separated local IDs.")]
+    public Task<BotToolResult> PrimReturnToOwner(
+        [Description("Comma-separated local IDs to return.")] string localIdsCsv,
+        CancellationToken cancellationToken)
+    {
+        return _bot.PrimReturnToOwnerAsync(localIdsCsv, cancellationToken);
+    }
+
+    [McpServerTool, Description("Take object(s) into inventory (or take copy) by comma-separated local IDs.")]
+    public Task<BotToolResult> PrimTake(
+        [Description("Comma-separated local IDs to take.")] string localIdsCsv,
+        [Description("True = take copy, false = take (move).") ] bool takeCopy,
+        [Description("Optional destination inventory folder UUID. If omitted, default Objects folder is used.")] string? destinationFolderId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.PrimTakeAsync(localIdsCsv, takeCopy, destinationFolderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Rez an inventory object item at a target transform, with optional post-rez scaling.")]
+    public Task<BotToolResult> PrimRezFromInventory(
+        [Description("Inventory object item UUID.")] string itemId,
+        [Description("Local X coordinate (0..256).") ] float x,
+        [Description("Local Y coordinate (0..256).") ] float y,
+        [Description("Local Z coordinate.")] float z,
+        [Description("Roll in degrees.")] float rollDegrees,
+        [Description("Pitch in degrees.")] float pitchDegrees,
+        [Description("Yaw in degrees.")] float yawDegrees,
+        [Description("Select the object after rez when true (requires waitForObject).") ] bool selectAfterRez,
+        [Description("Wait for simulator object confirmation before returning.")] bool waitForObject,
+        [Description("Optional post-rez scale X. Set all scale fields together or leave all null.")] float? scaleX,
+        [Description("Optional post-rez scale Y. Set all scale fields together or leave all null.")] float? scaleY,
+        [Description("Optional post-rez scale Z. Set all scale fields together or leave all null.")] float? scaleZ,
+        CancellationToken cancellationToken)
+    {
+        return _bot.PrimRezFromInventoryAsync(
+            itemId,
+            x,
+            y,
+            z,
+            rollDegrees,
+            pitchDegrees,
+            yawDegrees,
+            selectAfterRez,
+            waitForObject,
+            scaleX,
+            scaleY,
+            scaleZ,
+            cancellationToken);
+    }
+
     [McpServerTool, Description("Find prims by object name (cache search in current simulator).")]
     public Task<PrimQueryResult> PrimFindByName(
         [Description("Name fragment to search for.")] string name,
@@ -1100,6 +1150,26 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken)
     {
         return _bot.AssetUploadInventoryAsync(source, assetType, inventoryType, name, description, folderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Upload a glTF/glb model as a mesh object using a Collada-free pipeline.")]
+    public Task<AssetTransferResult> MeshUploadGltf(
+        [Description("Source path or HTTP/HTTPS URL (.glb or .gltf).") ] string source,
+        [Description("New inventory object name.") ] string name,
+        [Description("New inventory object description.") ] string description,
+        CancellationToken cancellationToken)
+    {
+        return _bot.MeshUploadGltfAsync(source, name, description, cancellationToken);
+    }
+
+    [McpServerTool, Description("Inspect a glTF/glb model for mesh upload readiness and texture ingest details without uploading.")]
+    public Task<MeshInspectResult> MeshInspectGltf(
+        [Description("Source path or HTTP/HTTPS URL (.glb or .gltf).") ] string source,
+        [Description("Maximum warnings to include in output (1..200).") ] int maxWarnings,
+        [Description("Strict mode: fail inspection when any primitive would be skipped or any texture ingest/transcode fails.") ] bool strict,
+        CancellationToken cancellationToken)
+    {
+        return _bot.MeshInspectGltfAsync(source, maxWarnings, strict, cancellationToken);
     }
 
     [McpServerTool, Description("Download an asset by UUID and type. outputMode supports: both, base64, tempfile.")]
