@@ -21,7 +21,7 @@ internal interface IOpencodeChatClient
     Task<OpencodeOAuthCompleteResult> CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeModelSummary>> ListModelsAsync(string? providerId, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken);
-    Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, CancellationToken cancellationToken);
+    Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, string? configuredModelId, CancellationToken cancellationToken);
     Task<IReadOnlyDictionary<string, string>> GetSessionStatusAsync(CancellationToken cancellationToken);
     Task<string> GetSessionDetailsJsonAsync(string sessionId, CancellationToken cancellationToken);
     Task<IReadOnlyList<OpencodeSessionSummary>> GetSessionChildrenAsync(string sessionId, CancellationToken cancellationToken);
@@ -58,7 +58,7 @@ internal sealed record OpencodePendingQuestion(string Id, string SessionId, stri
 internal sealed record OpencodeProviderAuthMethod(int MethodIndex, string Type, string Label);
 internal sealed record OpencodeOAuthStartResult(string Url, string? Method, string? Instructions);
 internal sealed record OpencodeOAuthCompleteResult(bool CallbackAccepted, bool ProviderConfigured, string Message);
-internal sealed record OpencodeSessionStatusEvent(string SessionId, string StatusType);
+internal sealed record OpencodeSessionStatusEvent(string SessionId, string StatusType, string? StatusMessage = null);
 internal sealed record OpencodeMessagePartUpdatedEvent(string SessionId, string PartType);
 
 internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
@@ -76,7 +76,8 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _pendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _eventPendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _eventPendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
-    private readonly SemaphoreSlim _modelOverrideGate = new(1, 1);
+    private readonly ConcurrentDictionary<string, string> _requestedModelBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, OpencodeSessionStatusEvent> _lastSessionStatusBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _opencodeEventDebug;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -112,7 +113,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         _eventLoopCts = new CancellationTokenSource();
         _eventLoopTask = Task.Run(() => ObserveEventStreamsLoopAsync(_eventLoopCts.Token));
 
-        Console.WriteLine("[opencode] model payload strategy: session-only (no per-message model override)");
+        Console.WriteLine("[opencode] model payload strategy: session + per-message explicit provider/model");
     }
 
     private async Task ObserveEventStreamsLoopAsync(CancellationToken cancellationToken)
@@ -259,6 +260,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             IngestEventDerivedPendingState(eventType, sessionId, root);
             if (TryParseSessionStatusEvent(root, eventType, sessionId, out var statusEvent))
             {
+                TrackSessionStatusEvent(statusEvent!);
                 try
                 {
                     SessionStatusChanged?.Invoke(statusEvent!);
@@ -286,6 +288,47 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             // Ignore non-JSON heartbeat/control frames.
         }
 
+    }
+
+    private static bool TryBuildCanonicalModelId(string? providerId, string? modelId, out string canonical)
+    {
+        canonical = string.Empty;
+
+        var trimmedProvider = string.IsNullOrWhiteSpace(providerId) ? string.Empty : providerId.Trim();
+        var trimmedModel = string.IsNullOrWhiteSpace(modelId) ? string.Empty : modelId.Trim();
+        if (string.IsNullOrWhiteSpace(trimmedModel))
+        {
+            return false;
+        }
+
+        canonical = string.IsNullOrWhiteSpace(trimmedProvider)
+            ? trimmedModel
+            : $"{trimmedProvider}/{trimmedModel}";
+        return true;
+    }
+
+    private void TrackRequestedSessionModel(string sessionId, string? configuredModelId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        if (TryParseProviderAndModel(configuredModelId, out var providerId, out var modelLeaf)
+            && TryBuildCanonicalModelId(providerId, modelLeaf, out var providerQualified))
+        {
+            _requestedModelBySession[normalizedSessionId] = providerQualified;
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(configuredModelId))
+        {
+            _requestedModelBySession[normalizedSessionId] = configuredModelId.Trim();
+            return;
+        }
+
+        _requestedModelBySession.TryRemove(normalizedSessionId, out _);
     }
 
     private bool ShouldLogEventJson(string eventType, JsonElement root)
@@ -378,8 +421,59 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             return false;
         }
 
-        statusEvent = new OpencodeSessionStatusEvent(sessionId, statusType);
+        var statusMessage = TryExtractStatusMessage(source);
+        if (string.IsNullOrWhiteSpace(statusMessage))
+        {
+            statusMessage = TryExtractStatusMessage(root);
+        }
+
+        statusEvent = new OpencodeSessionStatusEvent(sessionId, statusType, statusMessage);
         return true;
+    }
+
+    private static string? TryExtractStatusMessage(JsonElement source)
+    {
+        if (source.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (TryGetStringPropertyAny(source, out var directMessage, "message", "error", "reason", "detail", "details", "text")
+            && !string.IsNullOrWhiteSpace(directMessage))
+        {
+            return directMessage!.Trim();
+        }
+
+        if (source.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetStringPropertyAny(status, out var nestedMessage, "message", "error", "reason", "detail", "details", "text")
+                && !string.IsNullOrWhiteSpace(nestedMessage))
+            {
+                return nestedMessage!.Trim();
+            }
+
+            if (status.TryGetProperty("error", out var nestedError))
+            {
+                if (nestedError.ValueKind == JsonValueKind.String)
+                {
+                    var text = nestedError.GetString();
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        return text.Trim();
+                    }
+                }
+
+                if (nestedError.ValueKind == JsonValueKind.Object
+                    && TryGetStringPropertyAny(nestedError, out var nestedErrorMessage, "message", "detail", "reason", "text")
+                    && !string.IsNullOrWhiteSpace(nestedErrorMessage))
+                {
+                    return nestedErrorMessage!.Trim();
+                }
+            }
+        }
+
+        return null;
     }
 
     private static bool TryParseMessagePartUpdatedEvent(JsonElement root, string eventType, string? hintedSessionId, out OpencodeMessagePartUpdatedEvent? partUpdatedEvent)
@@ -601,43 +695,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             throw new ArgumentException("conversationKey is required.", nameof(conversationKey));
         }
 
-        if (string.IsNullOrWhiteSpace(options?.ModelId))
-        {
-            return await SendMessageCoreAsync(conversationKey, title, message, options, cancellationToken).ConfigureAwait(false);
-        }
-
-        var requestedModel = options!.ModelId!.Trim();
-        await _modelOverrideGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        string? previousModel = null;
-        var overrideApplied = false;
-        try
-        {
-            var currentConfig = await GetJsonAsync<OpencodeRuntimeConfig>("/config", cancellationToken).ConfigureAwait(false);
-            previousModel = string.IsNullOrWhiteSpace(currentConfig?.Model) ? null : currentConfig!.Model!.Trim();
-            if (!string.Equals(previousModel, requestedModel, StringComparison.OrdinalIgnoreCase))
-            {
-                await PatchConfigModelAsync(requestedModel, cancellationToken).ConfigureAwait(false);
-                overrideApplied = true;
-            }
-
-            return await SendMessageCoreAsync(conversationKey, title, message, options, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            if (overrideApplied && !string.IsNullOrWhiteSpace(previousModel))
-            {
-                try
-                {
-                    await PatchConfigModelAsync(previousModel, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[opencode] warning: failed to restore /config model to '{previousModel}': {ex.Message}");
-                }
-            }
-
-            _modelOverrideGate.Release();
-        }
+        // Use only session-scoped model selection; toggling global /config can race with
+        // Opencode retries and inadvertently steer requests back to provider defaults.
+        return await SendMessageCoreAsync(conversationKey, title, message, options, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<OpencodeChatReply> SendMessageCoreAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
@@ -708,7 +768,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         if (string.IsNullOrWhiteSpace(sessionId))
         {
-            _sessionIds.TryRemove(conversationKey, out _);
+            if (_sessionIds.TryRemove(conversationKey, out var removedSessionId)
+                && !string.IsNullOrWhiteSpace(removedSessionId))
+            {
+                _requestedModelBySession.TryRemove(removedSessionId, out _);
+            }
             return;
         }
 
@@ -975,20 +1039,10 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return ParseSessionList(root);
     }
 
-    public async Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, CancellationToken cancellationToken)
+    public async Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, string? configuredModelId, CancellationToken cancellationToken)
     {
-        var body = new Dictionary<string, object?>();
-        if (!string.IsNullOrWhiteSpace(title))
-        {
-            body["title"] = title.Trim();
-        }
-
-        if (!string.IsNullOrWhiteSpace(parentSessionId))
-        {
-            var parentId = parentSessionId.Trim();
-            body["parentID"] = parentId;
-            body["parentId"] = parentId;
-        }
+        var body = BuildSessionCreateBody(title, configuredModelId, parentSessionId);
+        Console.WriteLine($"[opencode] POST /session payload: {JsonSerializer.Serialize(body, _jsonOptions)}");
 
         var created = await PostJsonAsync<JsonElement>("/session", body, cancellationToken).ConfigureAwait(false);
         if (!TryBuildSessionSummary(created, null, out var summary))
@@ -1001,16 +1055,40 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
     public async Task<IReadOnlyDictionary<string, string>> GetSessionStatusAsync(CancellationToken cancellationToken)
     {
-        var response = await GetJsonAsync<Dictionary<string, JsonElement>>("/session/status", cancellationToken).ConfigureAwait(false)
+        Dictionary<string, JsonElement>? response = null;
+        try
+        {
+            response = await GetJsonAsync<Dictionary<string, JsonElement>>("/session/status", cancellationToken).ConfigureAwait(false);
+        }
+        catch (OpencodeHttpException ex)
+        {
+            // Some server builds do not expose /session/status reliably; fall back to stream-derived statuses.
+            Console.WriteLine($"[opencode] GET /session/status failed: {(int)ex.StatusCode} {ex.StatusCode}; using stream-derived status cache.");
+        }
+
+        var fromApi = response
             ?? new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
 
-        return response
+        var formatted = fromApi
             .Where(pair => !string.IsNullOrWhiteSpace(pair.Key))
             .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
                 pair => pair.Key,
                 pair => JsonElementToSingleLine(pair.Value),
                 StringComparer.OrdinalIgnoreCase);
+
+        // If API returns no rows, fall back to last observed status events so *session status is still useful.
+        if (formatted.Count == 0)
+        {
+            return BuildSessionStatusSnapshotFromEvents();
+        }
+
+        foreach (var pair in BuildSessionStatusSnapshotFromEvents())
+        {
+            formatted.TryAdd(pair.Key, pair.Value);
+        }
+
+        return formatted;
     }
 
     public async Task<string> GetSessionDetailsJsonAsync(string sessionId, CancellationToken cancellationToken)
@@ -1782,10 +1860,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     {
         if (_sessionIds.TryGetValue(conversationKey, out var existing))
         {
+            TrackRequestedSessionModel(existing, options?.ModelId);
             return existing;
         }
 
-        var body = BuildSessionCreateBody(title, options?.ModelId);
+        var body = BuildSessionCreateBody(title, options?.ModelId, null);
         Console.WriteLine($"[opencode] POST /session payload: {JsonSerializer.Serialize(body, _jsonOptions)}");
         var created = await PostJsonAsync<OpencodeSessionInfo>("/session", body, cancellationToken).ConfigureAwait(false);
         if (created == null || string.IsNullOrWhiteSpace(created.Id))
@@ -1793,7 +1872,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             throw new InvalidOperationException("Opencode server created a session without an ID.");
         }
 
-        return _sessionIds.GetOrAdd(conversationKey, created.Id);
+        var sessionId = _sessionIds.GetOrAdd(conversationKey, created.Id);
+        TrackRequestedSessionModel(sessionId, options?.ModelId);
+        return sessionId;
     }
 
     private async Task<OpencodeChatReply> SendToSessionAsync(string sessionId, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
@@ -1806,6 +1887,16 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 new { type = "text", text = outboundMessage }
             }
         };
+
+        if (TryParseProviderAndModel(options?.ModelId, out var providerId, out var modelLeaf))
+        {
+            body["model"] = new Dictionary<string, object?>
+            {
+                ["providerID"] = providerId,
+                ["modelID"] = modelLeaf,
+            };
+            Console.WriteLine($"[opencode] POST /session/{sessionId}/message model pin model.providerID={providerId} model.modelID={modelLeaf}");
+        }
 
         var rawReply = await PostJsonRawAsync($"/session/{sessionId}/message", body, cancellationToken).ConfigureAwait(false);
         var reply = DeserializeStrictChatReply(rawReply, $"/session/{sessionId}/message");
@@ -1858,34 +1949,27 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return new OpencodeChatReply(text, isConfirmationPrompt, pendingPermissions, pendingQuestions, usage);
     }
 
-    private static Dictionary<string, object?> BuildSessionCreateBody(string title, string? configuredModelId)
+    private static Dictionary<string, object?> BuildSessionCreateBody(string? title, string? configuredModelId, string? parentSessionId)
     {
         var body = new Dictionary<string, object?>
         {
-            ["title"] = string.IsNullOrWhiteSpace(title) ? "OpenSim Conversation" : title
+            ["title"] = string.IsNullOrWhiteSpace(title) ? "OpenSim Conversation" : title.Trim()
         };
 
-        var sessionBody = new Dictionary<string, object?>();
+        if (!string.IsNullOrWhiteSpace(parentSessionId))
+        {
+            body["parentID"] = parentSessionId.Trim();
+        }
+
         if (TryParseProviderAndModel(configuredModelId, out var providerId, out var modelLeaf))
         {
             var canonicalModelId = configuredModelId!.Trim();
-            sessionBody["providerID"] = providerId;
-            sessionBody["providerId"] = providerId;
-            sessionBody["modelID"] = canonicalModelId;
-            sessionBody["modelId"] = canonicalModelId;
-            Console.WriteLine($"[opencode] creating session with body.providerID/body.providerId={providerId} body.modelID/body.modelId={canonicalModelId}");
-        }
-        else if (!string.IsNullOrWhiteSpace(configuredModelId))
-        {
-            var normalized = configuredModelId.Trim();
-            sessionBody["modelID"] = normalized;
-            sessionBody["modelId"] = normalized;
-            Console.WriteLine($"[opencode] creating session with body.modelID/body.modelId={normalized}");
-        }
-
-        if (sessionBody.Count > 0)
-        {
-            body["body"] = sessionBody;
+            body["model"] = new Dictionary<string, object?>
+            {
+                ["id"] = modelLeaf,
+                ["providerID"] = providerId,
+            };
+            Console.WriteLine($"[opencode] creating session with model.id={modelLeaf} model.providerID={providerId} (canonical={canonicalModelId})");
         }
 
         return body;
@@ -1982,9 +2066,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 throw new InvalidOperationException($"Opencode response from {path} contains text part[{i}] without 'text'.");
             }
 
+            // Some providers emit reasoning parts with encrypted metadata and no visible text.
+            // Treat these as valid so the turn can complete.
             if (kind == "reasoning" && string.IsNullOrWhiteSpace(part.Text))
             {
-                throw new InvalidOperationException($"Opencode response from {path} contains reasoning part[{i}] without 'text'.");
+                continue;
             }
 
             if (kind == "tool" && string.IsNullOrWhiteSpace(part.ToolName))
@@ -2227,7 +2313,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             && !string.IsNullOrWhiteSpace(parsedSessionField);
         var hasNestedSessionField = element.TryGetProperty("session", out var nestedSession)
             && nestedSession.ValueKind == JsonValueKind.Object
-            && TryGetStringPropertyAny(nestedSession, out _, "id", "sessionID", "sessionId");
+            && TryGetStringPropertyAny(nestedSession, out var nestedParsedSessionId, "id", "sessionID", "sessionId");
         var hasPermissionSignals = element.TryGetProperty("pattern", out _)
             || element.TryGetProperty("permission", out _)
             || element.TryGetProperty("tool", out _)
@@ -2289,10 +2375,10 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         if (string.IsNullOrWhiteSpace(sessionId)
             && element.TryGetProperty("session", out var sessionObject)
             && sessionObject.ValueKind == JsonValueKind.Object
-            && TryGetStringPropertyAny(sessionObject, out var nestedParsedSessionId, "id", "sessionID", "sessionId")
-            && !string.IsNullOrWhiteSpace(nestedParsedSessionId))
+            && TryGetStringPropertyAny(sessionObject, out var nestedSessionId, "id", "sessionID", "sessionId")
+            && !string.IsNullOrWhiteSpace(nestedSessionId))
         {
-            sessionId = nestedParsedSessionId!.Trim();
+            sessionId = nestedSessionId!.Trim();
         }
 
         var description = BuildPermissionDescription(element);
@@ -2846,6 +2932,33 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         return element.GetRawText();
+    }
+
+    private void TrackSessionStatusEvent(OpencodeSessionStatusEvent statusEvent)
+    {
+        if (string.IsNullOrWhiteSpace(statusEvent.SessionId))
+        {
+            return;
+        }
+
+        _lastSessionStatusBySession[statusEvent.SessionId.Trim()] = statusEvent;
+    }
+
+    private IReadOnlyDictionary<string, string> BuildSessionStatusSnapshotFromEvents()
+    {
+        if (_lastSessionStatusBySession.IsEmpty)
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return _lastSessionStatusBySession
+            .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => string.IsNullOrWhiteSpace(pair.Value.StatusMessage)
+                    ? pair.Value.StatusType
+                    : $"{pair.Value.StatusType} ({pair.Value.StatusMessage})",
+                StringComparer.OrdinalIgnoreCase);
     }
 
     private static bool IsLikelyConfirmationPrompt(string text)

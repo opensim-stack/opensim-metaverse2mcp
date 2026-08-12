@@ -19,6 +19,11 @@ Scope notes:
 
 ## 1) Platform, Reliability, and Security
 
+- [ ] **[P0] AI error responses**
+  - Look out for AI provider errors (`status` = `retry`). Full payload ...
+    ```
+[opencode:json] event:session.status: {"type":"session.status","properties":{"sessionID":"ses_00cd7c0a6ffePo0eT5htdchrhu","status":{"type":"retry","attempt":10,"message":"Error from provider (Console): Rate limit exceeded. Please try again later.","next":1786527558945}}}
+    ```
 - [ ] **[P0] Auto-reconnect and session recovery**
   - Recover event subscriptions and MCP-ready state after disconnect.
   - Preserve/restore per-conversation AI session mapping safely.

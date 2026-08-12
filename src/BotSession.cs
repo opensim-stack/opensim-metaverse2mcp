@@ -65,6 +65,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly object _promptStateLock = new();
     private readonly object _recentImSpeakerLock = new();
     private readonly object _dialogBridgeTrustLock = new();
+    private readonly object _opencodeSessionStateLock = new();
     private readonly object _typingStateLock = new();
     private readonly object _hoverStateLock = new();
     private readonly SemaphoreSlim _connectGate = new(1, 1);
@@ -84,6 +85,8 @@ internal sealed partial class BotSession : IDisposable
     private UUID _trustedDialogBridgeOwnerId = UUID.Zero;
     private bool _lslDialogBridgeRequireTrustedSender = true;
     private readonly ConcurrentDictionary<string, byte> _busyOpencodeSessions = new(StringComparer.OrdinalIgnoreCase);
+    private string? _restoredOpencodeSessionId;
+    private ImConversationConfig? _persistedOpencodeDefaultConfig;
     private DateTimeOffset _lastTypingPulseAt = DateTimeOffset.MinValue;
     private CancellationTokenSource? _typingStopCts;
     private bool _typingIndicatorActive;
@@ -244,6 +247,7 @@ internal sealed partial class BotSession : IDisposable
 
             // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
             TryLoadDialogBridgeTrustStateFromFile();
+            TryLoadOpencodeSessionStateFromFile();
 
             await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
             return true;
@@ -2959,6 +2963,7 @@ internal sealed partial class BotSession : IDisposable
                     return;
                 }
 
+                TryBindRestoredOpencodeSessionToConversation(conversationKey);
                 var sendOptions = BuildSendOptions(conversationKey);
                 // TEMP(event-first migration): remove this watcher once event-driven permission/question
                 // routing is proven stable under reconnect/load; keep only bounded fallback polling.
@@ -3003,6 +3008,8 @@ internal sealed partial class BotSession : IDisposable
                 {
                     _latestUsageByConversation[conversationKey] = reply.Usage;
                 }
+
+                TrySaveOpencodeSessionStateForConversation(conversationKey);
                 startedAt.Stop();
                 Console.WriteLine($"[im] opencode reply received in {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey} replyLength={reply.Text.Length}");
 
@@ -3185,6 +3192,12 @@ internal sealed partial class BotSession : IDisposable
             _busyOpencodeSessions[statusEvent.SessionId] = 1;
             UpdateBusyHoverText(incrementDots: true);
             PulseTypingIndicator(statusEvent.SessionId);
+            return;
+        }
+
+        if (normalizedStatus == "retry")
+        {
+            LogRetryStatusEvent(statusEvent.SessionId, statusEvent.StatusMessage);
             return;
         }
 
@@ -3444,6 +3457,7 @@ internal sealed partial class BotSession : IDisposable
     private OpencodeSendOptions? BuildSendOptions(string conversationKey)
     {
         _imConversationConfigs.TryGetValue(conversationKey, out var cfg);
+        cfg ??= GetPersistedDefaultConversationConfigSnapshot();
 
         var systemPrompt = BuildLayeredPromptText();
         var modelId = cfg?.ModelId ?? GetStartupDefaultModelId();
@@ -3714,6 +3728,8 @@ internal sealed partial class BotSession : IDisposable
                 case "reset":
                     _imConversationConfigs.TryRemove(conversationKey, out _);
                     _opencodeChat?.ResetConversation(conversationKey);
+                    SetPersistedDefaultConversationConfig(null);
+                    TrySaveOpencodeSessionStateForConversation(conversationKey, null);
                     _latestUsageByConversation.TryRemove(conversationKey, out _);
                     SendImText(client, agentId, from, "Conversation AI settings reset for this IM. Using server defaults.");
                     return true;
@@ -3750,7 +3766,7 @@ internal sealed partial class BotSession : IDisposable
                     await HandleBridgeCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
                     return true;
                 case "auth":
-                    await HandleAuthCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    await HandleAuthCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
                 case "session":
                 case "sessions":
@@ -3955,12 +3971,23 @@ internal sealed partial class BotSession : IDisposable
         {
             var startupModel = GetStartupDefaultModelId();
             var startupProvider = GetStartupDefaultProviderId(startupModel);
+            var persisted = GetPersistedDefaultConversationConfigSnapshot();
+            if (!string.IsNullOrWhiteSpace(persisted?.ModelId))
+            {
+                startupModel = persisted!.ModelId;
+                startupProvider = string.IsNullOrWhiteSpace(persisted.ProviderId)
+                    ? GetStartupDefaultProviderId(startupModel)
+                    : persisted.ProviderId;
+            }
+
             return string.Join(
                 "\n",
-                "This IM conversation is using startup defaults (runtime-overridable).",
+                persisted == null
+                    ? "This IM conversation is using startup defaults (runtime-overridable)."
+                    : "This IM conversation is using persisted bot defaults (runtime-overridable).",
                 $"provider: {startupProvider ?? "(server default)"}",
                 $"model: {startupModel ?? "(server default)"}",
-                "thinking: (default)",
+                $"thinking: {persisted?.ThinkingLevel ?? "(default)"}",
                 $"sessionId: {currentSessionId}",
                 promptState);
         }
@@ -4240,23 +4267,7 @@ internal sealed partial class BotSession : IDisposable
 
     private async Task HandleCancelCommandAsync(GridClient client, UUID agentId, string from, string conversationKey)
     {
-        var locallyCanceled = false;
-        if (_inFlightRequestCtsByConversation.TryRemove(conversationKey, out var localCts))
-        {
-            locallyCanceled = true;
-            try
-            {
-                localCts.Cancel();
-            }
-            catch
-            {
-                // Already canceled/disposed; ignore.
-            }
-            finally
-            {
-                localCts.Dispose();
-            }
-        }
+        var locallyCanceled = TryCancelLocalInFlightRequest(conversationKey);
 
         if (_opencodeChat == null)
         {
@@ -4275,8 +4286,8 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        var ok = await _opencodeChat.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-        if (ok)
+        var ok = await TryAbortSessionAsync(sessionId).ConfigureAwait(false);
+        if (ok == true)
         {
             SendImText(client, agentId, from, locallyCanceled
                 ? $"Canceled locally and requested backend abort for session {sessionId}."
@@ -4287,6 +4298,44 @@ internal sealed partial class BotSession : IDisposable
         SendImText(client, agentId, from, locallyCanceled
             ? $"Canceled locally. Backend abort for session {sessionId} did not return an explicit success flag."
             : $"Abort request sent for session {sessionId}, but Opencode did not return an explicit success flag.");
+    }
+
+    private bool TryCancelLocalInFlightRequest(string conversationKey)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return false;
+        }
+
+        if (!_inFlightRequestCtsByConversation.TryRemove(conversationKey, out var localCts))
+        {
+            return false;
+        }
+
+        try
+        {
+            localCts.Cancel();
+        }
+        catch
+        {
+            // Already canceled/disposed; ignore.
+        }
+        finally
+        {
+            localCts.Dispose();
+        }
+
+        return true;
+    }
+
+    private async Task<bool?> TryAbortSessionAsync(string? sessionId)
+    {
+        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return null;
+        }
+
+        return await _opencodeChat.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task HandlePermissionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
@@ -5896,6 +5945,8 @@ internal sealed partial class BotSession : IDisposable
         {
             _imConversationConfigs.TryRemove(conversationKey, out _);
             _opencodeChat.ResetConversation(conversationKey);
+            SetPersistedDefaultConversationConfig(null);
+            TrySaveOpencodeSessionStateForConversation(conversationKey, null);
             SendImText(client, agentId, from, "Conversation AI settings reset for this IM.");
             return;
         }
@@ -5912,6 +5963,8 @@ internal sealed partial class BotSession : IDisposable
                 _ => throw new InvalidOperationException("thinking must be one of: low, medium, high, off")
             };
 
+            SetPersistedDefaultConversationConfig(config);
+            TrySaveOpencodeSessionStateForConversation(conversationKey, config);
             SendImText(client, agentId, from, $"Thinking level set to: {config.ThinkingLevel ?? "(default)"}");
             return;
         }
@@ -5924,7 +5977,10 @@ internal sealed partial class BotSession : IDisposable
                 throw new InvalidOperationException("model id is required, e.g. *configure model github-copilot/gpt-4.1");
             }
 
-            var resolvedModelId = await ResolvePinnedModelIdAsync(requestedModel, CancellationToken.None).ConfigureAwait(false);
+            var preferredProviderId = requestedModel.Contains('/')
+                ? null
+                : (config.ProviderId ?? GetPersistedDefaultConversationConfigSnapshot()?.ProviderId);
+            var resolvedModelId = await ResolvePinnedModelIdAsync(requestedModel, preferredProviderId, CancellationToken.None).ConfigureAwait(false);
             config.ModelId = resolvedModelId;
             var slash = resolvedModelId.IndexOf('/');
             if (slash > 0)
@@ -5933,6 +5989,8 @@ internal sealed partial class BotSession : IDisposable
             }
 
             _opencodeChat.ResetConversation(conversationKey);
+            SetPersistedDefaultConversationConfig(config);
+            TrySaveOpencodeSessionStateForConversation(conversationKey, config);
             SendImText(client, agentId, from, $"Model pinned for this IM: {config.ModelId}");
             return;
         }
@@ -5947,7 +6005,7 @@ internal sealed partial class BotSession : IDisposable
 
         if (providerLookup.Contains('/'))
         {
-            var resolvedModelId = await ResolvePinnedModelIdAsync(providerLookup, CancellationToken.None).ConfigureAwait(false);
+            var resolvedModelId = await ResolvePinnedModelIdAsync(providerLookup, null, CancellationToken.None).ConfigureAwait(false);
             config.ModelId = resolvedModelId;
             var slash = resolvedModelId.IndexOf('/');
             if (slash > 0)
@@ -5956,6 +6014,8 @@ internal sealed partial class BotSession : IDisposable
             }
 
             _opencodeChat.ResetConversation(conversationKey);
+            SetPersistedDefaultConversationConfig(config);
+            TrySaveOpencodeSessionStateForConversation(conversationKey, config);
             SendImText(client, agentId, from, $"Model pinned for this IM: {config.ModelId}");
             return;
         }
@@ -5988,6 +6048,8 @@ internal sealed partial class BotSession : IDisposable
             ? null
             : BuildCanonicalModelId(selectedModel.Id, selectedModel.Provider, matchedProvider.Id);
         _opencodeChat.ResetConversation(conversationKey);
+        SetPersistedDefaultConversationConfig(config);
+        TrySaveOpencodeSessionStateForConversation(conversationKey, config);
 
         if (selectedModel == null)
         {
@@ -5998,7 +6060,7 @@ internal sealed partial class BotSession : IDisposable
         SendImText(client, agentId, from, $"Configured provider {matchedProvider.Name} ({matchedProvider.Id}) with model {selectedModel.Id} for this IM.");
     }
 
-    private async Task HandleAuthCommandAsync(GridClient client, UUID agentId, string from, string arg)
+    private async Task HandleAuthCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
         if (_opencodeChat == null)
         {
@@ -6057,6 +6119,7 @@ internal sealed partial class BotSession : IDisposable
             }
 
             await _opencodeChat.SetProviderApiKeyAsync(provider.Id, apiKey, CancellationToken.None).ConfigureAwait(false);
+            ApplyAuthenticatedProviderAsConversationDefault(conversationKey, provider);
             SendImText(client, agentId, from, $"Stored API key for provider {provider.Name} ({provider.Id}). Run *providers configured then *models {provider.Id}.");
             return;
         }
@@ -6083,6 +6146,11 @@ internal sealed partial class BotSession : IDisposable
             }
 
             var completed = await _opencodeChat.CompleteProviderOAuthAsync(provider.Id, methodIndex, code, CancellationToken.None).ConfigureAwait(false);
+            if (completed.ProviderConfigured)
+            {
+                ApplyAuthenticatedProviderAsConversationDefault(conversationKey, provider);
+            }
+
             SendImText(client, agentId, from, completed.ProviderConfigured
                 ? $"OAuth completed for {provider.Name} ({provider.Id}). Run *providers configured and *models {provider.Id}."
                 : completed.Message);
@@ -6090,6 +6158,26 @@ internal sealed partial class BotSession : IDisposable
         }
 
         SendImText(client, agentId, from, $"Unknown auth mode '{verb}'. Use api, oauth, or oauth-complete.");
+    }
+
+    private void ApplyAuthenticatedProviderAsConversationDefault(string conversationKey, OpencodeProviderSummary provider)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey)
+            || string.IsNullOrWhiteSpace(provider.Id))
+        {
+            return;
+        }
+
+        var config = _imConversationConfigs.GetOrAdd(conversationKey, _ => new ImConversationConfig());
+        if (!string.IsNullOrWhiteSpace(config.ProviderId) || !string.IsNullOrWhiteSpace(config.ModelId))
+        {
+            return;
+        }
+
+        config.ProviderId = provider.Id.Trim();
+        config.ProviderName = provider.Name;
+        SetPersistedDefaultConversationConfig(config);
+        TrySaveOpencodeSessionStateForConversation(conversationKey, config);
     }
 
     private async Task HandleAuthMethodsCommandAsync(GridClient client, UUID agentId, string from, string? providerFilter)
@@ -6202,10 +6290,14 @@ internal sealed partial class BotSession : IDisposable
             }
 
             var requestedTitle = titleParts.Count == 0 ? null : string.Join(' ', titleParts);
-            var created = await _opencodeChat.CreateSessionAsync(requestedTitle, null, CancellationToken.None).ConfigureAwait(false);
+            var createOptions = BuildSendOptions(conversationKey);
+            var created = await _opencodeChat
+                .CreateSessionAsync(requestedTitle, null, createOptions?.ModelId, CancellationToken.None)
+                .ConfigureAwait(false);
             if (selectCreated)
             {
                 _opencodeChat.SetConversationSessionId(conversationKey, created.Id);
+                TrySaveOpencodeSessionStateForConversation(conversationKey);
             }
 
             var status = string.IsNullOrWhiteSpace(created.Status) ? "n/a" : created.Status;
@@ -6232,6 +6324,7 @@ internal sealed partial class BotSession : IDisposable
 
             _ = await _opencodeChat.GetSessionDetailsJsonAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             _opencodeChat.SetConversationSessionId(conversationKey, sessionId);
+            TrySaveOpencodeSessionStateForConversation(conversationKey);
             SendImText(client, agentId, from, $"Current IM Opencode session set to: {sessionId}");
             return;
         }
@@ -6630,33 +6723,52 @@ internal sealed partial class BotSession : IDisposable
         return string.Join(' ', avatarName.Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
-    private async Task<string> ResolvePinnedModelIdAsync(string requestedModel, CancellationToken cancellationToken)
+    private async Task<string> ResolvePinnedModelIdAsync(string requestedModel, string? preferredProviderId, CancellationToken cancellationToken)
     {
         var normalized = NormalizeLooseQuery(requestedModel);
         var slash = normalized.IndexOf('/');
         var providerHint = slash > 0 ? normalized[..slash] : null;
+        var effectiveProviderFilter = !string.IsNullOrWhiteSpace(providerHint)
+            ? providerHint
+            : (string.IsNullOrWhiteSpace(preferredProviderId) ? null : NormalizeLooseQuery(preferredProviderId));
 
-        var models = await _opencodeChat!.ListModelsAsync(providerHint, cancellationToken).ConfigureAwait(false);
+        var models = await _opencodeChat!.ListModelsAsync(effectiveProviderFilter, cancellationToken).ConfigureAwait(false);
         if (models.Count == 0)
         {
             throw new InvalidOperationException(
-                providerHint == null
+                effectiveProviderFilter == null
                     ? "No models are currently reported by Opencode. Try *models."
-                    : $"Provider '{providerHint}' returned no models. Try *providers configured and *models {providerHint}.");
+                    : $"Provider '{effectiveProviderFilter}' returned no models. Try *providers configured and *models {effectiveProviderFilter}.");
         }
 
-        var matched = models.FirstOrDefault(m => ModelIdMatchesRequested(m, normalized, providerHint));
-        if (matched == null)
+        var candidates = models
+            .Where(m => ModelIdMatchesRequested(m, normalized, effectiveProviderFilter))
+            .ToList();
+
+        if (candidates.Count == 0)
         {
             var suggested = string.Join(", ",
-                models.Take(5).Select(m => BuildCanonicalModelId(m.Id, m.Provider, providerHint)));
-            var scopeHint = providerHint == null ? string.Empty : $" for provider '{providerHint}'";
-            var modelsHint = providerHint == null ? "*models" : $"*models {providerHint}";
+                models.Take(5).Select(m => BuildCanonicalModelId(m.Id, m.Provider, effectiveProviderFilter)));
+            var scopeHint = effectiveProviderFilter == null ? string.Empty : $" for provider '{effectiveProviderFilter}'";
+            var modelsHint = effectiveProviderFilter == null ? "*models" : $"*models {effectiveProviderFilter}";
             var suggestionHint = string.IsNullOrWhiteSpace(suggested) ? string.Empty : $" Example IDs: {suggested}";
             throw new InvalidOperationException($"Model '{normalized}' is not available{scopeHint}. Try {modelsHint}.{suggestionHint}");
         }
 
-        return BuildCanonicalModelId(matched.Id, matched.Provider, providerHint);
+        if (candidates.Count > 1 && effectiveProviderFilter == null && slash < 0)
+        {
+            var distinctCanonical = candidates
+                .Select(m => BuildCanonicalModelId(m.Id, m.Provider, null))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToList();
+            var sample = string.Join(", ", distinctCanonical);
+            throw new InvalidOperationException(
+                $"Model '{normalized}' is available from multiple providers. Use a fully qualified ID (provider/model), e.g. {sample}");
+        }
+
+        var matched = candidates[0];
+        return BuildCanonicalModelId(matched.Id, matched.Provider, effectiveProviderFilter);
     }
 
     private static bool ModelIdMatchesRequested(OpencodeModelSummary model, string requestedModel, string? providerHint)
