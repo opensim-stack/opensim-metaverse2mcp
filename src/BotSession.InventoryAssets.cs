@@ -75,11 +75,11 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> AppearanceWearFolderAsync(string folderId, bool replaceItems, CancellationToken cancellationToken)
+    public async Task<AppearanceWearFolderResult> AppearanceWearFolderAsync(string folderId, bool replaceItems, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(folderId, out var folderUuid))
         {
-            return BotToolResult.Fail("folderId is not a valid UUID.");
+            return AppearanceWearFolderResult.FailResult(replaceItems, "folderId is not a valid UUID.");
         }
 
         return await ExecuteLockedAsync(async (client, token) =>
@@ -102,9 +102,167 @@ internal sealed partial class BotSession
                 }
             }
 
+            var resolvedItems = resolved.OfType<InventoryItem>().ToList();
+            var categoryResolutions = await BuildOutfitCategoryResolutionsAsync(client, resolvedItems, replaceItems, token).ConfigureAwait(false);
             await client.Appearance.WearOutfitAsync(resolved, replaceItems).ConfigureAwait(false);
-            return BotToolResult.OkResult($"Requested wear outfit from folder {folderUuid} ({resolved.Count} items), replaceItems={replaceItems}.");
+
+            var overlapCount = categoryResolutions.Count(r => r.CurrentlyWornCount > 0);
+            var mode = replaceItems ? "replace" : "add";
+            return AppearanceWearFolderResult.OkResult(
+                replaceItems,
+                entries.Count,
+                resolvedItems.Count,
+                categoryResolutions,
+                $"Requested {mode} outfit from folder {folderUuid}: sourceEntries={entries.Count}, wearableCandidates={resolvedItems.Count}, overlappingCategories={overlapCount}.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<OutfitSaveResult> AppearanceSaveCurrentOutfitAsync(
+        string folderName,
+        string? parentFolderId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(folderName))
+        {
+            return OutfitSaveResult.FailResult("folderName is required.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var store = client.Inventory.Store;
+            var root = store?.RootFolder;
+            if (store == null || root == null)
+            {
+                return OutfitSaveResult.FailResult("Inventory store is not initialized.");
+            }
+
+            var parentId = root.UUID;
+            if (!string.IsNullOrWhiteSpace(parentFolderId))
+            {
+                if (!UUID.TryParse(parentFolderId, out var parsedParentId))
+                {
+                    return OutfitSaveResult.FailResult("parentFolderId is not a valid UUID.");
+                }
+
+                if (!store.TryGetValue(parsedParentId, out var parentNode) || parentNode is not InventoryFolder)
+                {
+                    return OutfitSaveResult.FailResult($"Parent folder {parsedParentId} was not found in local inventory store.");
+                }
+
+                parentId = parsedParentId;
+            }
+            else
+            {
+                var clothingFolder = client.Inventory.FindFolderForType(FolderType.Clothing);
+                if (clothingFolder != UUID.Zero)
+                {
+                    parentId = clothingFolder;
+                }
+            }
+
+            var destinationFolderId = client.Inventory.CreateFolder(parentId, folderName.Trim(), FolderType.None);
+            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            var currentLinks = await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+
+            var linkTargets = new List<InventoryItem>();
+            var seen = new HashSet<UUID>();
+            foreach (var link in currentLinks)
+            {
+                var resolved = ResolveLinkedInventoryItem(store, link);
+                if (seen.Add(resolved.UUID))
+                {
+                    linkTargets.Add(resolved);
+                }
+            }
+
+            var linkedCount = 0;
+            var failedCount = 0;
+            foreach (var target in linkTargets)
+            {
+                token.ThrowIfCancellationRequested();
+
+                var createdLink = await client.Inventory.CreateLinkAsync(
+                    destinationFolderId,
+                    target.UUID,
+                    target.Name,
+                    target.Description,
+                    target.InventoryType,
+                    UUID.Random(),
+                    token).ConfigureAwait(false);
+
+                if (createdLink == null)
+                {
+                    failedCount++;
+                }
+                else
+                {
+                    linkedCount++;
+                }
+            }
+
+            return OutfitSaveResult.OkResult(
+                destinationFolderId.ToString(),
+                linkedCount,
+                failedCount,
+                $"Saved current outfit links to folder '{folderName.Trim()}' ({destinationFolderId}). Linked={linkedCount}, failed={failedCount}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<List<OutfitCategoryResolutionInfo>> BuildOutfitCategoryResolutionsAsync(
+        GridClient client,
+        IReadOnlyList<InventoryItem> incomingItems,
+        bool replaceItems,
+        CancellationToken cancellationToken)
+    {
+        await client.Appearance.RequestAgentWornAsync(cancellationToken).ConfigureAwait(false);
+
+        var incomingCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var item in incomingItems)
+        {
+            if (item is InventoryWearable wearable)
+            {
+                IncrementCount(incomingCounts, $"wearable:{wearable.WearableType}");
+            }
+            else if (item is InventoryObject attachment)
+            {
+                IncrementCount(incomingCounts, $"attachment:{attachment.AttachPoint}");
+            }
+        }
+
+        var wornCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var wearable in client.Appearance.GetWearables())
+        {
+            IncrementCount(wornCounts, $"wearable:{wearable.WearableType}");
+        }
+
+        foreach (var attachment in client.Appearance.GetAttachmentsByItemId())
+        {
+            IncrementCount(wornCounts, $"attachment:{attachment.Value}");
+        }
+
+        var action = replaceItems ? "replace" : "add";
+        return incomingCounts
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => new OutfitCategoryResolutionInfo(
+                kv.Key,
+                action,
+                kv.Value,
+                wornCounts.TryGetValue(kv.Key, out var existingCount) ? existingCount : 0,
+                replaceItems
+                    ? "replaceItems=true requests replacement when this category already has worn entries."
+                    : "replaceItems=false requests additive wear; overlapping categories may still be constrained by simulator rules."))
+            .ToList();
+    }
+
+    private static void IncrementCount(Dictionary<string, int> map, string key)
+    {
+        if (map.TryGetValue(key, out var count))
+        {
+            map[key] = count + 1;
+            return;
+        }
+
+        map[key] = 1;
     }
 
     public async Task<BotToolResult> AppearanceAttachItemAsync(string itemId, string? attachmentPoint, bool replace, CancellationToken cancellationToken)
@@ -349,307 +507,176 @@ internal sealed partial class BotSession
         bool pinAsTrustedSender,
         CancellationToken cancellationToken)
     {
-        UUID existingPinnedObjectId;
-        uint existingPinnedLocalId;
-        if (TryGetPinnedBridgeObjectInCurrentSim(out existingPinnedObjectId, out existingPinnedLocalId))
+        var client = EnsureClient();
+
+        var resolve = await ResolveCubeBotIarItemsAsync(client, cancellationToken).ConfigureAwait(false);
+        if (!resolve.Ok || resolve.Folder == null || resolve.AttachmentItem == null || resolve.AlphaItem == null)
         {
-            return DialogBridgeInstallResult.FailResult(
-                $"Dialog bridge appears already installed (pinned object {existingPinnedObjectId}, localId={existingPinnedLocalId}). Reuse it or clear trust pin before reinstalling.");
+            return DialogBridgeInstallResult.FailResult(resolve.Error ?? "Cube Bot IAR inventory is not available.");
         }
 
-        if (!TryResolveDialogBridgeScriptSource(scriptSource, out var resolvedSource, out var sourceError))
+        var cubeFolder = resolve.Folder;
+        var attachmentItem = resolve.AttachmentItem;
+        var alphaItem = resolve.AlphaItem;
+
+        var appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
+        if (!appearanceState.Ok)
         {
-            return DialogBridgeInstallResult.FailResult(sourceError);
+            return DialogBridgeInstallResult.FailResult($"Failed to inspect current wearables/attachments: {appearanceState.Message}");
         }
 
-        var upload = await AssetUploadInventoryAsync(
-            resolvedSource,
-            "lsltext",
-            "lsl",
-            "dialog-bridge.lsl",
-            "Auto-installed dialog bridge script",
-            folderId,
-            cancellationToken).ConfigureAwait(false);
-        if (!upload.Ok || string.IsNullOrWhiteSpace(upload.ItemId))
-        {
-            return DialogBridgeInstallResult.FailResult($"Script upload failed: {upload.Message}");
-        }
+        var alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+        var attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
 
-        var status = GetStatus();
-        var create = await CreatePrimAsync(
-            "box",
-            status.X + offsetX,
-            status.Y + offsetY,
-            status.Z + offsetZ,
-            0.25f,
-            0.25f,
-            0.25f,
-            0f,
-            0f,
-            0f,
-            "Plastic",
-            string.IsNullOrWhiteSpace(objectName) ? "Opencode Dialog Bridge" : objectName,
-            string.IsNullOrWhiteSpace(objectDescription) ? "Auto-installed dialog bridge prim" : objectDescription,
-            cancellationToken).ConfigureAwait(false);
-        if (!create.Ok)
+        if (!alphaWorn || !attachmentWorn)
         {
-            return DialogBridgeInstallResult.FailResult($"Bridge prim creation failed: {create.Message}");
-        }
-
-        var copy = await ScriptCopyInventoryToTaskAsync(create.LocalId, upload.ItemId!, enableScript: true, cancellationToken).ConfigureAwait(false);
-        if (!copy.Ok)
-        {
-            return DialogBridgeInstallResult.FailResult($"Script copy failed after prim creation (localId={create.LocalId}): {copy.Message}");
-        }
-
-        var inspect = await InspectPrimAsync(create.LocalId, includeFaceTextures: false, cancellationToken).ConfigureAwait(false);
-        var objectId = inspect.Prim?.Uuid;
-        var ownerId = inspect.Prim?.OwnerId;
-
-        // Scale the created bridge prim to half its current size (best-effort).
-        if (inspect.Ok && inspect.Prim != null)
-        {
-            try
+            // First normalize to Current Outfit. This is the same reset strategy used during manual recovery.
+            var currentOutfitFolderId = client.Inventory.FindFolderForType(FolderType.CurrentOutfit);
+            if (currentOutfitFolderId != UUID.Zero)
             {
-                var halfX = inspect.Prim.ScaleX / 2f;
-                var halfY = inspect.Prim.ScaleY / 2f;
-                var halfZ = inspect.Prim.ScaleZ / 2f;
-                // Request uniform scaling to preserve proportions.
-                await SetPrimScaleAsync(create.LocalId, halfX, halfY, halfZ, childOnly: false, uniform: true, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[dialog-bridge] failed to set half scale on created prim {create.LocalId}: {ex.Message}");
-            }
-        }
-
-        // Take (de-rez) the object into the bot's inventory so it's owned by the bot and safe from region resets.
-        var pinnedToAttached = false;
-        try
-        {
-            await DeletePrimAsync(create.LocalId, cancellationToken).ConfigureAwait(false);
-
-            // After requesting de-rez we expect the simulator to create an inventory item for the bot.
-            // Listen for the TaskItemReceived event which contains the actual ItemID.
-            try
-            {
-                var client = EnsureClient();
-                var received = await WaitForTaskItemReceivedAsync(client, TimeSpan.FromSeconds(8), CancellationToken.None).ConfigureAwait(false);
-                if (received != null)
+                var wearCurrentOutfit = await AppearanceWearFolderAsync(currentOutfitFolderId.ToString(), replaceItems: true, cancellationToken).ConfigureAwait(false);
+                if (!wearCurrentOutfit.Ok)
                 {
-                    var itemId = received.ItemID;
-                    Console.WriteLine($"[dialog-bridge] TaskItemReceived: item={received.ItemID} asset={received.AssetID} folder={received.FolderID}");
-                    try
-                    {
-                        Console.WriteLine($"[dialog-bridge] attempting to attach inventory item {itemId} to RightEar (replace=true)");
-                        try
-                        {
-                            await AppearanceAttachItemAsync(itemId.ToString(), "RightEar", replace: true, cancellationToken).ConfigureAwait(false);
-                            Console.WriteLine($"[dialog-bridge] took and attached bridge inventory item {itemId} to RightEar.");
-                        }
-                        catch (Exception earEx)
-                        {
-                            Console.WriteLine($"[dialog-bridge] attach to RightEar failed ({earEx.Message}); retrying with Skull.");
-                            await AppearanceAttachItemAsync(itemId.ToString(), "Skull", replace: true, cancellationToken).ConfigureAwait(false);
-                            Console.WriteLine($"[dialog-bridge] took and attached bridge inventory item {itemId} to Skull fallback.");
-                        }
-
-                        // The attachment creates a new in-world object with a different UUID. Attempt to find
-                        // that attached object in the current simulator cache and update the trusted bridge pin
-                        // so subsequent dialog replies from the worn bridge are accepted.
-                        try
-                        {
-                            UUID? attachedObjectId = null;
-                            var expectedName = string.IsNullOrWhiteSpace(objectName) ? "Opencode Dialog Bridge" : objectName;
-                            // Try to parse uploaded asset id so we can match task inventory entries.
-                            var uploadedAssetUuid = UUID.Zero;
-                            if (!string.IsNullOrWhiteSpace(upload.AssetId))
-                            {
-                                UUID.TryParse(upload.AssetId, out uploadedAssetUuid);
-                            }
-
-                            // Poll for the attached object; when found, inspect it for indicators that
-                            // correlate it to the inventory item we just attached. We use multiple
-                            // strategies in order of confidence:
-                            //  1) NameValue "AttachItemID" == inventory ItemID returned by TaskItemReceived
-                            //  2) Task-inventory entries on the prim matching the uploaded script AssetUUID
-                            //     or the expected script filename (dialog-bridge.lsl)
-                            //  3) Prim name matches expectedName (least confident)
-                            // Increase attempts/delay to allow slower simulators to propagate caches.
-                            var maxAttempts = 40; // ~20s total (40 * 500ms)
-                            for (var attempt = 0; attempt < maxAttempts && attachedObjectId == null; attempt++)
-                            {
-                                await Task.Delay(500).ConfigureAwait(false);
-                                var sim = client.Network.CurrentSim;
-                                if (sim == null) continue;
-
-                                try
-                                {
-                                    var attachedCandidates = sim.ObjectsPrimitives.Values
-                                        .Where(p => p != null && (p.ParentID == client.Self.LocalID || (p.Properties != null && p.Properties.OwnerID == client.Self.AgentID)))
-                                        .OrderByDescending(p => p.LocalID)
-                                        .ToList();
-
-                                    Console.WriteLine($"[dialog-bridge] attach-detect attempt {attempt + 1}/{maxAttempts}: found {attachedCandidates.Count} candidate attached primitives in sim cache.");
-
-                                    foreach (var prim in attachedCandidates)
-                                    {
-                                        try
-                                        {
-                                            var primId = prim.ID;
-                                            var primLocal = prim.LocalID;
-                                            var primParent = prim.ParentID;
-                                            var primOwner = prim.Properties?.OwnerID ?? UUID.Zero;
-                                            var primName = prim.Properties?.Name ?? string.Empty;
-
-                                            Console.WriteLine($"[dialog-bridge] candidate: id={primId} local={primLocal} parent={primParent} owner={primOwner} name='{primName}'");
-
-                                            // Dump NameValues if present (shortened) for diagnostics.
-                                            if (prim.NameValues != null && prim.NameValues.Any())
-                                            {
-                                                foreach (var nv in prim.NameValues.Take(8))
-                                                {
-                                                    var valueStr = nv.Value?.ToString() ?? "(null)";
-                                                    if (valueStr.Length > 200) valueStr = valueStr.Substring(0, 200) + "...";
-                                                    Console.WriteLine($"[dialog-bridge]   NameValue: {nv.Name} = {valueStr}");
-                                                }
-                                            }
-
-                                            // 1) Primary: AttachItemID NameValue points to the inventory item UUID we attached.
-                                            if (prim.NameValues != null && prim.NameValues.Any())
-                                            {
-                                                var nameValue = prim.NameValues.SingleOrDefault(nv => nv.Name.Equals("AttachItemID", StringComparison.OrdinalIgnoreCase));
-                                                var nvStr = nameValue.Value?.ToString();
-                                                if (!nameValue.Equals(default(NameValue)) && !string.IsNullOrWhiteSpace(nvStr))
-                                                {
-                                                    if (UUID.TryParse(nvStr, out var attachedItemId))
-                                                    {
-                                                        Console.WriteLine($"[dialog-bridge] candidate AttachItemID={attachedItemId}");
-                                                        if (attachedItemId == received.ItemID)
-                                                        {
-                                                            attachedObjectId = primId;
-                                                            Console.WriteLine($"[dialog-bridge] matched AttachItemID -> prim {primId}");
-                                                            break;
-                                                        }
-                                                    }
-                                                    else
-                                                    {
-                                                        Console.WriteLine($"[dialog-bridge] AttachItemID value on prim {primId} could not be parsed as UUID: '{nvStr}'");
-                                                    }
-                                                }
-                                            }
-
-                                            // 2) Secondary: inspect task-inventory entries for the uploaded script asset or script filename.
-                                            try
-                                            {
-                                                var entries = await client.Inventory.GetTaskInventoryAsync(primId, primLocal, sim, cancellationToken).ConfigureAwait(false);
-                                                if (entries != null && entries.Count > 0)
-                                                {
-                                                    foreach (var entry in entries.OfType<InventoryItem>())
-                                                    {
-                                                        var entryName = entry.Name ?? string.Empty;
-                                                        var matchesAsset = (uploadedAssetUuid != UUID.Zero && entry.AssetUUID == uploadedAssetUuid);
-                                                        var matchesName = string.Equals(entryName.Trim(), "dialog-bridge.lsl", StringComparison.OrdinalIgnoreCase);
-                                                        if (matchesAsset || matchesName)
-                                                        {
-                                                            attachedObjectId = primId;
-                                                            Console.WriteLine($"[dialog-bridge] matched task-inventory entry '{entryName}' (asset={entry.AssetUUID}) on prim {primId}");
-                                                            break;
-                                                        }
-                                                    }
-                                                    if (attachedObjectId != null) break;
-                                                }
-                                            }
-                                            catch (Exception invEx)
-                                            {
-                                                // Task inventory may not be available yet; ignore and continue polling.
-                                                Console.WriteLine($"[dialog-bridge] task-inventory check failed for prim {primId}: {invEx.Message}");
-                                            }
-
-                                            // 3) Least confident: prim name matches expectedName.
-                                            if (!string.IsNullOrWhiteSpace(primName) && primName.Equals(expectedName, StringComparison.OrdinalIgnoreCase))
-                                            {
-                                                Console.WriteLine($"[dialog-bridge] prim name matches expected name; tentatively selecting prim {primId} (name='{primName}')");
-                                                attachedObjectId = primId;
-                                                break;
-                                            }
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Console.WriteLine($"[dialog-bridge] error inspecting candidate prim: {ex.Message}");
-                                            // Ignore transient inspect errors and keep trying.
-                                        }
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"[dialog-bridge] error while enumerating sim primitives: {ex.Message}");
-                                }
-                            }
-
-                            if (attachedObjectId.HasValue)
-                            {
-                                lock (_dialogBridgeTrustLock)
-                                {
-                                    _trustedDialogBridgeObjectId = attachedObjectId.Value;
-                                    _trustedDialogBridgeOwnerId = client.Self.AgentID;
-                                }
-                                pinnedToAttached = true;
-                                TrySaveDialogBridgeTrustStateToFile();
-                                Console.WriteLine($"[dialog-bridge] updated trusted bridge pin to attached object {attachedObjectId} owner={client.Self.AgentID}");
-                            }
-                            else
-                            {
-                                Console.WriteLine("[dialog-bridge] could not find attached bridge object in sim cache after attach (checked task inventories); trust pin remains unchanged.");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[dialog-bridge] error while searching for attached object after attach: {ex.Message}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[dialog-bridge] failed to attach bridge inventory item {itemId}: {ex.Message} \n{ex}");
-                    }
+                    Console.WriteLine($"[dialog-bridge] Current Outfit reset failed: {wearCurrentOutfit.Message}");
                 }
                 else
                 {
-                    Console.WriteLine("[dialog-bridge] timed out waiting for TaskItemReceived after de-rez; the item may still be in inventory.");
+                    Console.WriteLine($"[dialog-bridge] requested Current Outfit reset from folder {currentOutfitFolderId} (replaceItems=true).");
                 }
+
+                // Reset can arrive slightly later than subsequent wear/attach requests; wait for settle.
+                await Task.Delay(1400, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            else
             {
-                Console.WriteLine($"[dialog-bridge] error while waiting for TaskItemReceived: {ex.Message}");
+                Console.WriteLine("[dialog-bridge] Current Outfit folder not found; continuing without reset.");
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[dialog-bridge] error while attempting to take/attach created prim {create.LocalId}: {ex.Message}");
+
+            appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
+            if (!appearanceState.Ok)
+            {
+                return DialogBridgeInstallResult.FailResult($"Failed to verify appearance after Current Outfit reset: {appearanceState.Message}");
+            }
+
+            alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+            attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+
+            if (!alphaWorn)
+            {
+                var wearAlpha = await AppearanceWearWearableItemAsync(alphaItem.UUID, replaceExistingSlot: true, cancellationToken).ConfigureAwait(false);
+                if (!wearAlpha.Ok)
+                {
+                    Console.WriteLine($"[dialog-bridge] alpha wear request failed: {wearAlpha.Message}");
+                }
+                else
+                {
+                    Console.WriteLine($"[dialog-bridge] requested wear of alpha '{alphaItem.Name}' ({alphaItem.UUID}) from folder '{cubeFolder.Name}'.");
+                }
+
+                await Task.Delay(1200, cancellationToken).ConfigureAwait(false);
+                appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
+                if (!appearanceState.Ok)
+                {
+                    return DialogBridgeInstallResult.FailResult($"Failed to verify appearance after alpha wear request: {appearanceState.Message}");
+                }
+
+                alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (!attachmentWorn)
+            {
+                var attach = await AppearanceAttachItemAsync(attachmentItem.UUID.ToString(), "Spine", replace: true, cancellationToken).ConfigureAwait(false);
+                if (!attach.Ok)
+                {
+                    Console.WriteLine($"[dialog-bridge] bridge attach request failed: {attach.Message}");
+                }
+                else
+                {
+                    Console.WriteLine($"[dialog-bridge] requested attach of '{attachmentItem.Name}' ({attachmentItem.UUID}) on Spine.");
+                }
+
+                await Task.Delay(1200, cancellationToken).ConfigureAwait(false);
+                appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
+                if (!appearanceState.Ok)
+                {
+                    return DialogBridgeInstallResult.FailResult($"Failed to verify appearance after attachment request: {appearanceState.Message}");
+                }
+
+                alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+            }
+
+            // Do not force rebake here; on some grids this can churn appearance state and
+            // temporarily drop late-applied wearables (including alpha).
+
+            // Passive verification only. No repeated attach/wear requests.
+            var verifyPasses = 4;
+            for (var pass = 1; pass <= verifyPasses && (!alphaWorn || !attachmentWorn); pass++)
+            {
+                await Task.Delay(1300, cancellationToken).ConfigureAwait(false);
+                appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
+                if (!appearanceState.Ok)
+                {
+                    Console.WriteLine($"[dialog-bridge] worn-state verification pass {pass}/{verifyPasses} failed: {appearanceState.Message}");
+                    continue;
+                }
+
+                alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+            }
         }
 
-        if (!pinnedToAttached && pinAsTrustedSender && !string.IsNullOrWhiteSpace(objectId) && UUID.TryParse(objectId, out var objectUuid))
+        if (!attachmentWorn || !alphaWorn)
+        {
+            var missing = new List<string>(2);
+            if (!attachmentWorn)
+            {
+                missing.Add($"attachment '{attachmentItem.Name}' on Spine");
+            }
+
+            if (!alphaWorn)
+            {
+                missing.Add($"wearable '{alphaItem.Name}'");
+            }
+
+            return DialogBridgeInstallResult.FailResult($"Bridge install incomplete; missing {string.Join(" and ", missing)}.");
+        }
+
+        UUID attachedObjectId = UUID.Zero;
+        uint attachedLocalId = 0;
+        var maxAttempts = 20;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out attachedObjectId, out attachedLocalId))
+            {
+                break;
+            }
+
+            await Task.Delay(400, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (pinAsTrustedSender && attachedObjectId != UUID.Zero)
         {
             lock (_dialogBridgeTrustLock)
             {
-                _trustedDialogBridgeObjectId = objectUuid;
-                if (!string.IsNullOrWhiteSpace(ownerId) && UUID.TryParse(ownerId, out var ownerUuid) && ownerUuid != UUID.Zero)
-                {
-                    _trustedDialogBridgeOwnerId = ownerUuid;
-                }
+                _trustedDialogBridgeObjectId = attachedObjectId;
+                _trustedDialogBridgeOwnerId = client.Self.AgentID;
             }
-
-            Console.WriteLine($"[dialog-bridge] installer pinned trusted bridge sender: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId}");
             TrySaveDialogBridgeTrustStateToFile();
+            Console.WriteLine($"[dialog-bridge] pinned trusted bridge sender to attached object {attachedObjectId} owner={client.Self.AgentID}");
         }
 
-        var installMessage = $"Bridge installed: objectLocalId={create.LocalId}, objectId={(objectId ?? "(unknown)")}, inventoryScriptItemId={upload.ItemId}.";
+        var installMessage = attachedObjectId != UUID.Zero
+            ? $"Bridge ready from Cube Bot IAR: item={attachmentItem.UUID}, objectLocalId={attachedLocalId}, objectId={attachedObjectId}."
+            : $"Bridge ready from Cube Bot IAR: item={attachmentItem.UUID}. Attachment is worn; object pin is pending simulator cache visibility.";
+
         return DialogBridgeInstallResult.OkResult(
-            create.LocalId,
-            objectId,
-            ownerId,
-            upload.ItemId,
-            upload.AssetId,
+            attachedLocalId,
+            attachedObjectId == UUID.Zero ? null : attachedObjectId.ToString(),
+            client.Self.AgentID.ToString(),
+            attachmentItem.UUID.ToString(),
+            attachmentItem.AssetUUID == UUID.Zero ? null : attachmentItem.AssetUUID.ToString(),
             installMessage);
     }
 
@@ -1736,6 +1763,46 @@ internal sealed partial class BotSession
         }
     }
 
+    private async Task<AppearanceWearFolderResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AppearanceWearFolderResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AppearanceWearFolderResult.FailResult(replaceItems: false, ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<OutfitSaveResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<OutfitSaveResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return OutfitSaveResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
     private async Task<AssetDownloadResult> ExecuteLockedAsync(
         Func<GridClient, CancellationToken, Task<AssetDownloadResult>> action,
         CancellationToken cancellationToken)
@@ -2269,6 +2336,146 @@ internal sealed partial class BotSession
         return await client.Inventory.FetchItemAsync(itemId, client.Self.AgentID, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<BotToolResult> AppearanceWearWearableItemAsync(UUID itemId, bool replaceExistingSlot, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var item = await ResolveInventoryItemAsync(client, itemId, token).ConfigureAwait(false);
+            if (item == null)
+            {
+                return BotToolResult.Fail($"Inventory item {itemId} was not found.");
+            }
+
+            var resolved = ResolveLinkedInventoryItem(client.Inventory.Store, item);
+            if (resolved is not InventoryWearable wearable)
+            {
+                return BotToolResult.Fail(
+                    $"Inventory item {resolved.UUID} ('{resolved.Name}') is not a wearable (assetType={resolved.AssetType}, inventoryType={resolved.InventoryType}).");
+            }
+
+            // Use COF operations so the wearable is persisted in Current Outfit links and
+            // does not get dropped by subsequent outfit synchronization.
+            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+            await cof.AddToOutfitAsync(wearable, replace: replaceExistingSlot, cancellationToken: token).ConfigureAwait(false);
+            return BotToolResult.OkResult(
+                $"Wear request sent for wearable '{wearable.Name}' ({wearable.UUID}), type={wearable.WearableType}, replace={replaceExistingSlot} via COF.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<(bool Ok, InventoryFolder? Folder, InventoryItem? AttachmentItem, InventoryItem? AlphaItem, string? Error)> ResolveCubeBotIarItemsAsync(
+        GridClient client,
+        CancellationToken cancellationToken)
+    {
+        const string folderName = "Cube Bot IAR";
+        const string attachmentName = "The Cube Bot";
+        const string alphaName = "Full Body Alpha";
+
+        var rootFolder = client.Inventory.Store?.RootFolder;
+        if (rootFolder == null)
+        {
+            return (false, null, null, null, "Inventory root folder is not initialized.");
+        }
+
+        var folders = new List<InventoryFolder>();
+        var items = new List<InventoryItem>();
+        await client.Inventory.GetInventoryRecursiveAsync(rootFolder.UUID, client.Self.AgentID, folders, items, cancellationToken).ConfigureAwait(false);
+
+        var cubeFolder = folders.FirstOrDefault(f => string.Equals(f.Name?.Trim(), folderName, StringComparison.OrdinalIgnoreCase));
+        if (cubeFolder == null)
+        {
+            return (false, null, null, null, $"Required inventory folder '{folderName}' was not found. Import Cube-Bot-IAR.iar first.");
+        }
+
+        var descendantFolderIds = new HashSet<UUID> { cubeFolder.UUID };
+        var pending = new Queue<UUID>();
+        pending.Enqueue(cubeFolder.UUID);
+        while (pending.Count > 0)
+        {
+            var current = pending.Dequeue();
+            foreach (var child in folders.Where(f => f.ParentUUID == current))
+            {
+                if (descendantFolderIds.Add(child.UUID))
+                {
+                    pending.Enqueue(child.UUID);
+                }
+            }
+        }
+
+        var itemsInCubeFolder = items
+            .Where(i => descendantFolderIds.Contains(i.ParentUUID))
+            .Select(i => ResolveLinkedInventoryItem(client.Inventory.Store, i))
+            .ToList();
+
+        var attachmentItem = itemsInCubeFolder
+            .FirstOrDefault(i => string.Equals(i.Name?.Trim(), attachmentName, StringComparison.OrdinalIgnoreCase));
+        if (attachmentItem == null)
+        {
+            return (false, cubeFolder, null, null, $"Attachment '{attachmentName}' was not found in '{folderName}'.");
+        }
+
+        var alphaItem = itemsInCubeFolder
+            .FirstOrDefault(i => string.Equals(i.Name?.Trim(), alphaName, StringComparison.OrdinalIgnoreCase));
+        if (alphaItem == null)
+        {
+            return (false, cubeFolder, attachmentItem, null, $"Wearable '{alphaName}' was not found in '{folderName}'.");
+        }
+
+        return (true, cubeFolder, attachmentItem, alphaItem, null);
+    }
+
+    private static InventoryItem ResolveLinkedInventoryItem(Inventory? store, InventoryItem item)
+    {
+        if (item.IsLink() && store != null && store.TryGetValue(item.ResolvedItemID, out var linked) && linked is InventoryItem linkedItem)
+        {
+            return linkedItem;
+        }
+
+        return item;
+    }
+
+    private static bool TryFindAttachedObjectForInventoryItem(
+        GridClient client,
+        UUID inventoryItemId,
+        out UUID attachedObjectId,
+        out uint attachedLocalId)
+    {
+        attachedObjectId = UUID.Zero;
+        attachedLocalId = 0;
+
+        var sim = client.Network.CurrentSim;
+        if (sim == null)
+        {
+            return false;
+        }
+
+        foreach (var prim in sim.ObjectsPrimitives.Values)
+        {
+            if (prim == null || prim.NameValues == null || !prim.NameValues.Any())
+            {
+                continue;
+            }
+
+            foreach (var nameValue in prim.NameValues)
+            {
+                if (!nameValue.Name.Equals("AttachItemID", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var raw = nameValue.Value?.ToString();
+                if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out var attachedItemId) && attachedItemId == inventoryItemId)
+                {
+                    attachedObjectId = prim.ID;
+                    attachedLocalId = prim.LocalID;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private bool TryGetPinnedBridgeObjectInCurrentSim(out UUID objectId, out uint localId)
     {
         objectId = UUID.Zero;
@@ -2664,6 +2871,42 @@ internal sealed record InventoryOfferHistoryResult(bool Ok, string Message, IRea
 internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType);
 
 internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint);
+
+internal sealed record OutfitCategoryResolutionInfo(
+    string Category,
+    string Action,
+    int RequestedCount,
+    int CurrentlyWornCount,
+    string Notes);
+
+internal sealed record AppearanceWearFolderResult(
+    bool Ok,
+    string Message,
+    bool ReplaceItems,
+    int SourceEntryCount,
+    int WearableCandidateCount,
+    IReadOnlyList<OutfitCategoryResolutionInfo> CategoryResolutions)
+{
+    public static AppearanceWearFolderResult OkResult(
+        bool replaceItems,
+        int sourceEntryCount,
+        int wearableCandidateCount,
+        IReadOnlyList<OutfitCategoryResolutionInfo> categoryResolutions,
+        string message)
+        => new(true, message, replaceItems, sourceEntryCount, wearableCandidateCount, categoryResolutions);
+
+    public static AppearanceWearFolderResult FailResult(bool replaceItems, string message)
+        => new(false, message, replaceItems, 0, 0, Array.Empty<OutfitCategoryResolutionInfo>());
+}
+
+internal sealed record OutfitSaveResult(bool Ok, string Message, string? FolderId, int LinkedCount, int FailedCount)
+{
+    public static OutfitSaveResult OkResult(string folderId, int linkedCount, int failedCount, string message)
+        => new(true, message, folderId, linkedCount, failedCount);
+
+    public static OutfitSaveResult FailResult(string message)
+        => new(false, message, null, 0, 0);
+}
 
 internal sealed record AppearanceStateResult(
     bool Ok,

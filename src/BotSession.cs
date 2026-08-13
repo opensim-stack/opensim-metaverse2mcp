@@ -68,6 +68,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly object _opencodeSessionStateLock = new();
     private readonly object _typingStateLock = new();
     private readonly object _hoverStateLock = new();
+    private readonly object _dialogBridgeAutoProvisionLock = new();
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private readonly CancellationTokenSource _lifecycleCts = new();
 
@@ -92,6 +93,8 @@ internal sealed partial class BotSession : IDisposable
     private bool _typingIndicatorActive;
     private DateTimeOffset _lastHoverBusyUpdateAt = DateTimeOffset.MinValue;
     private int _busyHoverDots;
+    private int _dialogBridgeAutoProvisionInFlight;
+    private DateTimeOffset _lastDialogBridgeAutoProvisionAttemptAt = DateTimeOffset.MinValue;
     private const int LslDialogBridgeRequestChannel = -919191;
     private const string LslDialogBridgeRequestPrefix = "dlgreq";
     private const string LslDialogBridgeReplyPrefix = "dlgrep";
@@ -3868,9 +3871,8 @@ internal sealed partial class BotSession : IDisposable
                 "\n",
                 "*bridge variants:",
                 "*bridge status - Show dialog-bridge trust/install status",
-                "*bridge install [script-source] - Upload script, create bridge prim, and install script",
-                "*bridge uninstall [keep-scripts] - Delete pinned bridge prim and clear trust pins (default also removes script copies)",
-                "(script-source optional: local path or http/https URL; default auto-discovers lsl/dialog-bridge.lsl)"),
+                "*bridge install - Wear/attach dialog bridge from 'Cube Bot IAR' inventory folder",
+                "*bridge uninstall [keep-scripts] - Delete pinned bridge prim and clear trust pins (default also removes script copies)"),
             "dialog" => string.Join(
                 "\n",
                 "*dialog variants:",
@@ -4149,7 +4151,7 @@ internal sealed partial class BotSession : IDisposable
                 $"require trusted sender: {requireTrusted}",
                 $"trusted object pin: {(pinnedObjectId == UUID.Zero ? "(none)" : pinnedObjectId.ToString())}",
                 $"trusted owner pin: {(pinnedOwnerId == UUID.Zero ? "(none)" : pinnedOwnerId.ToString())}",
-                "Install command: *bridge install [script-source]",
+                "Install command: *bridge install",
                 "Uninstall command: *bridge uninstall [keep-scripts]"
             };
             SendImText(client, agentId, from, string.Join("\n", lines));
@@ -4164,11 +4166,8 @@ internal sealed partial class BotSession : IDisposable
                 return;
             }
 
-            var sourceArg = parts.Length > 1
-                ? arg[parts[0].Length..].Trim()
-                : string.Empty;
             var install = await DialogBridgeInstallAsync(
-                string.IsNullOrWhiteSpace(sourceArg) ? null : sourceArg,
+                null,
                 objectName: "Opencode Dialog Bridge",
                 objectDescription: "Auto-installed dialog bridge prim",
                 folderId: null,
@@ -4201,7 +4200,7 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        SendImText(client, agentId, from, "Usage: *bridge status | *bridge install [script-source] | *bridge uninstall [keep-scripts]");
+        SendImText(client, agentId, from, "Usage: *bridge status | *bridge install | *bridge uninstall [keep-scripts]");
     }
 
     private async Task HandleProvidersCommandAsync(GridClient client, UUID agentId, string from, string arg = "")
@@ -7151,14 +7150,71 @@ internal sealed partial class BotSession : IDisposable
                     return;
                 }
 
-                // Also check for any existing bridge prim by name (best-effort).
-                var expectedName = "Opencode Dialog Bridge";
-                var knownPrims = sim.ObjectsPrimitives?.Values;
-                if (knownPrims != null && knownPrims.Any(p => p?.Properties?.Name is string name
-                    && name.Equals(expectedName, StringComparison.OrdinalIgnoreCase)))
+                var cubeItems = await ResolveCubeBotIarItemsAsync(client, CancellationToken.None).ConfigureAwait(false);
+                if (cubeItems.Ok && cubeItems.AttachmentItem != null)
                 {
-                    Console.WriteLine("[dialog-bridge] bridge prim found in new region by name; no auto-provision needed.");
-                    return;
+                    var appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
+                    var attached = false;
+                    var alphaWorn = false;
+                    if (appearance.Ok)
+                    {
+                        attached = appearance.Attachments.Any(a => string.Equals(a.ItemId, cubeItems.AttachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                        alphaWorn = cubeItems.AlphaItem != null
+                            && appearance.Wearables.Any(w => string.Equals(w.ItemId, cubeItems.AlphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+
+                        // Appearance snapshots can briefly lag right after login/sim change.
+                        // Re-check a few times before deciding bridge items are missing.
+                        for (var verifyAttempt = 1; verifyAttempt <= 3 && (!attached || !alphaWorn); verifyAttempt++)
+                        {
+                            await Task.Delay(900).ConfigureAwait(false);
+                            appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
+                            if (!appearance.Ok)
+                            {
+                                break;
+                            }
+
+                            attached = appearance.Attachments.Any(a => string.Equals(a.ItemId, cubeItems.AttachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                            alphaWorn = cubeItems.AlphaItem != null
+                                && appearance.Wearables.Any(w => string.Equals(w.ItemId, cubeItems.AlphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                        }
+
+                        if (attached)
+                        {
+                            if (TryFindAttachedObjectForInventoryItem(client, cubeItems.AttachmentItem.UUID, out var attachedObjectId, out var attachedLocalId))
+                            {
+                                lock (_dialogBridgeTrustLock)
+                                {
+                                    _trustedDialogBridgeObjectId = attachedObjectId;
+                                    _trustedDialogBridgeOwnerId = client.Self.AgentID;
+                                }
+                                TrySaveDialogBridgeTrustStateToFile();
+                                Console.WriteLine($"[dialog-bridge] bridge attachment already worn; refreshed trusted pin object={attachedObjectId} localId={attachedLocalId}.");
+                            }
+                            else
+                            {
+                                Console.WriteLine("[dialog-bridge] bridge attachment already worn; trusted pin refresh is waiting for simulator cache visibility.");
+                            }
+
+                            if (alphaWorn)
+                            {
+                                return;
+                            }
+
+                            Console.WriteLine("[dialog-bridge] bridge attachment is worn, but alpha is missing; continuing to auto-provision for alpha self-heal.");
+                        }
+                        else
+                        {
+                            Console.WriteLine("[dialog-bridge] bridge attachment item found but not currently worn.");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[dialog-bridge] could not verify worn bridge attachment state: {appearance.Message}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"[dialog-bridge] Cube Bot IAR inventory lookup failed: {cubeItems.Error}");
                 }
 
                 if (!_options.DialogBridgeAutoProvisionOnRegionEnter)
@@ -7167,15 +7223,40 @@ internal sealed partial class BotSession : IDisposable
                     return;
                 }
 
-                Console.WriteLine("[dialog-bridge] bridge missing in new region; attempting automatic install...");
-                var install = await DialogBridgeInstallAsync(null, null, null, null, 1f, 0f, 0f, pinAsTrustedSender: true, CancellationToken.None).ConfigureAwait(false);
-                if (install.Ok)
+                if (Interlocked.CompareExchange(ref _dialogBridgeAutoProvisionInFlight, 1, 0) != 0)
                 {
-                    Console.WriteLine($"[dialog-bridge] auto-installed bridge: {install.Message}");
+                    Console.WriteLine("[dialog-bridge] auto-provision already in progress; skipping duplicate trigger.");
+                    return;
                 }
-                else
+
+                try
                 {
-                    Console.WriteLine($"[dialog-bridge] auto-install failed: {install.Message}");
+                    var now = DateTimeOffset.UtcNow;
+                    lock (_dialogBridgeAutoProvisionLock)
+                    {
+                        if ((now - _lastDialogBridgeAutoProvisionAttemptAt) < TimeSpan.FromSeconds(45))
+                        {
+                            Console.WriteLine("[dialog-bridge] auto-provision suppressed by cooldown.");
+                            return;
+                        }
+
+                        _lastDialogBridgeAutoProvisionAttemptAt = now;
+                    }
+
+                    Console.WriteLine("[dialog-bridge] bridge missing in new region; attempting automatic install...");
+                    var install = await DialogBridgeInstallAsync(null, null, null, null, 1f, 0f, 0f, pinAsTrustedSender: true, CancellationToken.None).ConfigureAwait(false);
+                    if (install.Ok)
+                    {
+                        Console.WriteLine($"[dialog-bridge] auto-installed bridge: {install.Message}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[dialog-bridge] auto-install failed: {install.Message}");
+                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _dialogBridgeAutoProvisionInFlight, 0);
                 }
             }
             catch (Exception ex)

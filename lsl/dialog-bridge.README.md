@@ -4,7 +4,7 @@ This prototype lets `opensim-metaverse2mcp` show Opencode multiple-choice questi
 
 ## Files
 
-- `lsl/dialog-bridge.lsl` - in-world helper script.
+- `lsl/dialog-bridge.lsl` - source used to build the bridge content packaged in `Cube-Bot-IAR.iar`.
 
 ## How it works
 
@@ -18,13 +18,16 @@ This prototype lets `opensim-metaverse2mcp` show Opencode multiple-choice questi
 
 ## Setup
 
-1. Rez a prim in region.
-2. Drop `dialog-bridge.lsl` into the prim inventory.
-3. Ensure the bot avatar is in the same region and within chat/listen range of the bridge object.
-4. Trigger a workflow that asks a multiple-choice question.
+1. Import `Cube-Bot-IAR.iar` for the bot account.
+2. Confirm folder `Cube Bot IAR` exists in bot inventory and contains:
+   - attachment `The Cube Bot`
+   - wearable `Full Body Alpha`
+3. Run `*bridge install` (or let region-enter auto-provision run when enabled).
+4. The install flow wears the folder content as needed and attaches `The Cube Bot` to `Spine`.
+5. Trigger a workflow that asks a multiple-choice question.
 
 ## Notes
 
 - This is intentionally minimal and currently routes to the latest active IM conversation.
-- It does not yet include auth/signing; keep the bridge object controlled and trusted.
+- It does not yet include auth/signing; keep the bridge attachment controlled and trusted.
 - Question and permission prompts are delivered primarily via in-world dialog bridge events; use `*question` / `*permission` commands as manual fallback controls.

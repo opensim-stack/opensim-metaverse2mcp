@@ -19,11 +19,6 @@ Scope notes:
 
 ## 1) Platform, Reliability, and Security
 
-- [ ] **[P0] AI error responses**
-  - Look out for AI provider errors (`status` = `retry`). Full payload ...
-    ```
-[opencode:json] event:session.status: {"type":"session.status","properties":{"sessionID":"ses_00cd7c0a6ffePo0eT5htdchrhu","status":{"type":"retry","attempt":10,"message":"Error from provider (Console): Rate limit exceeded. Please try again later.","next":1786527558945}}}
-    ```
 - [ ] **[P0] Auto-reconnect and session recovery**
   - Recover event subscriptions and MCP-ready state after disconnect.
   - Preserve/restore per-conversation AI session mapping safely.
@@ -100,12 +95,13 @@ Scope notes:
 
 ## 6) Appearance and Wearables
 
-- [ ] **[P1] Outfit management completeness**
-  - Save current outfit to folder.
-  - Replace/add semantics with wearable category conflict resolution feedback.
+- [x] **[P1] Outfit management completeness**
+  - [x] Save current outfit to folder.
+  - [x] Replace/add semantics with wearable category conflict resolution feedback.
 - [ ] **[P1] Wearables direct controls**
   - Wear/remove specific wearables by type/item.
   - Query and edit attachment point mappings.
+  - Investigate how attached items are rotated, scaled etc (can be done while being worn)
 - [ ] **[P2] Avatar visual parameter editing**
   - Expose shape/visual param controls and bake diagnostics.
 

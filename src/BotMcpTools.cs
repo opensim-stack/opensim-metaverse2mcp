@@ -1248,13 +1248,22 @@ internal sealed class BotMcpTools
         return _bot.AppearanceListWornAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("Wear outfit items from an inventory folder UUID.")]
-    public Task<BotToolResult> AppearanceWearFolder(
+    [McpServerTool, Description("Wear outfit items from an inventory folder UUID, including replace/add category conflict feedback.")]
+    public Task<AppearanceWearFolderResult> AppearanceWearFolder(
         [Description("Folder UUID containing outfit items/links.")] string folderId,
         [Description("True to replace current outfit, false to add.")] bool replaceItems,
         CancellationToken cancellationToken)
     {
         return _bot.AppearanceWearFolderAsync(folderId, replaceItems, cancellationToken);
+    }
+
+    [McpServerTool, Description("Save the current outfit links into a new inventory folder snapshot.")]
+    public Task<OutfitSaveResult> AppearanceSaveCurrentOutfit(
+        [Description("Name for the new snapshot folder.")] string folderName,
+        [Description("Optional parent folder UUID. Empty uses Clothing folder when available.")] string? parentFolderId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceSaveCurrentOutfitAsync(folderName, parentFolderId, cancellationToken);
     }
 
     [McpServerTool, Description("Attach an inventory attachment/object item.")]

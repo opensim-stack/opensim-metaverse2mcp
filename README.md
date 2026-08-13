@@ -255,6 +255,9 @@ Chat notes:
   - `*configure model <provider/model-id>`
   - `*configure thinking <low|medium|high|off>`
   - `*configure reset` / `*reset`
+- Bridge install behavior: `*bridge install` now uses pre-imported inventory content from folder `Cube Bot IAR` (attachment `The Cube Bot` and wearable `Full Body Alpha`).
+- Bridge attachment point: install attaches `The Cube Bot` to `Spine` (legacy RightEar/Skull fallback flow was removed).
+- Region-enter behavior: startup auto-provision checks whether `The Cube Bot` is already worn before reinstalling.
 - Session switch behavior: `*session create` selects the created session for this IM by default; pass `--no-select` to keep the previous active session.
 - Session switch validation: `*session use`/`*session select` validates the target session exists before switching.
 - Busy-request behavior: if the bot is still processing a previous request, it will prompt you to use `*cancel`.
