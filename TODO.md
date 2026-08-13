@@ -17,8 +17,11 @@ Scope notes:
 
 ---
 
+
 ## 1) Platform, Reliability, and Security
 
+- [ ] **[P0] Configuration Reloading**
+  - After authorizing with provider (or other prov. changes?), opencode has to be restarted somehow.
 - [ ] **[P0] Auto-reconnect and session recovery**
   - Recover event subscriptions and MCP-ready state after disconnect.
   - Preserve/restore per-conversation AI session mapping safely.
@@ -61,21 +64,6 @@ Scope notes:
 - [ ] **[P2] Gestures and typing state controls**
   - Trigger gestures, explicit typing indicators, AFK/away style signals.
 
-## 4) Objects, Building, and World Editing
-
-- [ ] **[P1] Primitive inspection depth**
-  - Add explicit object property fetch/wait tool (creator/permissions/sale/sittable/info freshness guarantees).
-  - Surface sculpt/mesh/light/flexible/path/profile/material detail parity with `Primitive` data.
-- [ ] **[P1] Complete build parameter editing**
-  - Hollow, taper, twist, cut/path begin/end, shear, skew, profile hole, flexible/light/sculpt params.
-- [ ] **[P1] Linkset-level operations**
-  - Set root prim, inspect full linkset tree, bulk edit selected links, child-order tools.
-- [ ] **[P1] Permissions/ownership tools**
-  - Set next-owner/copy/mod/transfer perms where allowed.
-  - Set sale info, for-sale toggles, deed/share with group.
-- [ ] **[P2] Parcel object discovery helpers**
-  - Query objects by parcel, owner, scripted status, physics status.
-
 ## 5) Inventory and Asset Management
 
 - [ ] **[P1] Inventory browsing ergonomics**
@@ -93,19 +81,7 @@ Scope notes:
 - [ ] **[P2] Bulk transfer workflows**
   - Batch give/take with result breakdown and retry support.
 
-## 6) Appearance and Wearables
-
-- [x] **[P1] Outfit management completeness**
-  - [x] Save current outfit to folder.
-  - [x] Replace/add semantics with wearable category conflict resolution feedback.
-- [ ] **[P1] Wearables direct controls**
-  - Wear/remove specific wearables by type/item.
-  - Query and edit attachment point mappings.
-  - Investigate how attached items are rotated, scaled etc (can be done while being worn)
-- [ ] **[P2] Avatar visual parameter editing**
-  - Expose shape/visual param controls and bake diagnostics.
-
-## 7) Scripts and Task Inventory
+## 6) Scripts and Task Inventory
 
 - [ ] **[P1] Script lifecycle coverage**
   - Add script reset and script event queue stats where supported.
@@ -115,7 +91,7 @@ Scope notes:
 - [ ] **[P2] Script source provenance**
   - Optional hash/signature metadata for uploaded script source.
 
-## 8) Environment, Land, and Region Features
+## 7) Environment, Land, and Region Features
 
 - [ ] **[P1] Parcel management tools (`ParcelManager`)**
   - full ACL write/edit/remove primitives (library gap in current surfaced API path).
@@ -124,7 +100,7 @@ Scope notes:
 - [ ] **[P1] EEP/Windlight usability layer**
   - High-level presets and patch operations instead of raw LLSD only.
 
-## 9) Social, Groups, Search, and Directory
+## 8) Social, Groups, Search, and Directory
 
 - [ ] **[P1] Friends operations (`FriendsManager`)**
   - Friends list, friendship offers, online status, teleport offers/requests.
@@ -133,7 +109,7 @@ Scope notes:
 - [ ] **[P2] Avatar profile tools (`AvatarManager`)**
   - Read profile/interests/picks/classifieds where supported.
 
-## 10) Communications Beyond IM
+## 9) Communications Beyond IM
 
 - [ ] **[P1] Chat modalities**
   - Add explicit whisper/shout tools and receive-side filters.
@@ -142,7 +118,7 @@ Scope notes:
 - [ ] **[P2] Conferencing/voice signaling integration hooks**
   - Text-side signaling for out-of-band media bridges.
 
-## 11) Voice / WebRTC
+## 10) Voice / WebRTC
 
 - [ ] **[P1] Voice bridge support (`LibreMetaverse.Voice.WebRTC`)**
   - Connect/disconnect voice, peer events, mute/unmute, volume.
@@ -150,7 +126,7 @@ Scope notes:
 - [ ] **[P2] Voice moderation policies**
   - Auto-mute/auto-join policies and permission checks.
 
-## 12) OSD/LLSD and Data Utilities
+## 11) OSD/LLSD and Data Utilities
 
 - [ ] **[P1] Generic OSD conversion tools**
   - JSON/XML/Binary LLSD conversion and validation tools for agent workflows.
@@ -159,7 +135,7 @@ Scope notes:
 - [ ] **[P2] Object/asset serialization helpers**
   - Export/import structured snapshots for reproducible scene edits.
 
-## 13) MCP UX and Contract Quality
+## 12) MCP UX and Contract Quality
 
 - [ ] **[P0] Tool contract consistency**
   - Normalize result schemas (status/error codes, transient/permanent flags, correlation IDs).
@@ -170,7 +146,7 @@ Scope notes:
 - [ ] **[P1] Safer defaults for destructive tools**
   - Confirm/delete guardrails similar to session delete flow.
 
-## 14) Testing and Validation Gaps
+## 13) Testing and Validation Gaps
 
 - [ ] **[P0] Capability-level integration tests**
   - End-to-end tests for movement, prim edit, inventory transfer, script upload, policy decisions.
@@ -196,7 +172,6 @@ Scope notes:
 
 - Parcel/friends/directory tools
 - Rich inventory CRUD + pagination
-- Advanced object build/edit properties
 - Local/group chat routing and controls
 - Voice baseline controls
 

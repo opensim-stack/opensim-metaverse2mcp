@@ -169,6 +169,10 @@ The server publishes tools including:
 - `PrimInspect`
 - `PrimFindByName`
 - `PrimListNearby`
+- `PrimRequestPayPrice`
+- `PrimBuy`
+- `WalletGetBalance`
+- `Pay`
 - `PrimSelect`
 - `PrimDeselect`
 - `PrimDelete`
@@ -194,6 +198,9 @@ The server publishes tools including:
 - `AppearanceAttachItem`
 - `AppearanceDetachItem`
 - `AppearanceRebake`
+- `AppearanceVisualParamsList`
+- `AppearanceVisualParamSet`
+- `AppearanceBakeDiagnostics`
 - `ScriptUploadAgent`
 - `ScriptUploadTask`
 - `ScriptCopyInventoryToTask`
@@ -306,6 +313,9 @@ Inventory and asset notes:
 Appearance and script notes:
 - `AppearanceWearFolder` expects a folder containing wearable/attachment items (or links to them) and delegates to `Appearance.WearOutfitAsync`.
 - `AppearanceAttachItem` can use an explicit `attachmentPoint`, or falls back to the item's default point when available.
+- `AppearanceVisualParamsList` exposes slider metadata (ranges/default/group/wearable) plus current values.
+- `AppearanceVisualParamSet` edits one group-0 slider parameter and requests a rebake/update.
+- `AppearanceBakeDiagnostics` returns baked texture slot IDs and optional cache-probe latency diagnostics.
 - `ScriptUploadAgent`/`ScriptUploadTask` return compile status and compiler messages when the grid reports them.
 - `ScriptSetTaskRunning` can verify state by requesting `ScriptRunningReply` after sending the state change.
 

@@ -925,7 +925,7 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Link multiple prims into a linkset using comma-separated local IDs.")]
     public Task<BotToolResult> PrimLink(
-        [Description("Comma-separated local IDs; first ID becomes root.")] string localIdsCsv,
+        [Description("Comma-separated local IDs; last ID becomes root.")] string localIdsCsv,
         CancellationToken cancellationToken)
     {
         return _bot.LinkPrimsAsync(localIdsCsv, cancellationToken);
@@ -937,6 +937,92 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken)
     {
         return _bot.UnlinkPrimsAsync(localIdsCsv, cancellationToken);
+    }
+
+    [McpServerTool, Description("Inspect a full linkset tree from any member prim local ID.")]
+    public Task<LinksetInspectResult> PrimInspectLinkset(
+        [Description("Any local ID in the target linkset (root or child).") ] uint localId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InspectLinksetAsync(localId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set a new root prim for a linkset by relinking members with the requested root last.")]
+    public Task<BotToolResult> PrimSetLinksetRoot(
+        [Description("Any local ID in the target linkset (root or child).") ] uint localId,
+        [Description("Local ID of the prim that should become root.")] uint newRootLocalId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetLinksetRootAsync(localId, newRootLocalId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Reorder links in a linkset (including child order) by explicit local ID sequence, with chosen root.")]
+    public Task<BotToolResult> PrimReorderLinkset(
+        [Description("Any local ID in the target linkset (root or child).") ] uint localId,
+        [Description("Comma-separated local IDs containing every prim in the linkset exactly once.")] string orderedLocalIdsCsv,
+        [Description("Local ID of the desired root prim. Root is linked last by protocol behavior.")] uint rootLocalId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ReorderLinksetAsync(localId, orderedLocalIdsCsv, rootLocalId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Bulk-adjust selected links by optional position delta, rotation delta, and scale multiplier.")]
+    public Task<BotToolResult> PrimBulkAdjustLinks(
+        [Description("Comma-separated local IDs to adjust.")] string localIdsCsv,
+        [Description("Optional position delta X.") ] float? deltaX,
+        [Description("Optional position delta Y.") ] float? deltaY,
+        [Description("Optional position delta Z.") ] float? deltaZ,
+        [Description("Optional rotation delta roll in degrees.") ] float? deltaRollDegrees,
+        [Description("Optional rotation delta pitch in degrees.") ] float? deltaPitchDegrees,
+        [Description("Optional rotation delta yaw in degrees.") ] float? deltaYawDegrees,
+        [Description("Optional scale multiplier (>0).") ] float? scaleMultiplier,
+        [Description("True to apply as child-only edits (recommended for linked children).") ] bool childOnly,
+        CancellationToken cancellationToken)
+    {
+        return _bot.BulkAdjustLinksAsync(
+            localIdsCsv,
+            deltaX,
+            deltaY,
+            deltaZ,
+            deltaRollDegrees,
+            deltaPitchDegrees,
+            deltaYawDegrees,
+            scaleMultiplier,
+            childOnly,
+            cancellationToken);
+    }
+
+    [McpServerTool, Description("Set next-owner copy/modify/transfer permissions on one or more prims.")]
+    public Task<BotToolResult> PrimSetNextOwnerPermissions(
+        [Description("Comma-separated local IDs.")] string localIdsCsv,
+        [Description("Optional next-owner copy permission. Omit to leave unchanged.")] bool? allowCopy,
+        [Description("Optional next-owner modify permission. Omit to leave unchanged.")] bool? allowModify,
+        [Description("Optional next-owner transfer permission. Omit to leave unchanged.")] bool? allowTransfer,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetPrimNextOwnerPermissionsAsync(localIdsCsv, allowCopy, allowModify, allowTransfer, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set sale info or clear for-sale state for one or more prims.")]
+    public Task<BotToolResult> PrimSetSaleInfo(
+        [Description("Comma-separated local IDs.")] string localIdsCsv,
+        [Description("True to set for-sale details, false to clear for-sale state.")] bool forSale,
+        [Description("Sale type when forSale=true: Original, Copy, or Contents.")] string saleType,
+        [Description("Sale price in L$ when forSale=true. Must be >= 0.")] int price,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetPrimSaleInfoAsync(localIdsCsv, forSale, saleType, price, cancellationToken);
+    }
+
+    [McpServerTool, Description("Assign objects to a group and optionally share permissions and/or deed to that group.")]
+    public Task<BotToolResult> PrimSetGroupOwnership(
+        [Description("Comma-separated local IDs.")] string localIdsCsv,
+        [Description("Target group UUID.")] string groupId,
+        [Description("True to share with group permissions (group mask all); false to clear group share unless deeding.")] bool shareWithGroup,
+        [Description("True to request deed to group (requires group-share permissions and sufficient rights).") ] bool deedToGroup,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetPrimGroupOwnershipAsync(localIdsCsv, groupId, shareWithGroup, deedToGroup, cancellationToken);
     }
 
     [McpServerTool, Description("Clone an existing prim by local ID with a position offset.")]
@@ -960,6 +1046,102 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken)
     {
         return _bot.InspectPrimAsync(localId, includeFaceTextures, cancellationToken);
+    }
+
+    [McpServerTool, Description("Request fresh object properties for a prim and wait briefly for simulator updates before returning rich inspection details.")]
+    public Task<PrimInspectResult> PrimFetchProperties(
+        [Description("Prim local ID.")] uint localId,
+        [Description("Include explicit per-face texture overrides in the response.")] bool includeFaceTextures,
+        [Description("How long to wait for refreshed object properties (seconds, >0 and <=30).") ] float waitTimeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FetchPrimPropertiesAsync(localId, includeFaceTextures, waitTimeoutSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Edit core prim build shape parameters (cut, hollow, taper, twist, shear, skew, revolutions, and profile hole).")]
+    public Task<BotToolResult> PrimSetBuildParams(
+        [Description("Prim local ID.")] uint localId,
+        [Description("Optional path begin cut (0..1).") ] float? pathBegin,
+        [Description("Optional path end cut (0..1).") ] float? pathEnd,
+        [Description("Optional profile begin cut (0..1).") ] float? profileBegin,
+        [Description("Optional profile end cut (0..1).") ] float? profileEnd,
+        [Description("Optional profile hollow amount (0..0.95).") ] float? hollow,
+        [Description("Optional taper X (-1..1).") ] float? taperX,
+        [Description("Optional taper Y (-1..1).") ] float? taperY,
+        [Description("Optional twist (-1..1).") ] float? twist,
+        [Description("Optional twist begin (-1..1).") ] float? twistBegin,
+        [Description("Optional shear X (-2..2).") ] float? shearX,
+        [Description("Optional shear Y (-2..2).") ] float? shearY,
+        [Description("Optional skew (-1..1).") ] float? skew,
+        [Description("Optional radius offset (-1..1).") ] float? radiusOffset,
+        [Description("Optional revolutions (1..4).") ] float? revolutions,
+        [Description("Optional profile hole type from HoleType enum (e.g. Same, Circle, Square, Triangle).") ] string? profileHole,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetPrimBuildParamsAsync(
+            localId,
+            pathBegin,
+            pathEnd,
+            profileBegin,
+            profileEnd,
+            hollow,
+            taperX,
+            taperY,
+            twist,
+            twistBegin,
+            shearX,
+            shearY,
+            skew,
+            radiusOffset,
+            revolutions,
+            profileHole,
+            cancellationToken);
+    }
+
+    [McpServerTool, Description("Enable/disable and edit prim flexible parameters.")]
+    public Task<BotToolResult> PrimSetFlexible(
+        [Description("Prim local ID.")] uint localId,
+        [Description("True to enable/update flexible settings; false disables flexible data.")] bool enabled,
+        [Description("Optional softness (0..3).") ] int? softness,
+        [Description("Optional tension (0..10).") ] float? tension,
+        [Description("Optional drag (0..10).") ] float? drag,
+        [Description("Optional gravity (-10..10).") ] float? gravity,
+        [Description("Optional wind sensitivity (0..10).") ] float? wind,
+        [Description("Optional force X.") ] float? forceX,
+        [Description("Optional force Y.") ] float? forceY,
+        [Description("Optional force Z.") ] float? forceZ,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetPrimFlexibleParamsAsync(localId, enabled, softness, tension, drag, gravity, wind, forceX, forceY, forceZ, cancellationToken);
+    }
+
+    [McpServerTool, Description("Enable/disable and edit prim light parameters.")]
+    public Task<BotToolResult> PrimSetLight(
+        [Description("Prim local ID.")] uint localId,
+        [Description("True to enable/update light settings; false disables light data.")] bool enabled,
+        [Description("Optional light color red (0..1).") ] float? red,
+        [Description("Optional light color green (0..1).") ] float? green,
+        [Description("Optional light color blue (0..1).") ] float? blue,
+        [Description("Optional light intensity (0..1).") ] float? intensity,
+        [Description("Optional light radius (0..20).") ] float? radius,
+        [Description("Optional light cutoff angle (0..180).") ] float? cutoff,
+        [Description("Optional light falloff (0..2).") ] float? falloff,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetPrimLightParamsAsync(localId, enabled, red, green, blue, intensity, radius, cutoff, falloff, cancellationToken);
+    }
+
+    [McpServerTool, Description("Enable/disable and edit prim sculpt/mesh parameters.")]
+    public Task<BotToolResult> PrimSetSculpt(
+        [Description("Prim local ID.")] uint localId,
+        [Description("True to enable/update sculpt settings; false disables sculpt data.")] bool enabled,
+        [Description("Optional sculpt or mesh texture UUID.")] string? textureId,
+        [Description("Optional base sculpt type: None, Sphere, Torus, Plane, Cylinder, Mesh.") ] string? sculptType,
+        [Description("Optional invert sculpt normals flag.") ] bool? invert,
+        [Description("Optional mirror sculpt flag.") ] bool? mirror,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetPrimSculptParamsAsync(localId, enabled, textureId, sculptType, invert, mirror, cancellationToken);
     }
 
     [McpServerTool, Description("Select a prim by local ID. Can optionally auto-deselect immediately.")]
@@ -1062,6 +1244,68 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken)
     {
         return _bot.ListNearbyPrimsAsync(radiusMeters, maxResults, cancellationToken);
+    }
+
+    [McpServerTool, Description("Discover objects by parcel and ownership/status filters (owner, scripted, physical).")]
+    public Task<DataToolResult> PrimQueryObjects(
+        [Description("Optional parcel local ID filter.")] int? parcelLocalId,
+        [Description("Optional owner avatar UUID filter.")] string? ownerId,
+        [Description("Optional scripted filter: true=only scripted, false=only non-scripted, null=either.")] bool? scriptedOnly,
+        [Description("Optional physics filter: true=only physical, false=only non-physical, null=either.")] bool? physicalOnly,
+        [Description("Maximum results to return (1..2000).") ] int maxResults,
+        [Description("When parcelLocalId is set, refresh parcel map first.")] bool forceRefreshParcelMap,
+        CancellationToken cancellationToken)
+    {
+        return _bot.PrimQueryObjectsAsync(
+            parcelLocalId,
+            ownerId,
+            scriptedOnly,
+            physicalOnly,
+            maxResults,
+            forceRefreshParcelMap,
+            cancellationToken);
+    }
+
+    [McpServerTool, Description("Request pay price information for an in-world object so payment options can be validated before paying/buying.")]
+    public Task<DataToolResult> PrimRequestPayPrice(
+        [Description("Prim local ID in current simulator cache.")] uint localId,
+        [Description("Optional object UUID override. If omitted, resolves from localId.")] string? objectId,
+        [Description("Wait timeout for pay price reply in milliseconds (250..15000).") ] int waitTimeoutMs,
+        CancellationToken cancellationToken)
+    {
+        return _bot.PrimRequestPayPriceAsync(localId, objectId, waitTimeoutMs, cancellationToken);
+    }
+
+    [McpServerTool, Description("Submit a buy request for an object configured for sale (supports 0-price purchases).")]
+    public Task<BotToolResult> PrimBuy(
+        [Description("Prim local ID in current simulator cache.")] uint localId,
+        [Description("Sale type expected on the object: Original, Copy, or Contents.")] string saleType,
+        [Description("Expected sale price in L$ (0 allowed).") ] int price,
+        [Description("Optional destination inventory folder UUID.")] string? categoryFolderId,
+        [Description("Optional group UUID to associate with the purchase; defaults to active group.")] string? activeGroupId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.PrimBuyAsync(localId, saleType, price, categoryFolderId, activeGroupId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get wallet balance, optionally forcing a fresh balance request first.")]
+    public Task<DataToolResult> WalletGetBalance(
+        [Description("True to request an updated balance from simulator; false to return cached value.")] bool refresh,
+        [Description("Wait timeout for refreshed balance reply in milliseconds (250..15000).") ] int waitTimeoutMs,
+        CancellationToken cancellationToken)
+    {
+        return _bot.WalletGetBalanceAsync(refresh, waitTimeoutMs, cancellationToken);
+    }
+
+    [McpServerTool, Description("Send money to an avatar, object, or group by UUID.")]
+    public Task<BotToolResult> Pay(
+        [Description("Target type: avatar, object, or group.")] string targetType,
+        [Description("Target UUID.")] string targetId,
+        [Description("Amount in L$ (must be > 0).") ] int amount,
+        [Description("Optional transaction description/memo.")] string? description,
+        CancellationToken cancellationToken)
+    {
+        return _bot.PayAsync(targetType, targetId, amount, description, cancellationToken);
     }
 
     [McpServerTool, Description("List inventory entries under a folder UUID (or root if omitted).")]
@@ -1276,6 +1520,48 @@ internal sealed class BotMcpTools
         return _bot.AppearanceAttachItemAsync(itemId, attachmentPoint, replace, cancellationToken);
     }
 
+    [McpServerTool, Description("Wear a wearable item directly via COF, with optional replacement of existing slot/type.")]
+    public Task<BotToolResult> AppearanceWearWearableItem(
+        [Description("Wearable inventory item UUID.")] string itemId,
+        [Description("True to replace already-worn wearables in the same slot/type.")] bool replaceExistingSlot,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceWearWearableItemAsync(itemId, replaceExistingSlot, cancellationToken);
+    }
+
+    [McpServerTool, Description("Remove a currently worn wearable item directly via COF.")]
+    public Task<WearableDirectControlResult> AppearanceRemoveWearableItem(
+        [Description("Wearable inventory item UUID.")] string itemId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceRemoveWearableItemAsync(itemId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Remove currently worn wearables by wearable type.")]
+    public Task<WearableDirectControlResult> AppearanceRemoveWearablesByType(
+        [Description("WearableType enum name (e.g. Shirt, Pants, Alpha).") ] string wearableType,
+        [Description("True to remove all layers of the type, false for one layer.")] bool removeAllLayers,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceRemoveWearablesByTypeAsync(wearableType, removeAllLayers, cancellationToken);
+    }
+
+    [McpServerTool, Description("List current attachment item-to-point mappings from worn attachments.")]
+    public Task<AttachmentPointMappingResult> AppearanceListAttachmentPointMappings(CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceListAttachmentPointMappingsAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Change an attachment item's mapped/worn attachment point by reattaching it to a new point.")]
+    public Task<BotToolResult> AppearanceSetAttachmentPointMapping(
+        [Description("Attachment inventory item UUID.")] string itemId,
+        [Description("AttachmentPoint enum name (e.g. Spine, Chest, RightHand).") ] string attachmentPoint,
+        [Description("True to replace any existing attachment at the target point.")] bool replace,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceSetAttachmentPointMappingAsync(itemId, attachmentPoint, replace, cancellationToken);
+    }
+
     [McpServerTool, Description("Detach a currently worn attachment item by inventory item UUID.")]
     public Task<BotToolResult> AppearanceDetachItem(
         [Description("Inventory item UUID.")] string itemId,
@@ -1284,12 +1570,83 @@ internal sealed class BotMcpTools
         return _bot.AppearanceDetachItemAsync(itemId, cancellationToken);
     }
 
+    [McpServerTool, Description("Get cached transform snapshot for a worn attachment item.")]
+    public Task<AttachmentTransformResult> AppearanceGetAttachedItemTransform(
+        [Description("Worn attachment inventory item UUID.")] string itemId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceGetAttachedItemTransformAsync(itemId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Request transform updates for a worn attachment item (position/scale/rotation in euler degrees).")]
+    public Task<AttachmentTransformResult> AppearanceSetAttachedItemTransform(
+        [Description("Worn attachment inventory item UUID.")] string itemId,
+        [Description("Optional target position X.")] float? positionX,
+        [Description("Optional target position Y.")] float? positionY,
+        [Description("Optional target position Z.")] float? positionZ,
+        [Description("Optional target scale X.")] float? scaleX,
+        [Description("Optional target scale Y.")] float? scaleY,
+        [Description("Optional target scale Z.")] float? scaleZ,
+        [Description("Optional target roll in degrees.")] float? rollDegrees,
+        [Description("Optional target pitch in degrees.")] float? pitchDegrees,
+        [Description("Optional target yaw in degrees.")] float? yawDegrees,
+        [Description("True to edit only this child prim; false for whole linked object.")] bool childOnly,
+        [Description("True to request uniform scale when scale values are set.")] bool uniformScale,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceSetAttachedItemTransformAsync(
+            itemId,
+            positionX,
+            positionY,
+            positionZ,
+            scaleX,
+            scaleY,
+            scaleZ,
+            rollDegrees,
+            pitchDegrees,
+            yawDegrees,
+            childOnly,
+            uniformScale,
+            cancellationToken);
+    }
+
     [McpServerTool, Description("Request appearance rebake/update.")]
     public Task<BotToolResult> AppearanceRebake(
         [Description("True to force a rebake, false for normal update.")] bool forceRebake,
         CancellationToken cancellationToken)
     {
         return _bot.AppearanceRebakeAsync(forceRebake, cancellationToken);
+    }
+
+    [McpServerTool, Description("List avatar visual parameters (shape sliders and related values), including ranges and current values.")]
+    public Task<AppearanceVisualParamsResult> AppearanceVisualParamsList(
+        [Description("Optional wearable category filter (e.g. shape, eyes, hair).") ] string? wearable,
+        [Description("Optional case-insensitive name filter (substring).") ] string? nameContains,
+        [Description("True to return only directly editable group-0 parameters.") ] bool editableOnly,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceVisualParamsListAsync(wearable, nameContains, editableOnly, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set one avatar visual parameter by id or exact name and request a rebake.")]
+    public Task<AppearanceVisualParamSetResult> AppearanceVisualParamSet(
+        [Description("Optional visual param ID. If not provided, paramName is required.") ] int? paramId,
+        [Description("Optional exact visual param name. Case-insensitive.") ] string? paramName,
+        [Description("Optional wearable filter when resolving paramName (e.g. shape).") ] string? wearable,
+        [Description("Target value to apply.") ] float value,
+        [Description("True to clamp out-of-range values to min/max; false to return validation error.") ] bool clampToRange,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceVisualParamSetAsync(paramId, paramName, wearable, value, clampToRange, cancellationToken);
+    }
+
+    [McpServerTool, Description("Return appearance bake diagnostics, including baked-texture slots and optional cache-probe latency.")]
+    public Task<AppearanceBakeDiagnosticsResult> AppearanceBakeDiagnostics(
+        [Description("If true, send RequestCachedBakes and wait for reply/timeout.") ] bool requestCacheProbe,
+        [Description("Cache probe timeout in milliseconds (100..15000).") ] int cacheProbeTimeoutMs,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AppearanceBakeDiagnosticsAsync(requestCacheProbe, cacheProbeTimeoutMs, cancellationToken);
     }
 
     [McpServerTool, Description("Bootstrap-install the dialog bridge by uploading script inventory, creating a prim, and copying script into task inventory.")]

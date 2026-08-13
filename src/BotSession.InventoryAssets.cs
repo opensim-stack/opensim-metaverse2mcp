@@ -65,7 +65,7 @@ internal sealed partial class BotSession
                 .ThenBy(w => w.ItemId, StringComparer.Ordinal)
                 .ToList();
 
-            var attachments = client.Appearance.GetAttachmentsByItemId()
+            var attachments = (await CollectAttachmentPointMappingsAsync(client, token).ConfigureAwait(false))
                 .Select(a => new AttachmentInfo(a.Key.ToString(), a.Value.ToString()))
                 .OrderBy(a => a.AttachmentPoint, StringComparer.Ordinal)
                 .ThenBy(a => a.ItemId, StringComparer.Ordinal)
@@ -208,6 +208,265 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<BotToolResult> AppearanceWearWearableItemAsync(string itemId, bool replaceExistingSlot, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return BotToolResult.Fail("itemId is not a valid UUID.");
+        }
+
+        return await AppearanceWearWearableItemAsync(itemUuid, replaceExistingSlot, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<WearableDirectControlResult> AppearanceRemoveWearableItemAsync(string itemId, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return WearableDirectControlResult.FailResult("itemId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var item = await ResolveInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+            if (item == null)
+            {
+                return WearableDirectControlResult.FailResult($"Inventory item {itemUuid} was not found.");
+            }
+
+            var resolved = ResolveLinkedInventoryItem(client.Inventory.Store, item);
+            if (resolved is not InventoryWearable wearable)
+            {
+                return WearableDirectControlResult.FailResult(
+                    $"Inventory item {resolved.UUID} ('{resolved.Name}') is not a wearable (assetType={resolved.AssetType}, inventoryType={resolved.InventoryType}).");
+            }
+
+            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+            await cof.RemoveFromOutfitAsync(wearable, token).ConfigureAwait(false);
+
+            return WearableDirectControlResult.OkResult(
+                wearable.WearableType.ToString(),
+                1,
+                1,
+                new[] { wearable.UUID.ToString() },
+                $"Requested remove wearable '{wearable.Name}' ({wearable.UUID}), type={wearable.WearableType} via COF.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<WearableDirectControlResult> AppearanceRemoveWearablesByTypeAsync(string wearableType, bool removeAllLayers, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(wearableType) || !Enum.TryParse<WearableType>(wearableType.Trim(), true, out var parsedType))
+        {
+            return WearableDirectControlResult.FailResult($"wearableType '{wearableType}' is not valid.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            var wornOfType = await cof.GetWornAtAsync(parsedType, token).ConfigureAwait(false);
+            if (wornOfType.Count == 0)
+            {
+                return WearableDirectControlResult.OkResult(parsedType.ToString(), 0, 0, Array.Empty<string>(), $"No currently worn wearables found for type {parsedType}.");
+            }
+
+            var removeList = removeAllLayers
+                ? wornOfType
+                : new List<InventoryItem> { wornOfType[0] };
+
+            await cof.RemoveFromOutfitAsync(removeList, token).ConfigureAwait(false);
+
+            var removedIds = removeList.Select(i => i.UUID.ToString()).ToList();
+            var mode = removeAllLayers ? "all" : "single";
+            return WearableDirectControlResult.OkResult(
+                parsedType.ToString(),
+                wornOfType.Count,
+                removeList.Count,
+                removedIds,
+                $"Requested remove {mode} wearable layer(s) for type {parsedType}. wornOfType={wornOfType.Count}, removeRequested={removeList.Count}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AttachmentPointMappingResult> AppearanceListAttachmentPointMappingsAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
+            var attachmentsByItemId = await CollectAttachmentPointMappingsAsync(client, token).ConfigureAwait(false);
+
+            var mappings = new List<AttachmentPointMappingInfo>(attachmentsByItemId.Count);
+            foreach (var entry in attachmentsByItemId.OrderBy(kv => kv.Value.ToString(), StringComparer.Ordinal).ThenBy(kv => kv.Key.ToString(), StringComparer.Ordinal))
+            {
+                var item = await ResolveInventoryItemAsync(client, entry.Key, token).ConfigureAwait(false);
+                var name = item?.Name ?? string.Empty;
+                mappings.Add(new AttachmentPointMappingInfo(entry.Key.ToString(), name, entry.Value.ToString()));
+            }
+
+            return AttachmentPointMappingResult.OkResult(mappings, $"Collected {mappings.Count} attachment point mapping(s) from currently worn attachments.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> AppearanceSetAttachmentPointMappingAsync(string itemId, string attachmentPoint, bool replace, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return BotToolResult.Fail("itemId is not a valid UUID.");
+        }
+
+        if (!Enum.TryParse<AttachmentPoint>(attachmentPoint.Trim(), true, out var parsedPoint))
+        {
+            return BotToolResult.Fail($"attachmentPoint '{attachmentPoint}' is not valid.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var item = await ResolveInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+            if (item == null)
+            {
+                return BotToolResult.Fail($"Inventory item {itemUuid} was not found.");
+            }
+
+            var resolved = ResolveLinkedInventoryItem(client.Inventory.Store, item);
+            if (resolved is not InventoryObject attachment)
+            {
+                return BotToolResult.Fail(
+                    $"Inventory item {resolved.UUID} ('{resolved.Name}') is not an attachment/object (assetType={resolved.AssetType}, inventoryType={resolved.InventoryType}).");
+            }
+
+            attachment.AttachPoint = parsedPoint;
+            client.Appearance.Attach(attachment, parsedPoint, replace);
+
+            token.ThrowIfCancellationRequested();
+            return BotToolResult.OkResult(
+                $"Attach-point remap requested for '{attachment.Name}' ({attachment.UUID}) to {parsedPoint} (replace={replace}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AttachmentTransformResult> AppearanceGetAttachedItemTransformAsync(string itemId, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return AttachmentTransformResult.FailResult("itemId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
+
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return AttachmentTransformResult.FailResult("No current simulator available.");
+            }
+
+            if (!TryFindAttachedObjectForInventoryItem(client, itemUuid, out var attachedObjectId, out var attachedLocalId))
+            {
+                return AttachmentTransformResult.FailResult($"Unable to find a currently worn attachment object for inventory item {itemUuid}. The attachment may not be worn yet or object updates are still pending.");
+            }
+
+            if (!sim.ObjectsPrimitives.TryGetValue(attachedLocalId, out var prim))
+            {
+                return AttachmentTransformResult.FailResult($"Attachment object localId={attachedLocalId} was not found in simulator cache.");
+            }
+
+            return BuildAttachmentTransformResult(
+                itemUuid,
+                attachedObjectId,
+                attachedLocalId,
+                prim,
+                requestedUpdate: false,
+                $"Read transform snapshot for attached item {itemUuid}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AttachmentTransformResult> AppearanceSetAttachedItemTransformAsync(
+        string itemId,
+        float? positionX,
+        float? positionY,
+        float? positionZ,
+        float? scaleX,
+        float? scaleY,
+        float? scaleZ,
+        float? rollDegrees,
+        float? pitchDegrees,
+        float? yawDegrees,
+        bool childOnly,
+        bool uniformScale,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return AttachmentTransformResult.FailResult("itemId is not a valid UUID.");
+        }
+
+        var hasPosition = positionX.HasValue || positionY.HasValue || positionZ.HasValue;
+        var hasScale = scaleX.HasValue || scaleY.HasValue || scaleZ.HasValue;
+        var hasRotation = rollDegrees.HasValue || pitchDegrees.HasValue || yawDegrees.HasValue;
+        if (!hasPosition && !hasScale && !hasRotation)
+        {
+            return AttachmentTransformResult.FailResult("At least one transform field is required (position, scale, or rotation).");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
+
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return AttachmentTransformResult.FailResult("No current simulator available.");
+            }
+
+            if (!TryFindAttachedObjectForInventoryItem(client, itemUuid, out var attachedObjectId, out var attachedLocalId))
+            {
+                return AttachmentTransformResult.FailResult($"Unable to find a currently worn attachment object for inventory item {itemUuid}. The attachment may not be worn yet or object updates are still pending.");
+            }
+
+            if (!sim.ObjectsPrimitives.TryGetValue(attachedLocalId, out var prim))
+            {
+                return AttachmentTransformResult.FailResult($"Attachment object localId={attachedLocalId} was not found in simulator cache.");
+            }
+
+            if (hasPosition)
+            {
+                var targetPosition = new Vector3(
+                    positionX ?? prim.Position.X,
+                    positionY ?? prim.Position.Y,
+                    positionZ ?? prim.Position.Z);
+                targetPosition = ClampLocalPosition(targetPosition);
+                client.Objects.SetPosition(sim, attachedLocalId, targetPosition, childOnly);
+            }
+
+            if (hasScale)
+            {
+                var targetScale = new Vector3(
+                    scaleX ?? prim.Scale.X,
+                    scaleY ?? prim.Scale.Y,
+                    scaleZ ?? prim.Scale.Z);
+                targetScale = ClampScale(targetScale);
+                client.Objects.SetScale(sim, attachedLocalId, targetScale, childOnly, uniformScale);
+            }
+
+            if (hasRotation)
+            {
+                prim.Rotation.GetEulerAngles(out var currentRoll, out var currentPitch, out var currentYaw);
+                var targetRoll = (rollDegrees ?? (currentRoll * Utils.RAD_TO_DEG)) * Utils.DEG_TO_RAD;
+                var targetPitch = (pitchDegrees ?? (currentPitch * Utils.RAD_TO_DEG)) * Utils.DEG_TO_RAD;
+                var targetYaw = (yawDegrees ?? (currentYaw * Utils.RAD_TO_DEG)) * Utils.DEG_TO_RAD;
+                var targetRotation = Quaternion.CreateFromEulers(targetRoll, targetPitch, targetYaw);
+                client.Objects.SetRotation(sim, attachedLocalId, targetRotation, childOnly);
+            }
+
+            token.ThrowIfCancellationRequested();
+            return BuildAttachmentTransformResult(
+                itemUuid,
+                attachedObjectId,
+                attachedLocalId,
+                prim,
+                requestedUpdate: true,
+                $"Transform update requested for attached item {itemUuid}. Note: simulator applies attachment transform updates asynchronously and may constrain the final result.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task<List<OutfitCategoryResolutionInfo>> BuildOutfitCategoryResolutionsAsync(
         GridClient client,
         IReadOnlyList<InventoryItem> incomingItems,
@@ -235,7 +494,7 @@ internal sealed partial class BotSession
             IncrementCount(wornCounts, $"wearable:{wearable.WearableType}");
         }
 
-        foreach (var attachment in client.Appearance.GetAttachmentsByItemId())
+        foreach (var attachment in await CollectAttachmentPointMappingsAsync(client, cancellationToken).ConfigureAwait(false))
         {
             IncrementCount(wornCounts, $"attachment:{attachment.Value}");
         }
@@ -263,6 +522,62 @@ internal sealed partial class BotSession
         }
 
         map[key] = 1;
+    }
+
+    private static async Task<Dictionary<UUID, AttachmentPoint>> CollectAttachmentPointMappingsAsync(
+        GridClient client,
+        CancellationToken cancellationToken)
+    {
+        var merged = new Dictionary<UUID, AttachmentPoint>(client.Appearance.GetAttachmentsByItemId());
+
+        // Simulator object updates are often the most reliable source for what is currently attached.
+        var sim = client.Network.CurrentSim;
+        if (sim != null)
+        {
+            foreach (var prim in sim.ObjectsPrimitives.Values)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (prim == null || prim.NameValues == null || !prim.NameValues.Any())
+                {
+                    continue;
+                }
+
+                foreach (var nameValue in prim.NameValues)
+                {
+                    if (!nameValue.Name.Equals("AttachItemID", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var raw = nameValue.Value?.ToString();
+                    if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out var attachedItemId) && attachedItemId != UUID.Zero)
+                    {
+                        merged[attachedItemId] = prim.PrimData.AttachmentPoint;
+                    }
+                }
+            }
+        }
+
+        using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+        var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var link in links)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var resolved = cof.ResolveInventoryLink(link) ?? ResolveLinkedInventoryItem(client.Inventory.Store, link);
+            switch (resolved)
+            {
+                case InventoryAttachment attachment:
+                    merged[attachment.ResolvedItemID] = attachment.AttachmentPoint;
+                    break;
+                case InventoryObject obj:
+                    merged[obj.ResolvedItemID] = obj.AttachPoint;
+                    break;
+            }
+        }
+
+        return merged;
     }
 
     public async Task<BotToolResult> AppearanceAttachItemAsync(string itemId, string? attachmentPoint, bool replace, CancellationToken cancellationToken)
@@ -320,6 +635,283 @@ internal sealed partial class BotSession
             token.ThrowIfCancellationRequested();
             return BotToolResult.OkResult($"Appearance update requested (forceRebake={forceRebake}).");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AppearanceVisualParamsResult> AppearanceVisualParamsListAsync(
+        string? wearable,
+        string? nameContains,
+        bool editableOnly,
+        CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
+            var currentValues = client.Appearance.GetCurrentParamValues();
+
+            var wearableFilter = string.IsNullOrWhiteSpace(wearable) ? null : wearable.Trim();
+            var nameFilter = string.IsNullOrWhiteSpace(nameContains) ? null : nameContains.Trim();
+
+            var paramInfos = VisualParams.Params.Values
+                .Where(param =>
+                    (wearableFilter == null || string.Equals(param.Wearable, wearableFilter, StringComparison.OrdinalIgnoreCase)) &&
+                    (nameFilter == null || param.Name.Contains(nameFilter, StringComparison.OrdinalIgnoreCase)) &&
+                    (!editableOnly || param.Group == 0))
+                .Select(param =>
+                {
+                    var current = currentValues.TryGetValue(param.ParamID, out var value)
+                        ? value
+                        : param.DefaultValue;
+
+                    return new AppearanceVisualParamInfo(
+                        param.ParamID,
+                        param.Name,
+                        param.Wearable,
+                        param.Group,
+                        param.MinValue,
+                        param.MaxValue,
+                        param.DefaultValue,
+                        current,
+                        param.Group == 0);
+                })
+                .OrderBy(info => info.ParamId)
+                .ToList();
+
+            return AppearanceVisualParamsResult.OkResult(
+                paramInfos,
+                $"Collected {paramInfos.Count} visual parameter entries (editableOnly={editableOnly}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AppearanceVisualParamSetResult> AppearanceVisualParamSetAsync(
+        int? paramId,
+        string? paramName,
+        string? wearable,
+        float value,
+        bool clampToRange,
+        CancellationToken cancellationToken)
+    {
+        if (!float.IsFinite(value))
+        {
+            return AppearanceVisualParamSetResult.FailResult("value must be finite.");
+        }
+
+        var resolved = ResolveVisualParam(paramId, paramName, wearable);
+        if (!resolved.Ok || resolved.Param is null)
+        {
+            return AppearanceVisualParamSetResult.FailResult(resolved.Message);
+        }
+
+        var selected = resolved.Param.Value;
+        if (selected.Group != 0)
+        {
+            return AppearanceVisualParamSetResult.FailResult(
+                $"Visual param {selected.ParamID} ('{selected.Name}') is group {selected.Group} (driven/non-editable). Choose a group-0 driver parameter.");
+        }
+
+        var requestedValue = value;
+        var appliedValue = value;
+        var clamped = false;
+        if (appliedValue < selected.MinValue || appliedValue > selected.MaxValue)
+        {
+            if (!clampToRange)
+            {
+                return AppearanceVisualParamSetResult.FailResult(
+                    $"value {appliedValue} is out of range for param {selected.ParamID} ('{selected.Name}'): min={selected.MinValue}, max={selected.MaxValue}. Set clampToRange=true to clamp automatically.");
+            }
+
+            appliedValue = Math.Clamp(appliedValue, selected.MinValue, selected.MaxValue);
+            clamped = true;
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
+
+            var beforeValues = client.Appearance.GetCurrentParamValues();
+            var previousValue = beforeValues.TryGetValue(selected.ParamID, out var previous)
+                ? previous
+                : selected.DefaultValue;
+
+            var archetype = new GenepoolArchetype
+            {
+                Name = "mcp-visual-param-set",
+                Params = new[]
+                {
+                    new ArchetypeParam
+                    {
+                        Id = selected.ParamID,
+                        Name = selected.Name,
+                        Value = appliedValue
+                    }
+                }
+            };
+
+            await client.Appearance.ApplyArchetype(archetype).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+
+            var afterValues = client.Appearance.GetCurrentParamValues();
+            var resultingValue = afterValues.TryGetValue(selected.ParamID, out var after)
+                ? after
+                : appliedValue;
+
+            var changed = Math.Abs(resultingValue - previousValue) > 0.0001f;
+            var message = changed
+                ? $"Updated visual param {selected.ParamID} ('{selected.Name}') from {previousValue} to {resultingValue}; force rebake requested."
+                : $"Visual param {selected.ParamID} ('{selected.Name}') remains {resultingValue}; force rebake requested. If this is unexpected, refresh worn state and retry.";
+
+            return AppearanceVisualParamSetResult.OkResult(
+                selected.ParamID,
+                selected.Name,
+                selected.Wearable,
+                previousValue,
+                requestedValue,
+                resultingValue,
+                selected.MinValue,
+                selected.MaxValue,
+                clamped,
+                changed,
+                message);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AppearanceBakeDiagnosticsResult> AppearanceBakeDiagnosticsAsync(
+        bool requestCacheProbe,
+        int cacheProbeTimeoutMs,
+        CancellationToken cancellationToken)
+    {
+        if (cacheProbeTimeoutMs < 100 || cacheProbeTimeoutMs > 15000)
+        {
+            return AppearanceBakeDiagnosticsResult.FailResult("cacheProbeTimeoutMs must be between 100 and 15000.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
+
+            var currentValues = client.Appearance.GetCurrentParamValues();
+            var nonDefaultCount = 0;
+            foreach (var param in VisualParams.Params.Values)
+            {
+                var current = currentValues.TryGetValue(param.ParamID, out var value)
+                    ? value
+                    : param.DefaultValue;
+                if (Math.Abs(current - param.DefaultValue) > 0.0001f)
+                {
+                    nonDefaultCount++;
+                }
+            }
+
+            var cacheProbeCompleted = false;
+            var cacheProbeElapsedMs = 0;
+            if (requestCacheProbe)
+            {
+                var sw = Stopwatch.StartNew();
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                EventHandler<AgentCachedBakesReplyEventArgs> onCached = (_, _) => tcs.TrySetResult(true);
+                client.Appearance.CachedBakesReply += onCached;
+                try
+                {
+                    client.Appearance.RequestCachedBakes();
+                    var completed = await Task.WhenAny(tcs.Task, Task.Delay(cacheProbeTimeoutMs, token)).ConfigureAwait(false);
+                    cacheProbeCompleted = completed == tcs.Task && tcs.Task.IsCompletedSuccessfully;
+                }
+                finally
+                {
+                    client.Appearance.CachedBakesReply -= onCached;
+                    sw.Stop();
+                    cacheProbeElapsedMs = (int)sw.ElapsedMilliseconds;
+                }
+            }
+
+            var bakedTextures = BuildBakeDiagnostics(client.Appearance.MyTextures);
+            var message = requestCacheProbe
+                ? (cacheProbeCompleted
+                    ? $"Collected bake diagnostics and cache probe reply in {cacheProbeElapsedMs}ms."
+                    : $"Collected bake diagnostics; cache probe timed out after {cacheProbeElapsedMs}ms.")
+                : "Collected bake diagnostics from current appearance state.";
+
+            return AppearanceBakeDiagnosticsResult.OkResult(
+                client.Appearance.ServerBakingRegion(),
+                client.Appearance.ManagerBusy,
+                client.Appearance.MyVisualParameters.Length,
+                currentValues.Count,
+                nonDefaultCount,
+                requestCacheProbe,
+                cacheProbeCompleted,
+                cacheProbeElapsedMs,
+                bakedTextures,
+                message);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static (bool Ok, string Message, VisualParam? Param) ResolveVisualParam(int? paramId, string? paramName, string? wearable)
+    {
+        if (paramId.HasValue)
+        {
+            if (!VisualParams.Params.TryGetValue(paramId.Value, out var byId))
+            {
+                return (false, $"Unknown visual param id {paramId.Value}.", null);
+            }
+
+            if (!string.IsNullOrWhiteSpace(wearable)
+                && !string.Equals(byId.Wearable, wearable.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return (false, $"Param id {paramId.Value} is wearable='{byId.Wearable}', not '{wearable.Trim()}'.", null);
+            }
+
+            return (true, string.Empty, byId);
+        }
+
+        if (string.IsNullOrWhiteSpace(paramName))
+        {
+            return (false, "Provide either paramId or paramName.", null);
+        }
+
+        var name = paramName.Trim();
+        var wearableFilter = string.IsNullOrWhiteSpace(wearable) ? null : wearable.Trim();
+        var matches = VisualParams.Params.Values
+            .Where(param => string.Equals(param.Name, name, StringComparison.OrdinalIgnoreCase)
+                && (wearableFilter == null || string.Equals(param.Wearable, wearableFilter, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            return wearableFilter == null
+                ? (false, $"No visual param matched name '{name}'.", null)
+                : (false, $"No visual param matched name '{name}' with wearable '{wearableFilter}'.", null);
+        }
+
+        if (matches.Count > 1)
+        {
+            var options = string.Join(", ", matches.Select(match => $"{match.ParamID}:{match.Wearable}"));
+            return (false, $"Param name '{name}' is ambiguous. Pass wearable or paramId. Matches: {options}", null);
+        }
+
+        return (true, string.Empty, matches[0]);
+    }
+
+    private static IReadOnlyList<AppearanceBakeTextureInfo> BuildBakeDiagnostics(Primitive.TextureEntry textures)
+    {
+        var list = new List<AppearanceBakeTextureInfo>(AppearanceManager.BAKED_TEXTURE_COUNT);
+        for (var bakeIndex = 0; bakeIndex < AppearanceManager.BAKED_TEXTURE_COUNT; bakeIndex++)
+        {
+            var bakeType = (BakeType)bakeIndex;
+            var textureIndex = (AvatarTextureIndex)AppearanceManager.BakeIndexToTextureIndex[bakeIndex];
+            var face = textures.GetFace((uint)textureIndex) ?? textures.DefaultTexture;
+            var textureId = face?.TextureID ?? UUID.Zero;
+            var hasTexture = textureId != UUID.Zero;
+            var isDefaultTexture = textureId == AppearanceManager.DEFAULT_AVATAR_TEXTURE;
+
+            list.Add(new AppearanceBakeTextureInfo(
+                bakeType.ToString(),
+                textureIndex.ToString(),
+                (int)textureIndex,
+                textureId.ToString(),
+                hasTexture,
+                isDefaultTexture));
+        }
+
+        return list;
     }
 
     public async Task<ScriptUpdateResult> ScriptUploadAgentAsync(string source, string itemId, bool mono, CancellationToken cancellationToken)
@@ -1863,6 +2455,26 @@ internal sealed partial class BotSession
         }
     }
 
+    private async Task<AttachmentTransformResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AttachmentTransformResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AttachmentTransformResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
     private void OnInventoryObjectOffered(object? sender, InventoryObjectOfferedEventArgs e)
     {
         var fromAgentId = e.Offer.FromAgentID.ToString();
@@ -2476,6 +3088,33 @@ internal sealed partial class BotSession
         return false;
     }
 
+    private static AttachmentTransformResult BuildAttachmentTransformResult(
+        UUID itemId,
+        UUID objectId,
+        uint localId,
+        Primitive prim,
+        bool requestedUpdate,
+        string message)
+    {
+        prim.Rotation.GetEulerAngles(out var roll, out var pitch, out var yaw);
+        return AttachmentTransformResult.OkResult(
+            itemId.ToString(),
+            objectId.ToString(),
+            localId,
+            prim.PrimData.AttachmentPoint.ToString(),
+            prim.Position.X,
+            prim.Position.Y,
+            prim.Position.Z,
+            prim.Scale.X,
+            prim.Scale.Y,
+            prim.Scale.Z,
+            roll * Utils.RAD_TO_DEG,
+            pitch * Utils.RAD_TO_DEG,
+            yaw * Utils.RAD_TO_DEG,
+            requestedUpdate,
+            message);
+    }
+
     private bool TryGetPinnedBridgeObjectInCurrentSim(out UUID objectId, out uint localId)
     {
         objectId = UUID.Zero;
@@ -2908,6 +3547,93 @@ internal sealed record OutfitSaveResult(bool Ok, string Message, string? FolderI
         => new(false, message, null, 0, 0);
 }
 
+internal sealed record WearableDirectControlResult(
+    bool Ok,
+    string Message,
+    string? WearableType,
+    int WornCount,
+    int RemovedCount,
+    IReadOnlyList<string> RemovedItemIds)
+{
+    public static WearableDirectControlResult OkResult(
+        string? wearableType,
+        int wornCount,
+        int removedCount,
+        IReadOnlyList<string> removedItemIds,
+        string message)
+        => new(true, message, wearableType, wornCount, removedCount, removedItemIds);
+
+    public static WearableDirectControlResult FailResult(string message)
+        => new(false, message, null, 0, 0, Array.Empty<string>());
+}
+
+internal sealed record AttachmentPointMappingInfo(string ItemId, string ItemName, string AttachmentPoint);
+
+internal sealed record AttachmentPointMappingResult(bool Ok, string Message, IReadOnlyList<AttachmentPointMappingInfo> Mappings)
+{
+    public static AttachmentPointMappingResult OkResult(IReadOnlyList<AttachmentPointMappingInfo> mappings, string message)
+        => new(true, message, mappings);
+
+    public static AttachmentPointMappingResult FailResult(string message)
+        => new(false, message, Array.Empty<AttachmentPointMappingInfo>());
+}
+
+internal sealed record AttachmentTransformResult(
+    bool Ok,
+    string Message,
+    string? ItemId,
+    string? ObjectId,
+    uint LocalId,
+    string? AttachmentPoint,
+    float? PositionX,
+    float? PositionY,
+    float? PositionZ,
+    float? ScaleX,
+    float? ScaleY,
+    float? ScaleZ,
+    float? RollDegrees,
+    float? PitchDegrees,
+    float? YawDegrees,
+    bool RequestedUpdate)
+{
+    public static AttachmentTransformResult OkResult(
+        string itemId,
+        string objectId,
+        uint localId,
+        string attachmentPoint,
+        float positionX,
+        float positionY,
+        float positionZ,
+        float scaleX,
+        float scaleY,
+        float scaleZ,
+        float rollDegrees,
+        float pitchDegrees,
+        float yawDegrees,
+        bool requestedUpdate,
+        string message)
+        => new(
+            true,
+            message,
+            itemId,
+            objectId,
+            localId,
+            attachmentPoint,
+            positionX,
+            positionY,
+            positionZ,
+            scaleX,
+            scaleY,
+            scaleZ,
+            rollDegrees,
+            pitchDegrees,
+            yawDegrees,
+            requestedUpdate);
+
+    public static AttachmentTransformResult FailResult(string message)
+        => new(false, message, null, null, 0, null, null, null, null, null, null, null, null, null, null, false);
+}
+
 internal sealed record AppearanceStateResult(
     bool Ok,
     string Message,
@@ -2919,6 +3645,107 @@ internal sealed record AppearanceStateResult(
 
     public static AppearanceStateResult FailResult(string message)
         => new(false, message, Array.Empty<WearableInfo>(), Array.Empty<AttachmentInfo>());
+}
+
+internal sealed record AppearanceVisualParamInfo(
+    int ParamId,
+    string Name,
+    string? Wearable,
+    int Group,
+    float MinValue,
+    float MaxValue,
+    float DefaultValue,
+    float CurrentValue,
+    bool Editable);
+
+internal sealed record AppearanceVisualParamsResult(bool Ok, string Message, IReadOnlyList<AppearanceVisualParamInfo> Params)
+{
+    public static AppearanceVisualParamsResult OkResult(IReadOnlyList<AppearanceVisualParamInfo> parameters, string message)
+        => new(true, message, parameters);
+
+    public static AppearanceVisualParamsResult FailResult(string message)
+        => new(false, message, Array.Empty<AppearanceVisualParamInfo>());
+}
+
+internal sealed record AppearanceVisualParamSetResult(
+    bool Ok,
+    string Message,
+    int? ParamId,
+    string? Name,
+    string? Wearable,
+    float? PreviousValue,
+    float? RequestedValue,
+    float? AppliedValue,
+    float? MinValue,
+    float? MaxValue,
+    bool Clamped,
+    bool Changed)
+{
+    public static AppearanceVisualParamSetResult OkResult(
+        int paramId,
+        string name,
+        string? wearable,
+        float previousValue,
+        float requestedValue,
+        float appliedValue,
+        float minValue,
+        float maxValue,
+        bool clamped,
+        bool changed,
+        string message)
+        => new(true, message, paramId, name, wearable, previousValue, requestedValue, appliedValue, minValue, maxValue, clamped, changed);
+
+    public static AppearanceVisualParamSetResult FailResult(string message)
+        => new(false, message, null, null, null, null, null, null, null, null, false, false);
+}
+
+internal sealed record AppearanceBakeTextureInfo(
+    string BakeType,
+    string TextureIndex,
+    int TextureIndexValue,
+    string TextureId,
+    bool HasTexture,
+    bool IsDefaultTexture);
+
+internal sealed record AppearanceBakeDiagnosticsResult(
+    bool Ok,
+    string Message,
+    bool ServerBakingRegion,
+    bool AppearanceManagerBusy,
+    int VisualParamBytes,
+    int VisualParamCount,
+    int NonDefaultVisualParamCount,
+    bool CacheProbeRequested,
+    bool CacheProbeCompleted,
+    int CacheProbeElapsedMs,
+    IReadOnlyList<AppearanceBakeTextureInfo> BakedTextures)
+{
+    public static AppearanceBakeDiagnosticsResult OkResult(
+        bool serverBakingRegion,
+        bool appearanceManagerBusy,
+        int visualParamBytes,
+        int visualParamCount,
+        int nonDefaultVisualParamCount,
+        bool cacheProbeRequested,
+        bool cacheProbeCompleted,
+        int cacheProbeElapsedMs,
+        IReadOnlyList<AppearanceBakeTextureInfo> bakedTextures,
+        string message)
+        => new(
+            true,
+            message,
+            serverBakingRegion,
+            appearanceManagerBusy,
+            visualParamBytes,
+            visualParamCount,
+            nonDefaultVisualParamCount,
+            cacheProbeRequested,
+            cacheProbeCompleted,
+            cacheProbeElapsedMs,
+            bakedTextures);
+
+    public static AppearanceBakeDiagnosticsResult FailResult(string message)
+        => new(false, message, false, false, 0, 0, 0, false, false, 0, Array.Empty<AppearanceBakeTextureInfo>());
 }
 
 internal sealed record ScriptUpdateResult(

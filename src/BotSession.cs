@@ -47,6 +47,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly SemaphoreSlim _actionGate = new(1, 1);
     private readonly IOpencodeChatClient? _opencodeChat;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentImEvents = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<UUID, DateTimeOffset> _primPropertiesRefreshedAtByObjectId = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _imConversationLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ImConversationConfig> _imConversationConfigs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OpencodeUsageSummary> _latestUsageByConversation = new(StringComparer.Ordinal);
@@ -1259,54 +1260,302 @@ internal sealed partial class BotSession : IDisposable
                 return Task.FromResult(PrimInspectResult.FailResult($"Prim {localId} not found in current simulator cache."));
             }
 
-            var faceTextures = new List<PrimFaceTextureInfo>();
-            string? defaultTextureId = null;
-            if (prim.Textures?.DefaultTexture != null)
-            {
-                defaultTextureId = prim.Textures.DefaultTexture.TextureID.ToString();
-            }
-
-            if (includeFaceTextures && prim.Textures != null)
-            {
-                for (var i = 0; i < Primitive.TextureEntry.MAX_FACES; i++)
-                {
-                    var face = prim.Textures.FaceTextures[i];
-                    if (face == null)
-                    {
-                        continue;
-                    }
-
-                    faceTextures.Add(new PrimFaceTextureInfo(i, face.TextureID.ToString()));
-                }
-            }
-
-            var info = new PrimInfo(
-                prim.LocalID,
-                prim.ID.ToString(),
-                prim.ParentID,
-                prim.Type.ToString(),
-                prim.PrimData.PathCurve.ToString(),
-                prim.PrimData.ProfileCurve.ToString(),
-                prim.PrimData.Material.ToString(),
-                prim.Position.X,
-                prim.Position.Y,
-                prim.Position.Z,
-                prim.Scale.X,
-                prim.Scale.Y,
-                prim.Scale.Z,
-                prim.Rotation.X,
-                prim.Rotation.Y,
-                prim.Rotation.Z,
-                prim.Rotation.W,
-                prim.Properties?.Name,
-                prim.Properties?.Description,
-                prim.Properties?.OwnerID.ToString(),
-                prim.Properties?.CreatorID.ToString(),
-                defaultTextureId,
-                faceTextures);
+            var info = BuildPrimInfo(
+                prim,
+                includeFaceTextures,
+                refreshRequested: false,
+                refreshReceived: false,
+                refreshDetail: "Using simulator cache only (no explicit property refresh requested).",
+                refreshedAtUtc: null);
 
             return Task.FromResult(PrimInspectResult.OkResult(info));
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PrimInspectResult> FetchPrimPropertiesAsync(
+        uint localId,
+        bool includeFaceTextures,
+        float waitTimeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        if (waitTimeoutSeconds <= 0f || waitTimeoutSeconds > 30f)
+        {
+            return PrimInspectResult.FailResult("waitTimeoutSeconds must be > 0 and <= 30.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return PrimInspectResult.FailResult("No current simulator available.");
+            }
+
+            if (!sim.ObjectsPrimitives.TryGetValue(localId, out var prim))
+            {
+                return PrimInspectResult.FailResult($"Prim {localId} not found in current simulator cache.");
+            }
+
+            var refresh = await RefreshPrimPropertiesAsync(
+                client,
+                sim,
+                prim,
+                TimeSpan.FromSeconds(waitTimeoutSeconds),
+                token).ConfigureAwait(false);
+
+            var info = BuildPrimInfo(
+                prim,
+                includeFaceTextures,
+                refreshRequested: true,
+                refreshReceived: refresh.Received,
+                refreshDetail: refresh.Detail,
+                refreshedAtUtc: refresh.RefreshedAtUtc);
+
+            var message = refresh.Received
+                ? $"Fetched refreshed prim properties for localId={localId}."
+                : $"Property refresh timed out for localId={localId}; returned best-effort cached data.";
+
+            return PrimInspectResult.OkResult(info, message);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<(bool Received, string Detail, DateTimeOffset? RefreshedAtUtc)> RefreshPrimPropertiesAsync(
+        GridClient client,
+        Simulator simulator,
+        Primitive prim,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var familyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fullTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        DateTimeOffset? refreshedAtUtc = null;
+
+        void MarkRefreshed()
+        {
+            refreshedAtUtc = DateTimeOffset.UtcNow;
+            _primPropertiesRefreshedAtByObjectId[prim.ID] = refreshedAtUtc.Value;
+        }
+
+        void OnObjectPropertiesFamily(object? sender, ObjectPropertiesFamilyEventArgs e)
+        {
+            if (!ReferenceEquals(e.Simulator, simulator) || e.Properties.ObjectID != prim.ID)
+            {
+                return;
+            }
+
+            prim.Properties ??= new Primitive.ObjectProperties();
+            prim.Properties.SetFamilyProperties(e.Properties);
+            MarkRefreshed();
+            familyTcs.TrySetResult(true);
+        }
+
+        void OnObjectPropertiesUpdated(object? sender, ObjectPropertiesUpdatedEventArgs e)
+        {
+            if (!ReferenceEquals(e.Simulator, simulator) || e.Prim.LocalID != prim.LocalID)
+            {
+                return;
+            }
+
+            prim.Properties = e.Properties;
+            MarkRefreshed();
+            fullTcs.TrySetResult(true);
+        }
+
+        client.Objects.ObjectPropertiesFamily += OnObjectPropertiesFamily;
+        client.Objects.ObjectPropertiesUpdated += OnObjectPropertiesUpdated;
+
+        try
+        {
+            client.Objects.RequestObjectPropertiesFamily(simulator, prim.ID);
+            client.Objects.SelectObject(simulator, prim.LocalID, automaticDeselect: true);
+
+            var waitTask = Task.Delay(timeout, cancellationToken);
+            var bothTask = Task.WhenAll(familyTcs.Task, fullTcs.Task);
+            var completed = await Task.WhenAny(bothTask, waitTask).ConfigureAwait(false);
+
+            if (completed == bothTask)
+            {
+                return (true, "Received both family and full object property updates.", refreshedAtUtc);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var gotFamily = familyTcs.Task.IsCompletedSuccessfully;
+            var gotFull = fullTcs.Task.IsCompletedSuccessfully;
+            var gotAny = gotFamily || gotFull;
+            var detail = gotAny
+                ? $"Timed out waiting for full property refresh ({(gotFamily ? "family " : string.Empty)}{(gotFull ? "full" : string.Empty)} update received)."
+                : "Timed out waiting for object property refresh updates.";
+            return (gotAny, detail.Trim(), refreshedAtUtc);
+        }
+        finally
+        {
+            client.Objects.ObjectPropertiesFamily -= OnObjectPropertiesFamily;
+            client.Objects.ObjectPropertiesUpdated -= OnObjectPropertiesUpdated;
+        }
+    }
+
+    private PrimInfo BuildPrimInfo(
+        Primitive prim,
+        bool includeFaceTextures,
+        bool refreshRequested,
+        bool refreshReceived,
+        string refreshDetail,
+        DateTimeOffset? refreshedAtUtc)
+    {
+        var faceTextures = new List<PrimFaceTextureInfo>();
+        string? defaultTextureId = null;
+        if (prim.Textures?.DefaultTexture != null)
+        {
+            defaultTextureId = prim.Textures.DefaultTexture.TextureID.ToString();
+        }
+
+        if (includeFaceTextures && prim.Textures != null)
+        {
+            for (var i = 0; i < Primitive.TextureEntry.MAX_FACES; i++)
+            {
+                var face = prim.Textures.FaceTextures[i];
+                if (face == null)
+                {
+                    continue;
+                }
+
+                faceTextures.Add(new PrimFaceTextureInfo(i, face.TextureID.ToString()));
+            }
+        }
+
+        var properties = prim.Properties;
+        var permissions = properties == null
+            ? null
+            : new PrimPermissionsInfo(
+                (uint)properties.Permissions.BaseMask,
+                (uint)properties.Permissions.OwnerMask,
+                (uint)properties.Permissions.GroupMask,
+                (uint)properties.Permissions.EveryoneMask,
+                (uint)properties.Permissions.NextOwnerMask);
+
+        var sale = properties == null
+            ? null
+            : new PrimSaleInfo(properties.SaleType.ToString(), properties.SalePrice);
+
+        var sitNamePresent = !string.IsNullOrWhiteSpace(properties?.SitName);
+        var clickActionSit = prim.ClickAction == ClickAction.Sit;
+        var likelySittablePrim = !prim.IsAttachment;
+        var isSittable = sitNamePresent || clickActionSit || likelySittablePrim;
+        var sitDetection = sitNamePresent
+            ? "SitName is populated on object properties."
+            : clickActionSit
+                ? "ClickAction is Sit."
+                : likelySittablePrim
+                    ? "Prim is non-attachment; most in-world prims can be sat even when SitName is empty."
+                    : "No sit indicators found from cached properties/click action.";
+
+        var sit = new PrimSitInfo(
+            properties?.SitName,
+            properties?.TouchName,
+            isSittable,
+            prim.ClickAction.ToString(),
+            sitDetection);
+
+        var flexible = prim.Flexible == null
+            ? null
+            : new PrimFlexibleInfo(
+                prim.Flexible.Softness,
+                prim.Flexible.Tension,
+                prim.Flexible.Drag,
+                prim.Flexible.Gravity,
+                prim.Flexible.Wind,
+                prim.Flexible.Force.X,
+                prim.Flexible.Force.Y,
+                prim.Flexible.Force.Z);
+
+        var light = prim.Light == null
+            ? null
+            : new PrimLightInfo(
+                prim.Light.Color.R,
+                prim.Light.Color.G,
+                prim.Light.Color.B,
+                prim.Light.Intensity,
+                prim.Light.Radius,
+                prim.Light.Cutoff,
+                prim.Light.Falloff);
+
+        var sculpt = prim.Sculpt == null
+            ? null
+            : new PrimSculptInfo(
+                prim.Sculpt.SculptTexture.ToString(),
+                prim.Sculpt.Type.ToString(),
+                prim.Sculpt.Type == SculptType.Mesh,
+                prim.Sculpt.Invert,
+                prim.Sculpt.Mirror,
+                prim.ExtendedMeshFlags);
+
+        var shape = new PrimShapeDetail(
+            prim.PrimData.PathCurve.ToString(),
+            prim.PrimData.ProfileCurve.ToString(),
+            prim.PrimData.ProfileHole.ToString(),
+            prim.PrimData.Material.ToString(),
+            prim.PrimData.PathBegin,
+            prim.PrimData.PathEnd,
+            prim.PrimData.PathScaleX,
+            prim.PrimData.PathScaleY,
+            prim.PrimData.PathShearX,
+            prim.PrimData.PathShearY,
+            prim.PrimData.PathTwist,
+            prim.PrimData.PathTwistBegin,
+            prim.PrimData.PathTaperX,
+            prim.PrimData.PathTaperY,
+            prim.PrimData.PathRadiusOffset,
+            prim.PrimData.PathSkew,
+            prim.PrimData.PathRevolutions,
+            prim.PrimData.ProfileBegin,
+            prim.PrimData.ProfileEnd,
+            prim.PrimData.ProfileHollow);
+
+        var freshestAt = refreshedAtUtc;
+        if (!freshestAt.HasValue && _primPropertiesRefreshedAtByObjectId.TryGetValue(prim.ID, out var cachedRefresh))
+        {
+            freshestAt = cachedRefresh;
+        }
+
+        var freshness = new PrimPropertyFreshnessInfo(
+            refreshRequested,
+            refreshReceived,
+            freshestAt?.ToString("O"),
+            refreshDetail);
+
+        return new PrimInfo(
+            prim.LocalID,
+            prim.ID.ToString(),
+            prim.ParentID,
+            prim.Type.ToString(),
+            prim.PrimData.PathCurve.ToString(),
+            prim.PrimData.ProfileCurve.ToString(),
+            prim.PrimData.Material.ToString(),
+            prim.Position.X,
+            prim.Position.Y,
+            prim.Position.Z,
+            prim.Scale.X,
+            prim.Scale.Y,
+            prim.Scale.Z,
+            prim.Rotation.X,
+            prim.Rotation.Y,
+            prim.Rotation.Z,
+            prim.Rotation.W,
+            properties?.Name,
+            properties?.Description,
+            properties?.OwnerID.ToString(),
+            properties?.CreatorID.ToString(),
+            defaultTextureId,
+            faceTextures,
+            shape,
+            permissions,
+            sale,
+            sit,
+            flexible,
+            light,
+            sculpt,
+            freshness);
     }
 
     public async Task<BotToolResult> SelectPrimAsync(uint localId, bool automaticDeselect, CancellationToken cancellationToken)
@@ -2287,6 +2536,26 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
+    private async Task<LinksetInspectResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<LinksetInspectResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return LinksetInspectResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
     private async Task<BotToolResult> ExecuteLockedAsync(
         Func<GridClient, CancellationToken, Task<BotToolResult>> action,
         CancellationToken cancellationToken)
@@ -2360,6 +2629,106 @@ internal sealed partial class BotSession : IDisposable
         catch (Exception ex)
         {
             return DataToolResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<WearableDirectControlResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<WearableDirectControlResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return WearableDirectControlResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AttachmentPointMappingResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AttachmentPointMappingResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AttachmentPointMappingResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AppearanceVisualParamsResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AppearanceVisualParamsResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AppearanceVisualParamsResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AppearanceVisualParamSetResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AppearanceVisualParamSetResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AppearanceVisualParamSetResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AppearanceBakeDiagnosticsResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AppearanceBakeDiagnosticsResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AppearanceBakeDiagnosticsResult.FailResult(ex.Message);
         }
         finally
         {
@@ -7436,11 +7805,90 @@ internal sealed record PrimInfo(
     string? OwnerId,
     string? CreatorId,
     string? DefaultTextureId,
-    IReadOnlyList<PrimFaceTextureInfo> FaceTextureOverrides);
+    IReadOnlyList<PrimFaceTextureInfo> FaceTextureOverrides,
+    PrimShapeDetail Shape,
+    PrimPermissionsInfo? Permissions,
+    PrimSaleInfo? Sale,
+    PrimSitInfo? Sit,
+    PrimFlexibleInfo? Flexible,
+    PrimLightInfo? Light,
+    PrimSculptInfo? Sculpt,
+    PrimPropertyFreshnessInfo Freshness);
+
+internal sealed record PrimShapeDetail(
+    string PathCurve,
+    string ProfileCurve,
+    string ProfileHole,
+    string Material,
+    float PathBegin,
+    float PathEnd,
+    float PathScaleX,
+    float PathScaleY,
+    float PathShearX,
+    float PathShearY,
+    float PathTwist,
+    float PathTwistBegin,
+    float PathTaperX,
+    float PathTaperY,
+    float PathRadiusOffset,
+    float PathSkew,
+    float PathRevolutions,
+    float ProfileBegin,
+    float ProfileEnd,
+    float ProfileHollow);
+
+internal sealed record PrimPermissionsInfo(
+    uint BaseMask,
+    uint OwnerMask,
+    uint GroupMask,
+    uint EveryoneMask,
+    uint NextOwnerMask);
+
+internal sealed record PrimSaleInfo(string SaleType, int SalePrice);
+
+internal sealed record PrimSitInfo(
+    string? SitName,
+    string? TouchName,
+    bool IsSittable,
+    string ClickAction,
+    string Detection);
+
+internal sealed record PrimFlexibleInfo(
+    int Softness,
+    float Tension,
+    float Drag,
+    float Gravity,
+    float Wind,
+    float ForceX,
+    float ForceY,
+    float ForceZ);
+
+internal sealed record PrimLightInfo(
+    float Red,
+    float Green,
+    float Blue,
+    float Intensity,
+    float Radius,
+    float Cutoff,
+    float Falloff);
+
+internal sealed record PrimSculptInfo(
+    string SculptTextureId,
+    string SculptType,
+    bool IsMesh,
+    bool Invert,
+    bool Mirror,
+    uint ExtendedMeshFlags);
+
+internal sealed record PrimPropertyFreshnessInfo(
+    bool RefreshRequested,
+    bool RefreshReceived,
+    string? RefreshedAtUtc,
+    string Detail);
 
 internal sealed record PrimInspectResult(bool Ok, string Message, PrimInfo? Prim)
 {
-    public static PrimInspectResult OkResult(PrimInfo prim) => new(true, "OK", prim);
+    public static PrimInspectResult OkResult(PrimInfo prim, string message = "OK") => new(true, message, prim);
     public static PrimInspectResult FailResult(string message) => new(false, message, null);
 }
 
@@ -7448,6 +7896,30 @@ internal sealed record PrimQueryResult(bool Ok, string Message, IReadOnlyList<Pr
 {
     public static PrimQueryResult OkResult(IReadOnlyList<PrimSummary> prims, string message) => new(true, message, prims);
     public static PrimQueryResult FailResult(string message) => new(false, message, Array.Empty<PrimSummary>());
+}
+
+internal sealed record LinksetNodeInfo(
+    uint LocalId,
+    string Uuid,
+    uint ParentId,
+    bool IsRoot,
+    int Order,
+    string? Name,
+    string PrimType,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    float ScaleX,
+    float ScaleY,
+    float ScaleZ);
+
+internal sealed record LinksetInspectResult(bool Ok, string Message, uint RootLocalId, IReadOnlyList<LinksetNodeInfo> Nodes)
+{
+    public static LinksetInspectResult OkResult(uint rootLocalId, IReadOnlyList<LinksetNodeInfo> nodes, string message)
+        => new(true, message, rootLocalId, nodes);
+
+    public static LinksetInspectResult FailResult(string message)
+        => new(false, message, 0, Array.Empty<LinksetNodeInfo>());
 }
 
 internal sealed record CameraState(
