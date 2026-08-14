@@ -105,6 +105,11 @@ internal sealed partial class BotSession : IDisposable
     private const int TypingPulseMinimumIntervalMs = 2000;
     private const int TypingStopDelayMs = 2500;
     private const int HoverBusyUpdateMinimumIntervalMs = 600;
+    private const float WalkProgressThresholdMeters = 1.5f;
+    private const float WalkStuckWindowSeconds = 6f;
+    private const int WalkRecoveryMaxAttempts = 5;
+    private const bool EnableWalkTeleportFallback = true;
+    private static readonly string[] DoorHintKeywords = new[] { "door", "gate", "entry", "entrance", "open", "lobby" };
     private static readonly IReadOnlyList<string> LslPermissionDialogOptions = new[] { "yes", "no", "yes always", "no always" };
 
     private const string BuiltInBridgePrompt =
@@ -119,6 +124,9 @@ internal sealed partial class BotSession : IDisposable
         "Operating rules:\n" +
         "- Prefer safe and reversible actions.\n" +
         "- Confirm destructive or high-impact actions first (delete, bulk changes, ownership/permission changes, restarts).\n" +
+        "- Attachment and wearable controls are different: use attachment tools for attachments/objects and wearable tools for clothing/body layers.\n" +
+        "- If asked to 'detach/remove attachments', use appearance_detach_all_attachments_except (empty keep filters unless exclusions are requested), then re-check with appearance_list_attachment_point_mappings. Avoid item-by-item detach loops unless explicitly requested.\n" +
+        "- If asked to remove everything worn, use appearance_detach_and_remove_all_worn_deterministic, then re-check and report both attachment and wearable sections separately.\n" +
         "- Ask concise clarifying questions when instructions are ambiguous or missing required identifiers.\n" +
         "- For multi-step tasks, inspect -> plan -> execute -> verify and report results clearly.\n" +
         "- Respect handler and policy restrictions configured by the bridge.";
@@ -2903,16 +2911,27 @@ internal sealed partial class BotSession : IDisposable
                     (int)MathF.Round(waypoint.Y),
                     waypoint.Z);
 
-                var reached = await WaitForArrivalAsync(
+                var reached = await WaitForArrivalWithRecoveryAsync(
                         client,
+                        sim,
                         waypoint,
                         step == steps ? 1.5f : 2.5f,
                         TimeSpan.FromSeconds(timeoutSeconds),
+                        fly,
                         cancellationToken)
                     .ConfigureAwait(false);
 
                 if (!reached)
                 {
+                    if (!fly && EnableWalkTeleportFallback)
+                    {
+                        var recoveredByTeleport = await TryWalkTeleportFallbackAsync(client, sim, waypoint, cancellationToken).ConfigureAwait(false);
+                        if (recoveredByTeleport)
+                        {
+                            continue;
+                        }
+                    }
+
                     var atTimeout = client.Self.SimPosition;
                     return BotToolResult.Fail(
                         $"Movement timed out on step {step}/{steps}. Current {FormatVector(atTimeout)}, waypoint {FormatVector(waypoint)}, final target {FormatVector(target)}.");
@@ -2926,6 +2945,246 @@ internal sealed partial class BotSession : IDisposable
 
         var mode = fly ? "flying" : "walking";
         return BotToolResult.OkResult($"Moved by {mode} from {FormatVector(from)} to {FormatVector(client.Self.SimPosition)}.");
+    }
+
+    private async Task<bool> WaitForArrivalWithRecoveryAsync(
+        GridClient client,
+        Simulator sim,
+        Vector3 target,
+        float tolerance,
+        TimeSpan timeout,
+        bool fly,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = DateTime.UtcNow;
+        var bestDistance = Vector3.Distance(client.Self.SimPosition, target);
+        var lastProgressAt = startedAt;
+        var recoveryAttempts = 0;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var at = client.Self.SimPosition;
+            var distance = Vector3.Distance(at, target);
+            if (distance <= tolerance)
+            {
+                return true;
+            }
+
+            if ((bestDistance - distance) >= WalkProgressThresholdMeters)
+            {
+                bestDistance = distance;
+                lastProgressAt = DateTime.UtcNow;
+            }
+
+            if ((DateTime.UtcNow - lastProgressAt) >= TimeSpan.FromSeconds(WalkStuckWindowSeconds))
+            {
+                recoveryAttempts++;
+                if (recoveryAttempts > WalkRecoveryMaxAttempts)
+                {
+                    return false;
+                }
+
+                var recovered = false;
+                if (!fly)
+                {
+                    recovered = await TryDoorInteractionRecoveryAsync(client, sim, at, target, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (!recovered)
+                {
+                    recovered = await TryDetourRecoveryAsync(client, at, target, recoveryAttempts, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (!recovered)
+                {
+                    return false;
+                }
+
+                client.Self.AutoPilotLocal(
+                    (int)MathF.Round(target.X),
+                    (int)MathF.Round(target.Y),
+                    target.Z);
+
+                bestDistance = Vector3.Distance(client.Self.SimPosition, target);
+                lastProgressAt = DateTime.UtcNow;
+            }
+
+            if ((DateTime.UtcNow - startedAt) >= timeout)
+            {
+                return false;
+            }
+
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryDoorInteractionRecoveryAsync(
+        GridClient client,
+        Simulator sim,
+        Vector3 from,
+        Vector3 target,
+        CancellationToken cancellationToken)
+    {
+        var candidates = sim.ObjectsPrimitives.Values
+            .Where(p => p != null && !p.IsAttachment)
+            .Where(p => Vector3.Distance(from, p.Position) <= 7.5f)
+            .Where(p => DistancePointToSegment2D(p.Position, from, target) <= 2.75f)
+            .Where(IsDoorLikePrim)
+            .OrderBy(p => DistancePointToSegment2D(p.Position, from, target))
+            .Take(3)
+            .ToList();
+
+        if (candidates.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var prim in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            client.Self.Touch(prim.LocalID);
+            await Task.Delay(900, cancellationToken).ConfigureAwait(false);
+        }
+
+        return true;
+    }
+
+    private async Task<bool> TryDetourRecoveryAsync(
+        GridClient client,
+        Vector3 from,
+        Vector3 target,
+        int recoveryAttempt,
+        CancellationToken cancellationToken)
+    {
+        var toTarget = Flatten(new Vector3(target.X - from.X, target.Y - from.Y, 0f));
+        var norm = toTarget.Length();
+        if (norm <= 0.0001f)
+        {
+            return false;
+        }
+
+        toTarget /= norm;
+        var left = new Vector3(-toTarget.Y, toTarget.X, 0f);
+        var offset = Math.Clamp(1.5f * recoveryAttempt, 1.5f, 8f);
+        var forwardBias = Math.Clamp(1.2f + (0.4f * recoveryAttempt), 1.2f, 3.5f);
+
+        foreach (var side in new[] { 1f, -1f })
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidate = ClampLocalPosition(new Vector3(
+                from.X + (left.X * offset * side) + (toTarget.X * forwardBias),
+                from.Y + (left.Y * offset * side) + (toTarget.Y * forwardBias),
+                MathF.Max(from.Z, target.Z - 1f)));
+
+            client.Self.AutoPilotLocal(
+                (int)MathF.Round(candidate.X),
+                (int)MathF.Round(candidate.Y),
+                candidate.Z);
+
+            var reached = await WaitForArrivalAsync(
+                    client,
+                    candidate,
+                    tolerance: 2.5f,
+                    timeout: TimeSpan.FromSeconds(Math.Clamp(6 + recoveryAttempt, 6, 12)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (reached)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryWalkTeleportFallbackAsync(
+        GridClient client,
+        Simulator sim,
+        Vector3 target,
+        CancellationToken cancellationToken)
+    {
+        var candidates = new[]
+        {
+            target,
+            ClampLocalPosition(new Vector3(target.X + 4f, target.Y, target.Z)),
+            ClampLocalPosition(new Vector3(target.X - 4f, target.Y, target.Z)),
+            ClampLocalPosition(new Vector3(target.X, target.Y + 4f, target.Z)),
+            ClampLocalPosition(new Vector3(target.X, target.Y - 4f, target.Z))
+        };
+
+        foreach (var candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var teleported = await client.Self.TeleportAsync(sim.Name, candidate, cancellationToken).ConfigureAwait(false);
+            if (!teleported)
+            {
+                continue;
+            }
+
+            client.Self.AutoPilotLocal(
+                (int)MathF.Round(target.X),
+                (int)MathF.Round(target.Y),
+                target.Z);
+
+            var reached = await WaitForArrivalAsync(
+                    client,
+                    target,
+                    tolerance: 2.5f,
+                    timeout: TimeSpan.FromSeconds(15),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            client.Self.AutoPilotCancel();
+            if (reached)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsDoorLikePrim(Primitive prim)
+    {
+        var name = prim.Properties?.Name ?? string.Empty;
+        var description = prim.Properties?.Description ?? string.Empty;
+        var touchName = prim.Properties?.TouchName ?? string.Empty;
+        var searchable = $"{name} {description} {touchName}";
+
+        var hasDoorHint = DoorHintKeywords.Any(keyword => searchable.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+        var scripted = (prim.Flags & PrimFlags.Scripted) != 0;
+
+        return hasDoorHint || scripted;
+    }
+
+    private static float DistancePointToSegment2D(Vector3 point, Vector3 segmentStart, Vector3 segmentEnd)
+    {
+        var ax = segmentStart.X;
+        var ay = segmentStart.Y;
+        var bx = segmentEnd.X;
+        var by = segmentEnd.Y;
+        var px = point.X;
+        var py = point.Y;
+
+        var abx = bx - ax;
+        var aby = by - ay;
+        var abLenSq = (abx * abx) + (aby * aby);
+        if (abLenSq <= 0.0001f)
+        {
+            return MathF.Sqrt(((px - ax) * (px - ax)) + ((py - ay) * (py - ay)));
+        }
+
+        var apx = px - ax;
+        var apy = py - ay;
+        var t = Math.Clamp(((apx * abx) + (apy * aby)) / abLenSq, 0f, 1f);
+        var nearestX = ax + (abx * t);
+        var nearestY = ay + (aby * t);
+        var dx = px - nearestX;
+        var dy = py - nearestY;
+        return MathF.Sqrt((dx * dx) + (dy * dy));
     }
 
     private static async Task<bool> WaitForArrivalAsync(
@@ -6488,7 +6747,7 @@ internal sealed partial class BotSession : IDisposable
 
             await _opencodeChat.SetProviderApiKeyAsync(provider.Id, apiKey, CancellationToken.None).ConfigureAwait(false);
             ApplyAuthenticatedProviderAsConversationDefault(conversationKey, provider);
-            SendImText(client, agentId, from, $"Stored API key for provider {provider.Name} ({provider.Id}). Run *providers configured then *models {provider.Id}.");
+            SendImText(client, agentId, from, $"Stored API key for provider {provider.Name} ({provider.Id}). Run *providers configured then *models {provider.Id}. OpenCode may need to be restarted for the new API key to take effect.");
             return;
         }
 
@@ -6520,7 +6779,7 @@ internal sealed partial class BotSession : IDisposable
             }
 
             SendImText(client, agentId, from, completed.ProviderConfigured
-                ? $"OAuth completed for {provider.Name} ({provider.Id}). Run *providers configured and *models {provider.Id}."
+                ? $"OAuth completed for {provider.Name} ({provider.Id}). Run *providers configured and *models {provider.Id}. OpenCode may need to be restarted for the new API key to take effect."
                 : completed.Message);
             return;
         }

@@ -63,6 +63,17 @@ Scope notes:
   - Add login profile switching at runtime (safe rebind) instead of startup-only login.
 - [ ] **[P2] Gestures and typing state controls**
   - Trigger gestures, explicit typing indicators, AFK/away style signals.
+  
+## 4) Level Of Control
+
+- [ ] **[P1] Limited Capability Bots **
+  - Introduce 3 levels of Bots. Governor, Builder and Actor. Each has their own AGENTS.md.
+  - Governor gets access to all MCP functions, only Governor can create Builders and Actors.
+  - Builders get access to metaverse2mcp only (full API), i.e. can perform anything an ordinary player can do, subject to server permissions. A builder cannot create new builders or actors, but they can ask the Governor to do so, who may require permission from their handler or other policy checks.
+  - Actors get access to metaverse2mcp only (limited API, movement, communication). An actor may create other actors, but only by asking a governor to do so.
+  - Separate Opencode config for each bot is likely needed.
+  - Different providers / models per bot.
+  - Spin-up new containers for bots?  
 
 ## 5) Inventory and Asset Management
 
@@ -156,6 +167,52 @@ Scope notes:
   - Ensure stable JSON output for tool consumers.
 - [ ] **[P1] Regression tests for IM command parser**
   - Commands, aliases, chunking, prompt/permission/question flows.
+
+## 14) Navigation / Pathfinding (DotRecast Plan)
+
+Goal: replace heuristic-only movement with a full walk-first navigation stack that reliably handles walls/corners/doors, and only falls back to teleport when policies allow.
+
+- [ ] **[P0] Introduce nav stack architecture (walk-first policy)**
+  - Add an internal navigator service used by movement tools.
+  - Enforce walk mode by default (no implicit flying during route execution).
+  - Keep existing MCP tool contracts stable while routing through navigator.
+
+- [ ] **[P0] DotRecast integration baseline**
+  - Add DotRecast dependency and adapter layer for navmesh build/query.
+  - Build navmesh from region terrain + object occupancy snapshot.
+  - Implement A* path query + corridor/funnel smoothing.
+
+- [ ] **[P1] OpenSim world extraction + dynamic updates**
+  - Convert simulator cache data (terrain/prims/parcel boundaries) into nav build inputs.
+  - Track relevant object changes and update affected nav tiles incrementally.
+  - Maintain per-region nav cache with invalidation/rebuild strategy.
+
+- [ ] **[P1] Door and portal behavior model**
+  - Classify likely door candidates (opening/auto-open/click-to-open/hard-block).
+  - Trigger interaction workflow for click-to-open doors, then revalidate traversability. Considers lifts as well for vertical transport. Or other teleporters.
+  - Add timeout/retry policy and fallback branch when interaction fails.
+
+- [ ] **[P1] Motion controller and stuck recovery on top of nav corridor**
+  - Follow nav corridor with short-horizon steering and anti-oscillation.
+  - Add stuck detection tied to replanning (not only blind detours).
+  - Add controlled Option-B fallback: walk attempts first, teleport only after planner exhaustion.
+
+- [ ] **[P1] Navigation observability and diagnostics**
+  - Emit structured nav traces: path length, replan count, door interactions, fallback usage.
+  - Add MCP-visible diagnostics for last route decision tree.
+  - Capture failure categories (no-path, blocked, permission, timeout).
+
+- [ ] **[P1] Navigation test scenes and regression coverage**
+  - Build repeatable scenarios: narrow corridor, interior shop doorway, L-corner trap, moving blockers.
+  - Add contract/integration tests for walk-only behavior and fallback rules.
+  - Verify no unexpected fly transitions under normal walk tools.
+
+### DotRecast Expected Impact (planning assumption)
+
+- [ ] **Schedule assumption to validate**
+  - Expect ~20-40% total delivery time reduction versus full custom nav stack.
+  - Most savings come from mature navmesh/path primitives; OpenSim extraction/integration remains custom.
+  - Reassess after initial integration spike (dependency + first successful path in one test region).
 
 ---
 
