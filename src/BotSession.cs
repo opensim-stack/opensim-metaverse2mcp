@@ -5975,13 +5975,51 @@ internal sealed partial class BotSession : IDisposable
             return Array.Empty<OpencodePendingPermission>();
         }
 
-        if (_opencodeChat.TryGetPendingPermissionsFromEvents(sessionId, out var fromEvents)
-            && fromEvents.Count > 0)
+        var sessionFamily = await GetSessionFamilyIdsAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (sessionFamily.Count == 0)
         {
-            return fromEvents;
+            return Array.Empty<OpencodePendingPermission>();
         }
 
-        return await _opencodeChat.ListPendingPermissionsAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var fromEventFamily = new List<OpencodePendingPermission>();
+        foreach (var familySessionId in sessionFamily)
+        {
+            if (_opencodeChat.TryGetPendingPermissionsFromEvents(familySessionId, out var fromEvents)
+                && fromEvents.Count > 0)
+            {
+                fromEventFamily.AddRange(fromEvents);
+            }
+        }
+
+        if (fromEventFamily.Count > 0)
+        {
+            return fromEventFamily
+                .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(p => p.Title, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        var fromApiFamily = new List<OpencodePendingPermission>();
+        foreach (var familySessionId in sessionFamily)
+        {
+            var fromApi = await _opencodeChat.ListPendingPermissionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
+            if (fromApi.Count > 0)
+            {
+                fromApiFamily.AddRange(fromApi);
+            }
+        }
+
+        if (fromApiFamily.Count == 0)
+        {
+            return Array.Empty<OpencodePendingPermission>();
+        }
+
+        return fromApiFamily
+            .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(p => p.Title, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private async Task<IReadOnlyList<OpencodePendingQuestion>> GetPendingQuestionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
@@ -5991,13 +6029,98 @@ internal sealed partial class BotSession : IDisposable
             return Array.Empty<OpencodePendingQuestion>();
         }
 
-        if (_opencodeChat.TryGetPendingQuestionsFromEvents(sessionId, out var fromEvents)
-            && fromEvents.Count > 0)
+        var sessionFamily = await GetSessionFamilyIdsAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (sessionFamily.Count == 0)
         {
-            return fromEvents;
+            return Array.Empty<OpencodePendingQuestion>();
         }
 
-        return await _opencodeChat.ListPendingQuestionsAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var fromEventFamily = new List<OpencodePendingQuestion>();
+        foreach (var familySessionId in sessionFamily)
+        {
+            if (_opencodeChat.TryGetPendingQuestionsFromEvents(familySessionId, out var fromEvents)
+                && fromEvents.Count > 0)
+            {
+                fromEventFamily.AddRange(fromEvents);
+            }
+        }
+
+        if (fromEventFamily.Count > 0)
+        {
+            return fromEventFamily
+                .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(q => q.Header, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        var fromApiFamily = new List<OpencodePendingQuestion>();
+        foreach (var familySessionId in sessionFamily)
+        {
+            var fromApi = await _opencodeChat.ListPendingQuestionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
+            if (fromApi.Count > 0)
+            {
+                fromApiFamily.AddRange(fromApi);
+            }
+        }
+
+        if (fromApiFamily.Count == 0)
+        {
+            return Array.Empty<OpencodePendingQuestion>();
+        }
+
+        return fromApiFamily
+            .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(q => q.Header, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private async Task<IReadOnlyList<string>> GetSessionFamilyIdsAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return Array.Empty<string>();
+        }
+
+        var rootSessionId = sessionId.Trim();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            rootSessionId
+        };
+        var queue = new Queue<string>();
+        queue.Enqueue(rootSessionId);
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            IReadOnlyList<OpencodeSessionSummary> children;
+            try
+            {
+                children = await _opencodeChat.GetSessionChildrenAsync(current, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Keep discovered IDs even if one branch fails to enumerate.
+                continue;
+            }
+
+            foreach (var child in children)
+            {
+                if (string.IsNullOrWhiteSpace(child.Id))
+                {
+                    continue;
+                }
+
+                var childSessionId = child.Id.Trim();
+                if (visited.Add(childSessionId))
+                {
+                    queue.Enqueue(childSessionId);
+                }
+            }
+        }
+
+        return visited.ToList();
     }
 
     private async Task NotifyPendingQuestionIfAppearsAsync(GridClient client, UUID agentId, string from, string conversationKey)
