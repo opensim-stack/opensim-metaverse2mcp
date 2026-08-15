@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -1328,8 +1329,50 @@ internal sealed partial class BotSession
         string? folderId,
         bool recursive,
         int maxResults,
+        string? nameContains,
+        string? type,
+        string? createdAfterUtc,
+        string? createdBeforeUtc,
+        string? creatorId,
+        string? cursor,
+        int pageSize,
         CancellationToken cancellationToken)
     {
+        if (!TryParseOptionalUtc(createdAfterUtc, "createdAfterUtc", out var createdAfter, out var createdAfterError))
+        {
+            return InventoryQueryResult.FailResult(createdAfterError ?? "createdAfterUtc is invalid.");
+        }
+
+        if (!TryParseOptionalUtc(createdBeforeUtc, "createdBeforeUtc", out var createdBefore, out var createdBeforeError))
+        {
+            return InventoryQueryResult.FailResult(createdBeforeError ?? "createdBeforeUtc is invalid.");
+        }
+
+        if (createdAfter.HasValue && createdBefore.HasValue && createdAfter.Value > createdBefore.Value)
+        {
+            return InventoryQueryResult.FailResult("createdAfterUtc must be earlier than or equal to createdBeforeUtc.");
+        }
+
+        UUID? creatorUuid = null;
+        if (!string.IsNullOrWhiteSpace(creatorId))
+        {
+            if (!UUID.TryParse(creatorId, out var parsedCreatorUuid))
+            {
+                return InventoryQueryResult.FailResult("creatorId is not a valid UUID.");
+            }
+
+            creatorUuid = parsedCreatorUuid;
+        }
+
+        if (!TryDecodeInventoryCursor(cursor, out var cursorOffset, out var cursorError))
+        {
+            return InventoryQueryResult.FailResult(cursorError ?? "cursor is invalid.");
+        }
+
+        var normalizedNameContains = string.IsNullOrWhiteSpace(nameContains) ? null : nameContains.Trim();
+        var normalizedType = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
+        var effectivePageSize = Math.Clamp(pageSize <= 0 ? 200 : pageSize, 1, 500);
+
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
@@ -1348,7 +1391,7 @@ internal sealed partial class BotSession
                 }
             }
 
-            var limit = Math.Clamp(maxResults, 1, 2000);
+            var limit = Math.Clamp(maxResults, 1, 10000);
             var owner = client.Self.AgentID;
             var entries = new List<InventoryBase>();
 
@@ -1388,14 +1431,40 @@ internal sealed partial class BotSession
                 }
             }
 
-            var ordered = materialized
+            var filtered = materialized
                 .OrderBy(e => e.Kind, StringComparer.Ordinal)
                 .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(e => e.Id, StringComparer.Ordinal)
+                .Where(e => MatchesInventoryFilter(
+                    e,
+                    normalizedNameContains,
+                    normalizedType,
+                    createdAfter,
+                    createdBefore,
+                    creatorUuid))
                 .Take(limit)
                 .ToList();
 
-            return InventoryQueryResult.OkResult(ordered, $"Returned {ordered.Count} inventory entries.");
+            if (cursorOffset > filtered.Count)
+            {
+                return InventoryQueryResult.FailResult($"cursor offset {cursorOffset} is beyond available results ({filtered.Count}).");
+            }
+
+            var page = filtered
+                .Skip(cursorOffset)
+                .Take(effectivePageSize)
+                .ToList();
+
+            var nextOffset = cursorOffset + page.Count;
+            var hasMore = nextOffset < filtered.Count;
+            var nextCursor = hasMore ? EncodeInventoryCursor(nextOffset) : null;
+
+            return InventoryQueryResult.OkResult(
+                page,
+                $"Returned {page.Count} inventory entries (offset={cursorOffset}, matched={filtered.Count}, pageSize={effectivePageSize}, hasMore={hasMore.ToString().ToLowerInvariant()}).",
+                nextCursor,
+                hasMore,
+                filtered.Count);
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -3187,7 +3256,9 @@ internal sealed partial class BotSession
                 folder.Name,
                 "folder",
                 AssetType.Folder.ToString(),
-                InventoryType.Folder.ToString());
+                InventoryType.Folder.ToString(),
+                null,
+                null);
         }
 
         if (entry is InventoryItem item)
@@ -3198,7 +3269,11 @@ internal sealed partial class BotSession
                 item.Name,
                 "item",
                 item.AssetType.ToString(),
-                item.InventoryType.ToString());
+                item.InventoryType.ToString(),
+                item.CreatorID == UUID.Zero ? null : item.CreatorID.ToString(),
+                item.CreationDate == default
+                    ? null
+                    : item.CreationDate.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
         }
 
         return new InventoryEntry(
@@ -3207,7 +3282,130 @@ internal sealed partial class BotSession
             entry.Name,
             "unknown",
             AssetType.Unknown.ToString(),
-            InventoryType.Unknown.ToString());
+            InventoryType.Unknown.ToString(),
+            null,
+            null);
+    }
+
+    private static bool MatchesInventoryFilter(
+        InventoryEntry entry,
+        string? nameContains,
+        string? type,
+        DateTimeOffset? createdAfter,
+        DateTimeOffset? createdBefore,
+        UUID? creatorUuid)
+    {
+        if (!string.IsNullOrWhiteSpace(nameContains)
+            && entry.Name.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(type)
+            && !entry.Kind.Equals(type, StringComparison.OrdinalIgnoreCase)
+            && !entry.AssetType.Equals(type, StringComparison.OrdinalIgnoreCase)
+            && !entry.InventoryType.Equals(type, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var needsItemMetadata = createdAfter.HasValue || createdBefore.HasValue || creatorUuid.HasValue;
+        if (needsItemMetadata && !entry.Kind.Equals("item", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (creatorUuid.HasValue)
+        {
+            if (string.IsNullOrWhiteSpace(entry.CreatorId)
+                || !entry.CreatorId.Equals(creatorUuid.Value.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        if (createdAfter.HasValue || createdBefore.HasValue)
+        {
+            if (string.IsNullOrWhiteSpace(entry.CreatedUtc)
+                || !DateTimeOffset.TryParse(entry.CreatedUtc, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var createdAt))
+            {
+                return false;
+            }
+
+            if (createdAfter.HasValue && createdAt < createdAfter.Value)
+            {
+                return false;
+            }
+
+            if (createdBefore.HasValue && createdAt > createdBefore.Value)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryParseOptionalUtc(string? value, string fieldName, out DateTimeOffset? parsed, out string? error)
+    {
+        parsed = null;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        if (!DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsedValue))
+        {
+            error = $"{fieldName} must be a valid ISO-8601 timestamp.";
+            return false;
+        }
+
+        parsed = parsedValue;
+        return true;
+    }
+
+    private static bool TryDecodeInventoryCursor(string? cursor, out int offset, out string? error)
+    {
+        offset = 0;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(cursor))
+        {
+            return true;
+        }
+
+        if (int.TryParse(cursor, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedOffset) && parsedOffset >= 0)
+        {
+            offset = parsedOffset;
+            return true;
+        }
+
+        try
+        {
+            var raw = Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
+            const string prefix = "offset:";
+            if (raw.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(raw[prefix.Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedOffset)
+                && parsedOffset >= 0)
+            {
+                offset = parsedOffset;
+                return true;
+            }
+        }
+        catch (FormatException)
+        {
+            // Deliberately ignored: invalid base64 should produce a single validation error below.
+        }
+
+        error = "cursor is invalid. Use the NextCursor value from a prior InventoryList response.";
+        return false;
+    }
+
+    private static string EncodeInventoryCursor(int offset)
+    {
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes($"offset:{offset}"));
     }
 
     private static async Task<byte[]> ReadBinarySourceAsync(string source, CancellationToken cancellationToken)
@@ -3403,15 +3601,28 @@ internal sealed record InventoryEntry(
     string Name,
     string Kind,
     string AssetType,
-    string InventoryType);
+    string InventoryType,
+    string? CreatorId,
+    string? CreatedUtc);
 
-internal sealed record InventoryQueryResult(bool Ok, string Message, IReadOnlyList<InventoryEntry> Entries)
+internal sealed record InventoryQueryResult(
+    bool Ok,
+    string Message,
+    IReadOnlyList<InventoryEntry> Entries,
+    string? NextCursor,
+    bool HasMore,
+    int TotalMatched)
 {
-    public static InventoryQueryResult OkResult(IReadOnlyList<InventoryEntry> entries, string message)
-        => new(true, message, entries);
+    public static InventoryQueryResult OkResult(
+        IReadOnlyList<InventoryEntry> entries,
+        string message,
+        string? nextCursor = null,
+        bool hasMore = false,
+        int? totalMatched = null)
+        => new(true, message, entries, nextCursor, hasMore, totalMatched ?? entries.Count);
 
     public static InventoryQueryResult FailResult(string message)
-        => new(false, message, Array.Empty<InventoryEntry>());
+        => new(false, message, Array.Empty<InventoryEntry>(), null, false, 0);
 }
 
 internal sealed record AssetTransferResult(bool Ok, string Message, string? ItemId, string? AssetId, int Bytes)

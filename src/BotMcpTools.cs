@@ -1326,14 +1326,32 @@ internal sealed class BotMcpTools
         return _bot.PayAsync(targetType, targetId, amount, description, cancellationToken);
     }
 
-    [McpServerTool, Description("List inventory entries under a folder UUID (or root if omitted).")]
+    [McpServerTool, Description("List inventory entries under a folder UUID (or root if omitted), with optional filtering and cursor pagination.")]
     public Task<InventoryQueryResult> InventoryList(
         [Description("Optional folder UUID. Leave empty for inventory root.")] string? folderId,
         [Description("True to recurse into subfolders.")] bool recursive,
-        [Description("Maximum number of results (1..2000).") ] int maxResults,
+        [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults,
+        [Description("Optional case-insensitive substring filter applied to entry names.")] string? nameContains,
+        [Description("Optional type filter (matches kind/assetType/inventoryType, case-insensitive).") ] string? type,
+        [Description("Optional lower-bound creation timestamp (ISO-8601 UTC).")] string? createdAfterUtc,
+        [Description("Optional upper-bound creation timestamp (ISO-8601 UTC).")] string? createdBeforeUtc,
+        [Description("Optional creator avatar UUID filter (items only).") ] string? creatorId,
+        [Description("Optional cursor from a prior InventoryList response.")] string? cursor,
+        [Description("Page size for this response (1..500).") ] int pageSize,
         CancellationToken cancellationToken)
     {
-        return _bot.InventoryListAsync(folderId, recursive, maxResults, cancellationToken);
+        return _bot.InventoryListAsync(
+            folderId,
+            recursive,
+            maxResults,
+            nameContains,
+            type,
+            createdAfterUtc,
+            createdBeforeUtc,
+            creatorId,
+            cursor,
+            pageSize,
+            cancellationToken);
     }
 
     [McpServerTool, Description("Give one inventory item to another avatar UUID.")]

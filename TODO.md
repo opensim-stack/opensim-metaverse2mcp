@@ -78,7 +78,7 @@ Scope notes:
 
 ## 5) Inventory and Asset Management
 
-- [ ] **[P1] Inventory browsing ergonomics**
+- [x] **[P1] Inventory browsing ergonomics**
   - Add search/filter by name/type/date/creator.
   - Return paginated results with cursors for large inventories.
 - [ ] **[P1] Inventory CRUD tools**
