@@ -6,6 +6,8 @@
 
 The server logs in the bot on startup (no separate login tool), then serves MCP at a configurable HTTP endpoint.
 
+*This is part of the [opensim-stack](https://opensim-stack.github.io/) and is intended to be used in conjunction with other parts of the stack. See [Docs](https://opensim-stack.github.io/docs/index.html) for full details.*
+
 ## What it does
 
 - Uses `LibreMetaverse` (`3.1.3`) to connect to OpenSim/SL-compatible grids.
