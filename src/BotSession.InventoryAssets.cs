@@ -66,7 +66,22 @@ internal sealed partial class BotSession
                 .ToList();
 
             var attachments = (await CollectAttachmentPointMappingsAsync(client, token).ConfigureAwait(false))
-                .Select(a => new AttachmentInfo(a.Key.ToString(), a.Value.ToString()))
+                .Select(a =>
+                {
+                    string? attachedObjectId = null;
+                    uint? attachedObjectLocalId = null;
+                    if (TryFindAttachedObjectForInventoryItem(client, a.Key, out var objectId, out var localId))
+                    {
+                        attachedObjectId = objectId.ToString();
+                        attachedObjectLocalId = localId;
+                    }
+
+                    return new AttachmentInfo(
+                        a.Key.ToString(),
+                        a.Value.ToString(),
+                        attachedObjectId,
+                        attachedObjectLocalId);
+                })
                 .OrderBy(a => a.AttachmentPoint, StringComparer.Ordinal)
                 .ThenBy(a => a.ItemId, StringComparer.Ordinal)
                 .ToList();
@@ -302,6 +317,52 @@ internal sealed partial class BotSession
             }
 
             return AttachmentPointMappingResult.OkResult(mappings, $"Collected {mappings.Count} attachment point mapping(s) from currently worn attachments.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AttachmentObjectResolutionResult> AttachmentResolveObjectAsync(string itemId, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return AttachmentObjectResolutionResult.FailResult("itemId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
+
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return AttachmentObjectResolutionResult.FailResult("No current simulator available.");
+            }
+
+            if (!TryFindAttachedObjectForInventoryItem(client, itemUuid, out var attachedObjectId, out var attachedLocalId))
+            {
+                return AttachmentObjectResolutionResult.FailResult(
+                    $"Unable to resolve an attached object for inventory item {itemUuid}. The item may not be worn yet or object updates are still pending.");
+            }
+
+            string? attachmentPoint = null;
+            if (sim.ObjectsPrimitives.TryGetValue(attachedLocalId, out var prim))
+            {
+                attachmentPoint = prim.PrimData.AttachmentPoint.ToString();
+            }
+            else
+            {
+                var mappings = await CollectAttachmentPointMappingsAsync(client, token).ConfigureAwait(false);
+                if (mappings.TryGetValue(itemUuid, out var mappedPoint))
+                {
+                    attachmentPoint = mappedPoint.ToString();
+                }
+            }
+
+            return AttachmentObjectResolutionResult.OkResult(
+                itemUuid.ToString(),
+                attachedObjectId.ToString(),
+                attachedLocalId,
+                attachmentPoint,
+                $"Resolved attachment item {itemUuid} to objectId={attachedObjectId}, objectLocalId={attachedLocalId}.");
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1494,7 +1555,7 @@ internal sealed partial class BotSession
 
     public async Task<BotToolResult> DialogBridgeUninstallAsync(bool clearTrustPins, CancellationToken cancellationToken)
     {
-        return await ExecuteLockedAsync(async (client, token) =>
+        return await ExecuteLockedAsync((client, token) =>
         {
             var details = new List<string>();
             var bridgeDetached = false;
@@ -1558,7 +1619,7 @@ internal sealed partial class BotSession
                 details.Add("No uninstall actions were requested.");
             }
 
-            return BotToolResult.OkResult(string.Join(" ", details));
+            return Task.FromResult(BotToolResult.OkResult(string.Join(" ", details)));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1601,22 +1662,15 @@ internal sealed partial class BotSession
                 return InventoryQueryResult.FailResult("No current simulator available.");
             }
 
-            if (!sim.ObjectsPrimitives.TryGetValue(objectLocalId, out var prim))
+            var localId = objectLocalId;
+            var objectUuid = UUID.Zero;
+            if (!TryResolveTaskInventoryObject(sim, objectLocalId, objectId, out objectUuid, out localId, out var resolveError))
             {
-                return InventoryQueryResult.FailResult($"Object localId={objectLocalId} is not present in simulator cache.");
-            }
-
-            var objectUuid = prim.ID;
-            if (!string.IsNullOrWhiteSpace(objectId))
-            {
-                if (!UUID.TryParse(objectId, out objectUuid))
-                {
-                    return InventoryQueryResult.FailResult("objectId is not a valid UUID.");
-                }
+                return InventoryQueryResult.FailResult(resolveError ?? "Unable to resolve object reference.");
             }
 
             var entries = await client.Inventory
-                .GetTaskInventoryAsync(objectUuid, objectLocalId, sim, token)
+                .GetTaskInventoryAsync(objectUuid, localId, sim, token)
                 .ConfigureAwait(false);
 
             var limit = Math.Clamp(maxResults, 1, 2000);
@@ -1628,7 +1682,7 @@ internal sealed partial class BotSession
                 .Take(limit)
                 .ToList();
 
-            return InventoryQueryResult.OkResult(mapped, $"Returned {mapped.Count} task-inventory entries for object {objectLocalId}.");
+            return InventoryQueryResult.OkResult(mapped, $"Returned {mapped.Count} task-inventory entries for object localId={localId}, objectId={objectUuid}.");
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1652,28 +1706,21 @@ internal sealed partial class BotSession
                 return BotToolResult.Fail("No current simulator available.");
             }
 
-            if (!sim.ObjectsPrimitives.TryGetValue(objectLocalId, out var prim))
+            var localId = objectLocalId;
+            var objectUuid = UUID.Zero;
+            if (!TryResolveTaskInventoryObject(sim, objectLocalId, objectId, out objectUuid, out localId, out var resolveError))
             {
-                return BotToolResult.Fail($"Object localId={objectLocalId} is not present in simulator cache.");
-            }
-
-            var objectUuid = prim.ID;
-            if (!string.IsNullOrWhiteSpace(objectId))
-            {
-                if (!UUID.TryParse(objectId, out objectUuid))
-                {
-                    return BotToolResult.Fail("objectId is not a valid UUID.");
-                }
+                return BotToolResult.Fail(resolveError ?? "Unable to resolve object reference.");
             }
 
             var taskEntries = await client.Inventory
-                .GetTaskInventoryAsync(objectUuid, objectLocalId, sim, token)
+                .GetTaskInventoryAsync(objectUuid, localId, sim, token)
                 .ConfigureAwait(false);
 
             var taskItem = taskEntries.OfType<InventoryItem>().FirstOrDefault(i => i.UUID == taskItemUuid);
             if (taskItem == null)
             {
-                return BotToolResult.Fail($"Task inventory item {taskItemUuid} was not found on object {objectLocalId}.");
+                return BotToolResult.Fail($"Task inventory item {taskItemUuid} was not found on object localId={localId}, objectId={objectUuid}.");
             }
 
             UUID destinationFolderUuid;
@@ -1690,10 +1737,68 @@ internal sealed partial class BotSession
                 return BotToolResult.Fail("destinationFolderId is not a valid UUID.");
             }
 
-            client.Inventory.MoveTaskInventory(objectLocalId, taskItem.UUID, destinationFolderUuid, sim);
+            client.Inventory.MoveTaskInventory(localId, taskItem.UUID, destinationFolderUuid, sim);
             return BotToolResult.OkResult(
-                $"Requested task-inventory transfer for item {taskItem.UUID} from object {objectLocalId} to folder {destinationFolderUuid}. Server decides copy/move based on permissions.");
+                $"Requested task-inventory transfer for item {taskItem.UUID} from object localId={localId}, objectId={objectUuid} to folder {destinationFolderUuid}. Server decides copy/move based on permissions.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryResolveTaskInventoryObject(
+        Simulator sim,
+        uint requestedLocalId,
+        string? requestedObjectId,
+        out UUID objectUuid,
+        out uint objectLocalId,
+        out string? error)
+    {
+        objectUuid = UUID.Zero;
+        objectLocalId = 0;
+        error = null;
+
+        UUID parsedObjectId = UUID.Zero;
+        var hasObjectId = !string.IsNullOrWhiteSpace(requestedObjectId);
+        if (hasObjectId && !UUID.TryParse(requestedObjectId!, out parsedObjectId))
+        {
+            error = "objectId is not a valid UUID.";
+            return false;
+        }
+
+        Primitive? prim = null;
+        if (requestedLocalId != 0)
+        {
+            sim.ObjectsPrimitives.TryGetValue(requestedLocalId, out prim);
+            if (prim == null && !hasObjectId)
+            {
+                error = $"Object localId={requestedLocalId} is not present in simulator cache.";
+                return false;
+            }
+        }
+
+        if (prim == null && hasObjectId)
+        {
+            prim = sim.ObjectsPrimitives.Values.FirstOrDefault(p => p != null && p.ID == parsedObjectId);
+            if (prim == null)
+            {
+                error = $"Object objectId={parsedObjectId} is not present in current simulator cache; try moving closer or waiting for object updates.";
+                return false;
+            }
+        }
+
+        if (prim == null)
+        {
+            error = "Either objectLocalId or objectId is required.";
+            return false;
+        }
+
+        if (hasObjectId && prim.ID != parsedObjectId)
+        {
+            error = $"objectLocalId={requestedLocalId} refers to objectId={prim.ID}, which does not match requested objectId={parsedObjectId}.";
+            return false;
+        }
+
+        objectUuid = hasObjectId ? parsedObjectId : prim.ID;
+        objectLocalId = prim.LocalID;
+        return true;
     }
 
     public async Task<AssetTransferResult> AssetUploadInventoryAsync(
@@ -3378,7 +3483,7 @@ internal sealed record InventoryOfferHistoryResult(bool Ok, string Message, IRea
 
 internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType);
 
-internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint);
+internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint, string? ObjectId, uint? ObjectLocalId);
 
 internal sealed record OutfitCategoryResolutionInfo(
     string Category,
@@ -3445,6 +3550,26 @@ internal sealed record AttachmentPointMappingResult(bool Ok, string Message, IRe
 
     public static AttachmentPointMappingResult FailResult(string message)
         => new(false, message, Array.Empty<AttachmentPointMappingInfo>());
+}
+
+internal sealed record AttachmentObjectResolutionResult(
+    bool Ok,
+    string Message,
+    string? ItemId,
+    string? ObjectId,
+    uint? ObjectLocalId,
+    string? AttachmentPoint)
+{
+    public static AttachmentObjectResolutionResult OkResult(
+        string itemId,
+        string objectId,
+        uint objectLocalId,
+        string? attachmentPoint,
+        string message)
+        => new(true, message, itemId, objectId, objectLocalId, attachmentPoint);
+
+    public static AttachmentObjectResolutionResult FailResult(string message)
+        => new(false, message, null, null, null, null);
 }
 
 internal sealed record AttachmentTransformResult(

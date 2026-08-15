@@ -2890,6 +2890,26 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
+    private async Task<AttachmentObjectResolutionResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AttachmentObjectResolutionResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AttachmentObjectResolutionResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
     private async Task<AppearanceVisualParamsResult> ExecuteLockedAsync(
         Func<GridClient, CancellationToken, Task<AppearanceVisualParamsResult>> action,
         CancellationToken cancellationToken)

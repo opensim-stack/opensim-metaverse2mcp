@@ -1380,22 +1380,22 @@ internal sealed class BotMcpTools
         return _bot.InventoryDeleteManyAsync(itemIdsCsv, cancellationToken);
     }
 
-    [McpServerTool, Description("List task inventory (contents) for an in-world object local ID.")]
+    [McpServerTool, Description("List task inventory (contents) for an in-world object. Provide objectLocalId, objectId, or both.")]
     public Task<InventoryQueryResult> TaskInventoryList(
-        [Description("Object local ID in current simulator.")] uint objectLocalId,
-        [Description("Optional object UUID; if omitted, resolves from simulator cache by local ID.")] string? objectId,
+        [Description("Object local ID in current simulator (0 allowed when objectId is provided).") ] uint objectLocalId,
+        [Description("Optional object UUID; when local ID is omitted or stale, this is used to resolve the current local ID from simulator cache.")] string? objectId,
         [Description("Maximum number of results (1..2000).") ] int maxResults,
         CancellationToken cancellationToken)
     {
         return _bot.TaskInventoryListAsync(objectLocalId, objectId, maxResults, cancellationToken);
     }
 
-    [McpServerTool, Description("Request moving/copying a task-inventory item from an object into agent inventory.")]
+    [McpServerTool, Description("Request moving/copying a task-inventory item from an object into agent inventory. Provide objectLocalId, objectId, or both.")]
     public Task<BotToolResult> TaskInventoryTake(
-        [Description("Object local ID in current simulator.")] uint objectLocalId,
+        [Description("Object local ID in current simulator (0 allowed when objectId is provided).") ] uint objectLocalId,
         [Description("Task-inventory item UUID on the object.")] string taskItemId,
         [Description("Optional destination folder UUID. If omitted, uses default folder for item asset type.")] string? destinationFolderId,
-        [Description("Optional object UUID; if omitted, resolves from simulator cache by local ID.")] string? objectId,
+        [Description("Optional object UUID; when local ID is omitted or stale, this is used to resolve the current local ID from simulator cache.")] string? objectId,
         CancellationToken cancellationToken)
     {
         return _bot.TaskInventoryTakeAsync(objectLocalId, taskItemId, destinationFolderId, objectId, cancellationToken);
@@ -1568,6 +1568,14 @@ internal sealed class BotMcpTools
     public Task<AttachmentPointMappingResult> AppearanceListAttachmentPointMappings(CancellationToken cancellationToken)
     {
         return _bot.AppearanceListAttachmentPointMappingsAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Resolve a worn attachment inventory item UUID to its current in-world object UUID/local ID.")]
+    public Task<AttachmentObjectResolutionResult> AttachmentResolveObject(
+        [Description("Worn attachment inventory item UUID.")] string itemId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AttachmentResolveObjectAsync(itemId, cancellationToken);
     }
 
     [McpServerTool, Description("Change an attachment item's mapped/worn attachment point by reattaching it to a new point.")]
