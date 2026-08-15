@@ -51,6 +51,7 @@ internal sealed class AppOptions
     public bool PromptNotecardEnabled { get; set; } = true;
     public bool PromptNotecardRequireHandler { get; set; } = true;
     public int PromptMaxChars { get; set; } = 16000;
+    public bool RequesterContextDebugLogging { get; set; }
 
     public bool ShowHelp { get; set; }
 

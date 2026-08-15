@@ -2,16 +2,24 @@
 // Receives dialog requests from the bot on a private channel and shows llDialog to a target avatar.
 // Sends the selected label back to the bot via llInstantMessage as:
 //   dlgrep|<conversationKey>|<requestId>|<answer>
+// Sends request acceptance ack as:
+//   dlgack|<conversationKey>|<requestId>|<mode>
+// mode is one of: dialog, textbox
 // requestId is opaque to this script and may be either:
 //   - question id
 //   - permission id tagged as perm:<permissionId>
 // Expects strict request payload format:
-//   dlgreq|conversation|requestId|target|header|prompt|optionCount|opt1|opt2|...
+//   dlgreq|conversation|requestId|target|replyTarget|header|prompt|optionCount|opt1|opt2|...
+// Text input request payload:
+//   txtreq|conversation|requestId|target|replyTarget|header|prompt
 // Hover text control payload:
 //   hovreq|targetObjectId|mode|text
 // mode: set or clear
+// Mood control payload:
+//   moodreq|targetObjectId|emotion
 
 integer REQUEST_CHANNEL = -919191;
+integer EMOTER_CHANNEL = -919192;
 
 // Stride: avatarKey, requestId, conversationKey, botId, optionsEncoded
 list gRequests;
@@ -145,21 +153,42 @@ default
             }
         }
 
-        if (prefix == "dlgreq" && llGetListLength(parts) >= 8)
+        if (prefix == "moodreq" && llGetListLength(parts) >= 3)
+        {
+            string targetObjectId2 = decode(llList2String(parts, 1));
+            string emotion = llToLower(llStringTrim(decode(llList2String(parts, 2)), STRING_TRIM));
+
+            if (targetObjectId2 != "" && targetObjectId2 != (string)llGetKey())
+            {
+                return;
+            }
+
+            if (emotion == "")
+            {
+                return;
+            }
+
+            // Bridge and emoter run in the same attachment object.
+            llMessageLinked(LINK_SET, EMOTER_CHANNEL, emotion, NULL_KEY);
+            return;
+        }
+
+        if (prefix == "dlgreq" && llGetListLength(parts) >= 9)
         {
             string conversationKey = decode(llList2String(parts, 1));
             // Opaque request id; can represent a question or a permission request.
             string questionId = decode(llList2String(parts, 2));
             key targetAvatar = (key)decode(llList2String(parts, 3));
-            string header = decode(llList2String(parts, 4));
-            string prompt = decode(llList2String(parts, 5));
+            key replyTarget = (key)decode(llList2String(parts, 4));
+            string header = decode(llList2String(parts, 5));
+            string prompt = decode(llList2String(parts, 6));
             if (prompt == "")
             {
                 prompt = "Choose an option:";
             }
 
-            integer expectedCount = (integer)llList2String(parts, 6);
-            list optionTokens = llList2List(parts, 7, -1);
+            integer expectedCount = (integer)llList2String(parts, 7);
+            list optionTokens = llList2List(parts, 8, -1);
             if (expectedCount <= 0 || llGetListLength(optionTokens) != expectedCount)
             {
                 // Reject truncated or malformed payloads to avoid showing incomplete choices.
@@ -169,7 +198,7 @@ default
             string optionsEncoded = llDumpList2String(optionTokens, ";");
 
             list buttons = decodeOptions(optionsEncoded);
-            if (targetAvatar == NULL_KEY || llGetListLength(buttons) == 0)
+            if (targetAvatar == NULL_KEY || replyTarget == NULL_KEY || llGetListLength(buttons) == 0)
             {
                 return;
             }
@@ -179,7 +208,7 @@ default
             {
                 gRequests = llDeleteSubList(gRequests, idx, idx + 4);
             }
-            gRequests += [(string)targetAvatar, questionId, conversationKey, (string)id, optionsEncoded];
+            gRequests += [(string)targetAvatar, questionId, conversationKey, (string)replyTarget, optionsEncoded];
 
             string title = header;
             if (title == "")
@@ -190,6 +219,50 @@ default
             list numberButtons = buildNumberButtons(llGetListLength(buttons));
             string body = buildDialogBody(title, prompt, buttons);
             llDialog(targetAvatar, body, numberButtons, REQUEST_CHANNEL);
+            llInstantMessage(replyTarget,
+                "dlgack|"
+                + llEscapeURL(conversationKey) + "|"
+                + llEscapeURL(questionId) + "|dialog");
+            return;
+        }
+
+        if (prefix == "txtreq" && llGetListLength(parts) >= 7)
+        {
+            string conversationKey3 = decode(llList2String(parts, 1));
+            string questionId3 = decode(llList2String(parts, 2));
+            key targetAvatar3 = (key)decode(llList2String(parts, 3));
+            key replyTarget3 = (key)decode(llList2String(parts, 4));
+            string header3 = decode(llList2String(parts, 5));
+            string prompt3 = decode(llList2String(parts, 6));
+            if (prompt3 == "")
+            {
+                prompt3 = "Type your response:";
+            }
+
+            if (targetAvatar3 == NULL_KEY || replyTarget3 == NULL_KEY)
+            {
+                return;
+            }
+
+            integer idx3 = findRequestIndex(targetAvatar3, questionId3);
+            if (idx3 >= 0)
+            {
+                gRequests = llDeleteSubList(gRequests, idx3, idx3 + 4);
+            }
+
+            gRequests += [(string)targetAvatar3, questionId3, conversationKey3, (string)replyTarget3, ""];
+
+            string title3 = header3;
+            if (title3 == "")
+            {
+                title3 = "Question";
+            }
+
+            llTextBox(targetAvatar3, title3 + "\n" + prompt3, REQUEST_CHANNEL);
+            llInstantMessage(replyTarget3,
+                "dlgack|"
+                + llEscapeURL(conversationKey3) + "|"
+                + llEscapeURL(questionId3) + "|textbox");
             return;
         }
 
@@ -221,8 +294,6 @@ default
                     + llEscapeURL(selectedAnswer);
 
                 llInstantMessage(botId, payload);
-                // Transport fallback: some simulator paths are more reliable over directed chat.
-                llRegionSayTo(botId, 0, payload);
                 gRequests = llDeleteSubList(gRequests, i, i + 4);
                 return;
             }

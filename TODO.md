@@ -74,6 +74,7 @@ Scope notes:
   - Separate Opencode config for each bot is likely needed.
   - Different providers / models per bot.
   - Spin-up new containers for bots?  
+  - Need "Handler Not Online" policy for Governor.
 
 ## 5) Inventory and Asset Management
 

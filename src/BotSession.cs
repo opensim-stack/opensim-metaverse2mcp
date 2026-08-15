@@ -1,8 +1,10 @@
 using LibreMetaverse;
 using LibreMetaverse.Messages.Linden;
 using LibreMetaverse.StructuredData;
+using LibreMetaverse.Assets;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -12,6 +14,83 @@ internal sealed partial class BotSession : IDisposable
     {
         Permission,
         Question
+    }
+
+    private async Task NotifyUserOfRetryLimitAsync(OpencodeSessionStatusEvent statusEvent)
+    {
+        if (!statusEvent.NextRetryAt.HasValue)
+        {
+            return;
+        }
+
+        var delay = statusEvent.NextRetryAt.Value - DateTimeOffset.UtcNow;
+        if (delay <= TimeSpan.FromMinutes(2))
+        {
+            return;
+        }
+
+        var conversationKey = FindConversationKeyForSessionId(statusEvent.SessionId);
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return;
+        }
+
+        if (!_conversationAgentByKey.TryGetValue(conversationKey, out var agentId) || agentId == UUID.Zero)
+        {
+            return;
+        }
+
+        var client = _client;
+        if (!_connected || client == null)
+        {
+            return;
+        }
+
+        var from = _conversationNameByKey.TryGetValue(conversationKey, out var displayName)
+            ? displayName
+            : "handler";
+
+        var attemptText = statusEvent.Attempt.HasValue ? $" (attempt {statusEvent.Attempt.Value})" : string.Empty;
+        var message = $"The AI service is rate-limiting this request and will retry around {statusEvent.NextRetryAt.Value:HH:mm:ss UTC}{attemptText}. Send *cancel if you don't want to wait.";
+
+        try
+        {
+            SendImText(client, agentId, from, message);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[opencode] failed to notify user of retry delay: {ex.Message}");
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private string? FindConversationKeyForSessionId(string sessionId)
+    {
+        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return null;
+        }
+
+        foreach (var pair in _conversationAgentByKey)
+        {
+            var mappedSessionId = _opencodeChat.GetConversationSessionId(pair.Key);
+            if (!string.IsNullOrWhiteSpace(mappedSessionId)
+                && mappedSessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
+            {
+                return pair.Key;
+            }
+        }
+
+        return null;
+    }
+
+    private void LogRetryStatusEvent(string sessionId, string? statusMessage)
+    {
+        var message = string.IsNullOrWhiteSpace(statusMessage)
+            ? $"[opencode] session {sessionId} is retrying"
+            : $"[opencode] session {sessionId} is retrying: {statusMessage}";
+        Console.WriteLine(message);
     }
 
     private sealed record PendingScriptDialog(
@@ -79,6 +158,13 @@ internal sealed partial class BotSession : IDisposable
     private string? _activeAgentsNotecardSourceName;
     private string? _activeAgentsNotecardItemId;
     private DateTimeOffset? _activeAgentsNotecardInstalledAt;
+    private string? _bridgeAgentsPrompt;
+    private string? _bridgeAgentsPromptSourceName;
+    private string? _bridgeAgentsPromptItemId;
+    private UUID _bridgeAgentsPromptObjectId = UUID.Zero;
+    private DateTimeOffset? _bridgeAgentsPromptInstalledAt;
+    private UUID _bridgeAgentsProbeObjectId = UUID.Zero;
+    private bool _bridgeAgentsProbeInFlight;
     private UUID _lastImSpeakerAgentId = UUID.Zero;
     private string? _lastImSpeakerName;
     private string? _lastImConversationKey;
@@ -98,9 +184,16 @@ internal sealed partial class BotSession : IDisposable
     private DateTimeOffset _lastDialogBridgeAutoProvisionAttemptAt = DateTimeOffset.MinValue;
     private const int LslDialogBridgeRequestChannel = -919191;
     private const string LslDialogBridgeRequestPrefix = "dlgreq";
+    private const string LslDialogBridgeTextRequestPrefix = "txtreq";
+    private const string LslDialogBridgeAckPrefix = "dlgack";
+    private const string LslDialogBridgePingPrefix = "brping";
+    private const string LslDialogBridgePongPrefix = "brpong";
     private const string LslDialogBridgeReplyPrefix = "dlgrep";
     private const string LslDialogBridgePermissionRequestPrefix = "perm:";
-    private const int LslDialogBridgeMaxPayloadLength = 220;
+    private const string LslDialogBridgeMoodRequestPrefix = "moodreq";
+    // OpenSimulator tolerates larger chat payloads than strict SL-era assumptions.
+    // Keep this conservative enough to avoid most truncation while preserving prompt fidelity.
+    private const int LslDialogBridgeMaxPayloadLength = 900;
     private const string LslDialogBridgeHoverRequestPrefix = "hovreq";
     private const int TypingPulseMinimumIntervalMs = 2000;
     private const int TypingStopDelayMs = 2500;
@@ -111,6 +204,7 @@ internal sealed partial class BotSession : IDisposable
     private const bool EnableWalkTeleportFallback = true;
     private static readonly string[] DoorHintKeywords = new[] { "door", "gate", "entry", "entrance", "open", "lobby" };
     private static readonly IReadOnlyList<string> LslPermissionDialogOptions = new[] { "yes", "no", "yes always", "no always" };
+    private const int LslDialogBridgeEmoterChannel = -919192;
 
     private const string BuiltInBridgePrompt =
         "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n" +
@@ -127,6 +221,7 @@ internal sealed partial class BotSession : IDisposable
         "- Attachment and wearable controls are different: use attachment tools for attachments/objects and wearable tools for clothing/body layers.\n" +
         "- If asked to 'detach/remove attachments', use appearance_detach_all_attachments_except (empty keep filters unless exclusions are requested), then re-check with appearance_list_attachment_point_mappings. Avoid item-by-item detach loops unless explicitly requested.\n" +
         "- If asked to remove everything worn, use appearance_detach_and_remove_all_worn_deterministic, then re-check and report both attachment and wearable sections separately.\n" +
+        "- When requester identity metadata is provided for IM, resolve pronouns like 'me', 'my', and 'here' to that requester unless they explicitly override it.\n" +
         "- Ask concise clarifying questions when instructions are ambiguous or missing required identifiers.\n" +
         "- For multi-step tasks, inspect -> plan -> execute -> verify and report results clearly.\n" +
         "- Respect handler and policy restrictions configured by the bridge.";
@@ -472,6 +567,117 @@ internal sealed partial class BotSession : IDisposable
             $"Sent IM to {agentId}.",
             c => c.Self.InstantMessage(recipient, message),
             cancellationToken);
+    }
+
+    public async Task<BotToolResult> SetBotMoodAsync(string emotion, CancellationToken cancellationToken)
+    {
+        var normalizedEmotion = NormalizeMoodName(emotion);
+        if (string.IsNullOrWhiteSpace(normalizedEmotion))
+        {
+            return BotToolResult.Fail("emotion is required and must contain letters, numbers, '-' or '_'.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            UUID targetBridgeObjectId;
+            lock (_dialogBridgeTrustLock)
+            {
+                targetBridgeObjectId = _trustedDialogBridgeObjectId;
+            }
+
+            if (targetBridgeObjectId == UUID.Zero)
+            {
+                return Task.FromResult(BotToolResult.Fail("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply)."));
+            }
+
+            // Leave target object token empty so the currently running bridge script
+            // in the attachment processes the mood request even if persisted UUID pins are stale.
+            var payload = string.Join("|", new[]
+            {
+                LslDialogBridgeMoodRequestPrefix,
+                EncodeDialogToken(string.Empty),
+                EncodeDialogToken(normalizedEmotion)
+            });
+
+            client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
+            Console.WriteLine($"[dialog-bridge] sent mood request: object={targetBridgeObjectId} emotion={normalizedEmotion}");
+            return Task.FromResult(BotToolResult.OkResult($"Requested bot mood '{normalizedEmotion}' via dialog bridge request channel {LslDialogBridgeRequestChannel}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<DataToolResult> BotMoodListAsync(bool includeUtilityTextures, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            UUID targetBridgeObjectId;
+            lock (_dialogBridgeTrustLock)
+            {
+                targetBridgeObjectId = _trustedDialogBridgeObjectId;
+            }
+
+            if (targetBridgeObjectId == UUID.Zero)
+            {
+                return DataToolResult.FailResult("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply).");
+            }
+
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return DataToolResult.FailResult("No current simulator available.");
+            }
+
+            Primitive? bridgePrim = null;
+            foreach (var prim in sim.ObjectsPrimitives.Values)
+            {
+                if (prim.ID == targetBridgeObjectId)
+                {
+                    bridgePrim = prim;
+                    break;
+                }
+            }
+
+            if (bridgePrim == null)
+            {
+                return DataToolResult.FailResult($"Pinned dialog bridge object {targetBridgeObjectId} is not present in current simulator cache.");
+            }
+
+            var entries = await client.Inventory
+                .GetTaskInventoryAsync(targetBridgeObjectId, bridgePrim.LocalID, sim, token)
+                .ConfigureAwait(false);
+
+            var textureNames = entries
+                .OfType<InventoryItem>()
+                .Where(item => item.AssetType == AssetType.Texture)
+                .Select(item => item.Name?.Trim() ?? string.Empty)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (textureNames.Count == 0)
+            {
+                return DataToolResult.FailResult($"No texture assets were found in bridge object {targetBridgeObjectId} task inventory.");
+            }
+
+            var utilityNames = new[] { "base", "cross" };
+            var utilitySet = new HashSet<string>(utilityNames, StringComparer.OrdinalIgnoreCase);
+            var moodNames = textureNames
+                .Where(name => includeUtilityTextures || !utilitySet.Contains(name))
+                .ToList();
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                bridgeObjectId = targetBridgeObjectId.ToString(),
+                includeUtilityTextures,
+                textureCount = textureNames.Count,
+                moodCount = moodNames.Count,
+                utilityTextures = utilityNames,
+                moodNames,
+                allTextureNames = textureNames
+            });
+
+            return DataToolResult.OkResult($"Found {moodNames.Count} mood texture name(s) on bridge object {targetBridgeObjectId}.", payload);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<EnvironmentToolResult> GetRegionEnvironmentAsync(CancellationToken cancellationToken)
@@ -3595,7 +3801,7 @@ internal sealed partial class BotSession : IDisposable
                 }
 
                 TryBindRestoredOpencodeSessionToConversation(conversationKey);
-                var sendOptions = BuildSendOptions(conversationKey);
+                var sendOptions = BuildSendOptions(conversationKey, e.IM.FromAgentID, from);
                 // TEMP(event-first migration): remove this watcher once event-driven permission/question
                 // routing is proven stable under reconnect/load; keep only bounded fallback polling.
                 using var requestCts = new CancellationTokenSource();
@@ -3829,6 +4035,7 @@ internal sealed partial class BotSession : IDisposable
         if (normalizedStatus == "retry")
         {
             LogRetryStatusEvent(statusEvent.SessionId, statusEvent.StatusMessage);
+            _ = Task.Run(() => NotifyUserOfRetryLimitAsync(statusEvent));
             return;
         }
 
@@ -4085,12 +4292,14 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private OpencodeSendOptions? BuildSendOptions(string conversationKey)
+    private OpencodeSendOptions? BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
     {
         _imConversationConfigs.TryGetValue(conversationKey, out var cfg);
         cfg ??= GetPersistedDefaultConversationConfigSnapshot();
 
-        var systemPrompt = BuildLayeredPromptText();
+        var requesterContextLayer = BuildRequesterContextPrompt(requesterAgentId, requesterName, conversationKey);
+        LogRequesterContextAttachment(conversationKey, requesterAgentId, requesterName, requesterContextLayer);
+        var systemPrompt = BuildLayeredPromptText(requesterContextLayer);
         var modelId = cfg?.ModelId ?? GetStartupDefaultModelId();
         var thinkingLevel = cfg?.ThinkingLevel;
 
@@ -4127,12 +4336,18 @@ internal sealed partial class BotSession : IDisposable
             {
                 sources.Add($"notecard({_activeAgentsNotecardSourceName ?? "unknown"}, {_activeAgentsNotecardItemId ?? "n/a"})");
             }
+
+            if (_options.PromptNotecardEnabled && !string.IsNullOrWhiteSpace(_bridgeAgentsPrompt))
+            {
+                var bridgeObject = _bridgeAgentsPromptObjectId == UUID.Zero ? "(unknown)" : _bridgeAgentsPromptObjectId.ToString();
+                sources.Add($"bridge-object(AGENTS.md, object={bridgeObject}, {_bridgeAgentsPromptItemId ?? "n/a"})");
+            }
         }
 
         return sources.Count == 0 ? "prompt: no active sources" : "prompt sources: " + string.Join(", ", sources);
     }
 
-    private string? BuildLayeredPromptText()
+    private string? BuildLayeredPromptText(string? requesterContextLayer = null)
     {
         if (!_options.PromptHandlingEnabled)
         {
@@ -4158,19 +4373,137 @@ internal sealed partial class BotSession : IDisposable
         if (_options.PromptNotecardEnabled)
         {
             string? notecardPrompt;
+            string? bridgePrompt;
             lock (_promptStateLock)
             {
                 notecardPrompt = _activeAgentsNotecardPrompt;
+                bridgePrompt = _bridgeAgentsPrompt;
             }
 
             if (!string.IsNullOrWhiteSpace(notecardPrompt))
             {
                 layers.Add("[in-world AGENTS.md notecard]\n" + notecardPrompt);
             }
+
+            if (!string.IsNullOrWhiteSpace(bridgePrompt))
+            {
+                layers.Add("[dialog bridge object AGENTS.md]\n" + bridgePrompt);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(requesterContextLayer))
+        {
+            layers.Add(requesterContextLayer);
         }
 
         return layers.Count == 0 ? null : string.Join("\n\n", layers);
     }
+
+    private string? BuildRequesterContextPrompt(UUID requesterAgentId, string? requesterName, string conversationKey)
+    {
+        var trimmedName = (requesterName ?? string.Empty).Trim();
+        if (requesterAgentId == UUID.Zero && trimmedName.Length == 0)
+        {
+            return null;
+        }
+
+        var lines = new List<string>
+        {
+            "[requester context]",
+            "Treat first-person references ('me', 'my', 'mine', 'here') as the requester below unless explicitly overridden.",
+            "channel: im",
+            $"conversation_key: {conversationKey}",
+            $"requester_name: {(trimmedName.Length == 0 ? "(unknown)" : trimmedName)}",
+            $"requester_uuid: {(requesterAgentId == UUID.Zero ? "(unknown)" : requesterAgentId.ToString())}"
+        };
+
+        var client = _client;
+        var sim = client?.Network.CurrentSim;
+        if (sim != null)
+        {
+            lines.Add($"sim_name: {sim.Name}");
+
+            if (requesterAgentId != UUID.Zero)
+            {
+                var requesterAvatar = sim.ObjectsAvatars.Values
+                    .FirstOrDefault(avatar => avatar != null && avatar.ID == requesterAgentId);
+                if (requesterAvatar != null)
+                {
+                    lines.Add($"requester_position_local: {FormatPosition(requesterAvatar.Position)}");
+                    if (client != null)
+                    {
+                        var distance = Vector3.Distance(client.Self.SimPosition, requesterAvatar.Position);
+                        lines.Add($"requester_distance_to_bot_m: {distance:F1}");
+                    }
+                }
+            }
+
+            var nearby = sim.ObjectsAvatars.Values
+                .Where(avatar => avatar != null && avatar.ID != UUID.Zero && avatar.ID != client?.Self.AgentID)
+                .Select(avatar =>
+                {
+                    var name = string.IsNullOrWhiteSpace(avatar!.Name) ? "(unknown)" : avatar.Name.Trim();
+                    var distance = client == null ? float.NaN : Vector3.Distance(client.Self.SimPosition, avatar.Position);
+                    return $"- {name} ({avatar.ID}) distance_m={(float.IsNaN(distance) ? "n/a" : distance.ToString("F1"))}";
+                })
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(entry => entry, StringComparer.OrdinalIgnoreCase)
+                .Take(12)
+                .ToList();
+
+            if (nearby.Count > 0)
+            {
+                lines.Add("nearby_avatars:");
+                lines.AddRange(nearby);
+            }
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private void LogRequesterContextAttachment(string conversationKey, UUID requesterAgentId, string? requesterName, string? requesterContextLayer)
+    {
+        if (!_options.RequesterContextDebugLogging)
+        {
+            return;
+        }
+
+        var trimmedName = (requesterName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(requesterContextLayer))
+        {
+            Console.WriteLine(
+                $"[prompt] requester context not attached: conversation={conversationKey} requesterName={(trimmedName.Length == 0 ? "(unknown)" : trimmedName)} requesterUuid={(requesterAgentId == UUID.Zero ? "(unknown)" : requesterAgentId.ToString())}");
+            return;
+        }
+
+        var lines = requesterContextLayer.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var requesterUuid = ExtractPromptLineValue(lines, "requester_uuid:") ?? (requesterAgentId == UUID.Zero ? "(unknown)" : requesterAgentId.ToString());
+        var distance = ExtractPromptLineValue(lines, "requester_distance_to_bot_m:") ?? "n/a";
+        var hasPosition = lines.Any(line => line.StartsWith("requester_position_local:", StringComparison.Ordinal));
+        var nearbyCount = lines.Count(line => line.StartsWith("- ", StringComparison.Ordinal));
+
+        Console.WriteLine(
+            $"[prompt] requester context attached: conversation={conversationKey} requesterName={(trimmedName.Length == 0 ? "(unknown)" : trimmedName)} requesterUuid={requesterUuid} distance_m={distance} hasPosition={hasPosition} nearbyCount={nearbyCount}");
+    }
+
+    private static string? ExtractPromptLineValue(IEnumerable<string> lines, string prefix)
+    {
+        foreach (var line in lines)
+        {
+            if (!line.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var value = line[prefix.Length..].Trim();
+            return value.Length == 0 ? null : value;
+        }
+
+        return null;
+    }
+
+    private static string FormatPosition(Vector3 position)
+        => $"{position.X:F1},{position.Y:F1},{position.Z:F1}";
 
     private string? TryLoadProjectAgentsPromptText()
     {
@@ -4287,6 +4620,182 @@ internal sealed partial class BotSession : IDisposable
             _activeAgentsNotecardSourceName = null;
             _activeAgentsNotecardItemId = null;
             _activeAgentsNotecardInstalledAt = null;
+        }
+    }
+
+    private void SetBridgeAgentsPrompt(string promptText, string sourceName, UUID objectId, string itemId)
+    {
+        var normalized = NormalizePromptText(promptText);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return;
+        }
+
+        lock (_promptStateLock)
+        {
+            _bridgeAgentsPrompt = normalized;
+            _bridgeAgentsPromptSourceName = sourceName;
+            _bridgeAgentsPromptItemId = itemId;
+            _bridgeAgentsPromptObjectId = objectId;
+            _bridgeAgentsPromptInstalledAt = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private static string NormalizeMoodName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var chars = value.Trim()
+            .Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_')
+            .ToArray();
+        if (chars.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var normalized = new string(chars).ToLowerInvariant();
+        return normalized.Length <= 48 ? normalized : normalized[..48];
+    }
+
+    private void QueueBridgeAgentsPromptProbe(UUID bridgeObjectId, string senderName)
+    {
+        if (!_options.PromptHandlingEnabled || !_options.PromptNotecardEnabled || bridgeObjectId == UUID.Zero)
+        {
+            return;
+        }
+
+        lock (_promptStateLock)
+        {
+            if (_bridgeAgentsProbeInFlight && _bridgeAgentsProbeObjectId == bridgeObjectId)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_bridgeAgentsPrompt) && _bridgeAgentsPromptObjectId == bridgeObjectId)
+            {
+                return;
+            }
+
+            _bridgeAgentsProbeInFlight = true;
+            _bridgeAgentsProbeObjectId = bridgeObjectId;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await TryInstallAgentsPromptFromBridgeObjectAsync(bridgeObjectId, senderName).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_promptStateLock)
+                {
+                    _bridgeAgentsProbeInFlight = false;
+                }
+            }
+        });
+    }
+
+    private async Task TryInstallAgentsPromptFromBridgeObjectAsync(UUID bridgeObjectId, string senderName)
+    {
+        var attempts = 0;
+        while (attempts < 5)
+        {
+            attempts++;
+            await Task.Delay(TimeSpan.FromMilliseconds(300)).ConfigureAwait(false);
+
+            await _actionGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                var client = _client;
+                var sim = client?.Network.CurrentSim;
+                if (client == null || sim == null)
+                {
+                    return;
+                }
+
+                Primitive? bridgePrim = null;
+                foreach (var prim in sim.ObjectsPrimitives.Values)
+                {
+                    if (prim.ID == bridgeObjectId)
+                    {
+                        bridgePrim = prim;
+                        break;
+                    }
+                }
+
+                if (bridgePrim == null)
+                {
+                    continue;
+                }
+
+                var entries = await client.Inventory
+                    .GetTaskInventoryAsync(bridgeObjectId, bridgePrim.LocalID, sim, CancellationToken.None)
+                    .ConfigureAwait(false);
+
+                var agentsItem = entries
+                    .OfType<InventoryItem>()
+                    .FirstOrDefault(item => string.Equals(item.Name?.Trim(), "AGENTS.md", StringComparison.OrdinalIgnoreCase)
+                        && item.AssetType == AssetType.Notecard);
+                if (agentsItem == null)
+                {
+                    lock (_promptStateLock)
+                    {
+                        if (_bridgeAgentsPromptObjectId == bridgeObjectId)
+                        {
+                            _bridgeAgentsPrompt = null;
+                            _bridgeAgentsPromptSourceName = null;
+                            _bridgeAgentsPromptItemId = null;
+                            _bridgeAgentsPromptInstalledAt = null;
+                        }
+                    }
+
+                    Console.WriteLine($"[prompt] bridge object {bridgeObjectId} has no AGENTS.md task notecard.");
+                    return;
+                }
+
+                var ownerId = bridgePrim.Properties?.OwnerID ?? client.Self.AgentID;
+                var notecardAsset = await client.Assets.RequestInventoryAssetAsync(
+                    agentsItem.AssetUUID,
+                    agentsItem.UUID,
+                    bridgeObjectId,
+                    ownerId,
+                    AssetType.Notecard,
+                    true,
+                    UUID.Random(),
+                    CancellationToken.None).ConfigureAwait(false);
+
+                if (notecardAsset?.AssetData == null || notecardAsset.AssetData.Length == 0)
+                {
+                    Console.WriteLine($"[prompt] failed to download bridge AGENTS.md from object {bridgeObjectId}, item={agentsItem.UUID}.");
+                    return;
+                }
+
+                var notecard = new AssetNotecard(agentsItem.AssetUUID, notecardAsset.AssetData);
+                if (!notecard.Decode() || string.IsNullOrWhiteSpace(notecard.BodyText))
+                {
+                    Console.WriteLine($"[prompt] failed to decode bridge AGENTS.md from object {bridgeObjectId}, item={agentsItem.UUID}.");
+                    return;
+                }
+
+                SetBridgeAgentsPrompt(notecard.BodyText, senderName, bridgeObjectId, agentsItem.UUID.ToString());
+                Console.WriteLine($"[prompt] installed bridge-object AGENTS.md prompt from '{senderName}', object={bridgeObjectId}, item={agentsItem.UUID}.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (attempts >= 5)
+                {
+                    Console.WriteLine($"[prompt] failed to probe bridge object AGENTS.md: {ex.Message}");
+                }
+            }
+            finally
+            {
+                _actionGate.Release();
+            }
         }
     }
 
@@ -4667,6 +5176,13 @@ internal sealed partial class BotSession : IDisposable
                 {
                     lines.Add($"notecard installedAtUtc: {_activeAgentsNotecardInstalledAt.Value:O}");
                 }
+
+                if (_bridgeAgentsPromptInstalledAt.HasValue)
+                {
+                    lines.Add($"bridge AGENTS.md object: {_bridgeAgentsPromptObjectId}");
+                    lines.Add($"bridge AGENTS.md itemId: {_bridgeAgentsPromptItemId ?? "(unknown)"}");
+                    lines.Add($"bridge AGENTS.md installedAtUtc: {_bridgeAgentsPromptInstalledAt.Value:O}");
+                }
             }
 
             SendImText(client, agentId, from, string.Join("\n", lines));
@@ -4706,8 +5222,16 @@ internal sealed partial class BotSession : IDisposable
                     }
 
                     break;
+                case "bridge":
+                    promptName = "dialog bridge object AGENTS.md";
+                    lock (_promptStateLock)
+                    {
+                        promptText = _bridgeAgentsPrompt;
+                    }
+
+                    break;
                 default:
-                    SendImText(client, agentId, from, "Usage: *prompt show [effective|builtin|project|notecard]");
+                    SendImText(client, agentId, from, "Usage: *prompt show [effective|builtin|project|notecard|bridge]");
                     return Task.CompletedTask;
             }
 
@@ -4745,7 +5269,7 @@ internal sealed partial class BotSession : IDisposable
             return Task.CompletedTask;
         }
 
-        SendImText(client, agentId, from, "Usage: *prompt status | *prompt show [effective|builtin|project|notecard] | *prompt clear-notecard | *prompt reload-project");
+        SendImText(client, agentId, from, "Usage: *prompt status | *prompt show [effective|builtin|project|notecard|bridge] | *prompt clear-notecard | *prompt reload-project");
         return Task.CompletedTask;
     }
 
@@ -4778,9 +5302,7 @@ internal sealed partial class BotSession : IDisposable
                 $"request channel: {LslDialogBridgeRequestChannel}",
                 $"require trusted sender: {requireTrusted}",
                 $"trusted object pin: {(pinnedObjectId == UUID.Zero ? "(none)" : pinnedObjectId.ToString())}",
-                $"trusted owner pin: {(pinnedOwnerId == UUID.Zero ? "(none)" : pinnedOwnerId.ToString())}",
-                "Install command: *bridge install",
-                "Uninstall command: *bridge uninstall [keep-scripts]"
+                $"trusted owner pin: {(pinnedOwnerId == UUID.Zero ? "(none)" : pinnedOwnerId.ToString())}"
             };
             SendImText(client, agentId, from, string.Join("\n", lines));
             return;
@@ -4794,16 +5316,7 @@ internal sealed partial class BotSession : IDisposable
                 return;
             }
 
-            var install = await DialogBridgeInstallAsync(
-                null,
-                objectName: "Opencode Dialog Bridge",
-                objectDescription: "Auto-installed dialog bridge prim",
-                folderId: null,
-                offsetX: 1.5f,
-                offsetY: 0f,
-                offsetZ: 0.5f,
-                pinAsTrustedSender: true,
-                CancellationToken.None).ConfigureAwait(false);
+            var install = await DialogBridgeInstallAsync(CancellationToken.None).ConfigureAwait(false);
 
             SendImText(client, agentId, from, install.Message);
             return;
@@ -4817,13 +5330,7 @@ internal sealed partial class BotSession : IDisposable
                 return;
             }
 
-            var keepScripts = parts.Skip(1).Any(p =>
-                p.Equals("keep-scripts", StringComparison.OrdinalIgnoreCase)
-                || p.Equals("--keep-scripts", StringComparison.OrdinalIgnoreCase)
-                || p.Equals("no-delete-scripts", StringComparison.OrdinalIgnoreCase));
-            var deleteScripts = !keepScripts;
-
-            var uninstall = await DialogBridgeUninstallAsync(deleteScripts, clearTrustPins: true, CancellationToken.None).ConfigureAwait(false);
+            var uninstall = await DialogBridgeUninstallAsync(clearTrustPins: true, CancellationToken.None).ConfigureAwait(false);
             SendImText(client, agentId, from, uninstall.Message);
             return;
         }
@@ -5280,7 +5787,13 @@ internal sealed partial class BotSession : IDisposable
     {
         if (question.Options.Count == 0)
         {
-            Console.WriteLine($"[dialog-bridge] skip offer: no options for question {question.Id}.");
+            // Free-text prompt: use llTextBox through the bridge when custom answers are allowed.
+            if (question.AllowsCustom != false)
+            {
+                return TryOfferQuestionTextInputViaLslDialogBridge(client, conversationKey, question);
+            }
+
+            Console.WriteLine($"[dialog-bridge] skip offer: no options/custom input disabled for question {question.Id}.");
             return false;
         }
 
@@ -5291,14 +5804,15 @@ internal sealed partial class BotSession : IDisposable
             return false;
         }
 
-        // Strict alpha payload format:
-        // dlgreq|conversation|questionId|target|header|prompt|optionCount|opt1|opt2|...
+        // Payload format:
+        // dlgreq|conversation|requestId|target|replyTarget|header|prompt|optionCount|opt1|opt2|...
         var header = question.Header?.Trim() ?? string.Empty;
         var prompt = BuildCompactQuestionDialogPrompt(question);
         var payload = BuildLslDialogBridgeRequestPayloadWithinLimit(
             conversationKey,
             question.Id,
             targetAgentId,
+            client.Self.AgentID,
             header,
             prompt,
             question.Options,
@@ -5308,6 +5822,7 @@ internal sealed partial class BotSession : IDisposable
             Console.WriteLine($"[dialog-bridge] compacted question payload for {question.Id}: {payload.Length} chars.");
         }
 
+        SendDialogBridgePing(client, conversationKey, question.Id, "question");
         client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
         if (payload.Length > LslDialogBridgeMaxPayloadLength)
         {
@@ -5315,6 +5830,37 @@ internal sealed partial class BotSession : IDisposable
         }
         Console.WriteLine(
             $"[dialog-bridge] offered question via channel {LslDialogBridgeRequestChannel}: conversation={conversationKey} question={question.Id} options={question.Options.Count} target={targetAgentId} payloadLength={payload.Length}");
+        return true;
+    }
+
+    private bool TryOfferQuestionTextInputViaLslDialogBridge(GridClient client, string conversationKey, OpencodePendingQuestion question)
+    {
+        if (!_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
+            || targetAgentId == UUID.Zero)
+        {
+            Console.WriteLine($"[dialog-bridge] skip text offer: no target agent mapped for conversation {conversationKey}.");
+            return false;
+        }
+
+        var header = question.Header?.Trim() ?? string.Empty;
+        var prompt = BuildCompactQuestionDialogPrompt(question);
+        var payload = BuildLslDialogBridgeTextRequestPayload(
+            conversationKey,
+            question.Id,
+            targetAgentId,
+            client.Self.AgentID,
+            header,
+            prompt);
+
+        SendDialogBridgePing(client, conversationKey, question.Id, "question-text");
+        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
+        if (payload.Length > LslDialogBridgeMaxPayloadLength)
+        {
+            Console.WriteLine($"[dialog-bridge] warning: text payload length {payload.Length} may be truncated by simulator chat limits.");
+        }
+
+        Console.WriteLine(
+            $"[dialog-bridge] offered question text input via channel {LslDialogBridgeRequestChannel}: conversation={conversationKey} question={question.Id} target={targetAgentId} payloadLength={payload.Length}");
         return true;
     }
 
@@ -5342,6 +5888,7 @@ internal sealed partial class BotSession : IDisposable
             conversationKey,
             bridgeRequestId,
             targetAgentId,
+            client.Self.AgentID,
             header,
             prompt,
             LslPermissionDialogOptions,
@@ -5351,6 +5898,7 @@ internal sealed partial class BotSession : IDisposable
             Console.WriteLine($"[dialog-bridge] compacted permission payload for {permissionId}: {payload.Length} chars.");
         }
 
+        SendDialogBridgePing(client, conversationKey, bridgeRequestId, "permission");
         client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
         if (payload.Length > LslDialogBridgeMaxPayloadLength)
         {
@@ -5364,6 +5912,28 @@ internal sealed partial class BotSession : IDisposable
 
     private async Task<bool> TryHandleLslDialogBridgeReplyAsync(GridClient client, UUID senderObjectId, string senderName, string text)
     {
+        if (TryParseLslDialogBridgePong(text, out var pingNonce, out var pingProto))
+        {
+            if (!IsTrustedDialogBridgeSender(client, senderObjectId, senderName, string.Empty))
+            {
+                return false;
+            }
+
+            Console.WriteLine($"[dialog-bridge] ping ack: nonce={pingNonce} proto={pingProto} sender={senderObjectId}");
+            return true;
+        }
+
+        if (TryParseLslDialogBridgeAck(text, out var ackConversationKey, out var ackRequestId, out var ackMode))
+        {
+            if (!IsTrustedDialogBridgeSender(client, senderObjectId, senderName, ackConversationKey))
+            {
+                return false;
+            }
+
+            Console.WriteLine($"[dialog-bridge] ui ack: conversation={ackConversationKey} request={ackRequestId} mode={ackMode} sender={senderObjectId}");
+            return true;
+        }
+
         if (!TryParseLslDialogBridgeReply(text, out var conversationKey, out var requestId, out var answer))
         {
             Console.WriteLine("[dialog-bridge] ignored object IM: not a dialog-bridge reply payload.");
@@ -5374,6 +5944,8 @@ internal sealed partial class BotSession : IDisposable
         {
             return false;
         }
+
+        QueueBridgeAgentsPromptProbe(senderObjectId, senderName);
 
         if (IsDuplicateDialogBridgeReply(conversationKey, requestId, answer))
         {
@@ -5691,6 +6263,64 @@ internal sealed partial class BotSession : IDisposable
             && !string.IsNullOrWhiteSpace(answer);
     }
 
+    private static bool TryParseLslDialogBridgeAck(string text, out string conversationKey, out string requestId, out string mode)
+    {
+        conversationKey = string.Empty;
+        requestId = string.Empty;
+        mode = string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var parts = text.Split('|');
+        if (parts.Length < 4 || !parts[0].Equals(LslDialogBridgeAckPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        conversationKey = DecodeDialogToken(parts[1]);
+        requestId = DecodeDialogToken(parts[2]);
+        mode = DecodeDialogToken(parts[3]);
+        return !string.IsNullOrWhiteSpace(conversationKey)
+            && !string.IsNullOrWhiteSpace(requestId)
+            && !string.IsNullOrWhiteSpace(mode);
+    }
+
+    private static bool TryParseLslDialogBridgePong(string text, out string nonce, out string proto)
+    {
+        nonce = string.Empty;
+        proto = string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var parts = text.Split('|');
+        if (parts.Length < 3 || !parts[0].Equals(LslDialogBridgePongPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        nonce = DecodeDialogToken(parts[1]);
+        proto = DecodeDialogToken(parts[2]);
+        return !string.IsNullOrWhiteSpace(nonce) && !string.IsNullOrWhiteSpace(proto);
+    }
+
+    private static void SendDialogBridgePing(GridClient client, string conversationKey, string requestId, string kind)
+    {
+        var nonce = $"{kind}:{conversationKey}:{requestId}:{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        var payload = string.Join("|", new[]
+        {
+            LslDialogBridgePingPrefix,
+            EncodeDialogToken(nonce),
+            EncodeDialogToken(client.Self.AgentID.ToString())
+        });
+
+        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
+        Console.WriteLine($"[dialog-bridge] sent ping: nonce={nonce} channel={LslDialogBridgeRequestChannel}");
+    }
+
     private static string BuildPermissionDialogHeader(OpencodePendingPermission permission)
     {
         var title = permission.Title?.Trim() ?? string.Empty;
@@ -5702,14 +6332,10 @@ internal sealed partial class BotSession : IDisposable
 
     private static string BuildPermissionDialogPrompt(OpencodePendingPermission permission)
     {
-        if (!string.IsNullOrWhiteSpace(permission.Description))
+        var primary = GetPermissionPrimaryText(permission, out _);
+        if (!string.IsNullOrWhiteSpace(primary))
         {
-            return permission.Description.Trim();
-        }
-
-        if (!string.IsNullOrWhiteSpace(permission.Title))
-        {
-            return permission.Title.Trim();
+            return CompactPermissionSummary(primary, maxChars: 180, maxTokens: 18);
         }
 
         return "Choose whether to allow this action.";
@@ -5740,6 +6366,7 @@ internal sealed partial class BotSession : IDisposable
         string conversationKey,
         string requestId,
         UUID targetAgentId,
+        UUID replyTargetAgentId,
         string header,
         string prompt,
         IReadOnlyList<string> options,
@@ -5753,6 +6380,7 @@ internal sealed partial class BotSession : IDisposable
             conversationKey,
             requestId,
             targetAgentId,
+            replyTargetAgentId,
             normalizedHeader,
             normalizedPrompt,
             options);
@@ -5765,7 +6393,7 @@ internal sealed partial class BotSession : IDisposable
 
         // First shed prompt verbosity while keeping header context.
         normalizedPrompt = CompactForBridge(normalizedPrompt, 80);
-        payload = BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, normalizedHeader, normalizedPrompt, options);
+        payload = BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, replyTargetAgentId, normalizedHeader, normalizedPrompt, options);
         if (payload.Length <= LslDialogBridgeMaxPayloadLength)
         {
             return payload;
@@ -5774,14 +6402,14 @@ internal sealed partial class BotSession : IDisposable
         // If still too large, reduce both header and prompt until payload fits.
         normalizedHeader = CompactForBridge(normalizedHeader, 36);
         normalizedPrompt = CompactForBridge(normalizedPrompt, 36);
-        payload = BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, normalizedHeader, normalizedPrompt, options);
+        payload = BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, replyTargetAgentId, normalizedHeader, normalizedPrompt, options);
         if (payload.Length <= LslDialogBridgeMaxPayloadLength)
         {
             return payload;
         }
 
         // Last-resort minimal body to preserve operability over strict prompt fidelity.
-        return BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, "Approval required", "Choose an option.", options);
+        return BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, replyTargetAgentId, "Approval required", "Choose an option.", options);
     }
 
     private static string CompactForBridge(string text, int maxLength)
@@ -5807,7 +6435,7 @@ internal sealed partial class BotSession : IDisposable
         var description = permission.Description?.Trim();
         if (string.IsNullOrWhiteSpace(description))
         {
-            return BuildPermissionDialogPrompt(permission);
+            return CompactPermissionSummary(GetPermissionPrimaryText(permission, out _));
         }
 
         var lines = description
@@ -5821,16 +6449,58 @@ internal sealed partial class BotSession : IDisposable
 
         if (!string.IsNullOrWhiteSpace(firstPattern))
         {
-            return firstPattern;
+            return CompactPermissionSummary(firstPattern);
         }
 
-        return lines[0];
+        return CompactPermissionSummary(lines[0]);
     }
+
+    private static string CompactPermissionSummary(string? rawText, int maxChars = 120, int maxTokens = 10)
+    {
+        if (string.IsNullOrWhiteSpace(rawText))
+        {
+            return string.Empty;
+        }
+
+        var firstLine = rawText
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault();
+        var candidate = string.IsNullOrWhiteSpace(firstLine) ? rawText.Trim() : firstLine;
+
+        // Collapse whitespace so multi-line shell snippets become a short, readable one-liner.
+        candidate = string.Join(" ", candidate.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (LooksLikePermissionRequestId(candidate))
+        {
+            return "Approval required";
+        }
+
+        if (maxTokens > 0)
+        {
+            var tokens = candidate.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length > maxTokens)
+            {
+                candidate = string.Join(" ", tokens.Take(maxTokens)) + " ...";
+            }
+        }
+
+        if (maxChars > 0 && candidate.Length > maxChars)
+        {
+            candidate = candidate[..Math.Max(1, maxChars - 3)] + "...";
+        }
+
+        return candidate;
+    }
+
+    private static bool LooksLikePermissionRequestId(string value)
+        => !string.IsNullOrWhiteSpace(value)
+            && (value.StartsWith("per_", StringComparison.OrdinalIgnoreCase)
+                || value.StartsWith("que_", StringComparison.OrdinalIgnoreCase));
 
     private static string BuildLslDialogBridgeRequestPayload(
         string conversationKey,
         string requestId,
         UUID targetAgentId,
+        UUID replyTargetAgentId,
         string header,
         string prompt,
         IReadOnlyList<string> options)
@@ -5841,12 +6511,33 @@ internal sealed partial class BotSession : IDisposable
             EncodeDialogToken(conversationKey),
             EncodeDialogToken(requestId),
             EncodeDialogToken(targetAgentId.ToString()),
+            EncodeDialogToken(replyTargetAgentId.ToString()),
             EncodeDialogToken(header),
             EncodeDialogToken(prompt),
             options.Count.ToString()
         };
         payloadParts.AddRange(options.Select(EncodeDialogToken));
         return string.Join("|", payloadParts);
+    }
+
+    private static string BuildLslDialogBridgeTextRequestPayload(
+        string conversationKey,
+        string requestId,
+        UUID targetAgentId,
+        UUID replyTargetAgentId,
+        string header,
+        string prompt)
+    {
+        return string.Join("|", new[]
+        {
+            LslDialogBridgeTextRequestPrefix,
+            EncodeDialogToken(conversationKey),
+            EncodeDialogToken(requestId),
+            EncodeDialogToken(targetAgentId.ToString()),
+            EncodeDialogToken(replyTargetAgentId.ToString()),
+            EncodeDialogToken(header),
+            EncodeDialogToken(prompt)
+        });
     }
 
     private static string EncodeDialogToken(string? value)
@@ -7894,9 +8585,11 @@ internal sealed partial class BotSession : IDisposable
 
                 Console.WriteLine($"[dialog-bridge] current sim: name={sim.Name} handle={sim.Handle} primitives={sim.ObjectsPrimitives?.Count ?? 0}");
 
-                // If we already have a pinned bridge object in this sim, nothing to do.
-                if (TryGetPinnedBridgeObjectInCurrentSim(out _, out _))
+                // If we already have a pinned bridge object in this sim, probe its AGENTS.md now
+                // so prompt status reflects bridge-source state even before any dialog reply arrives.
+                if (TryGetPinnedBridgeObjectInCurrentSim(out var pinnedBridgeObjectId, out _))
                 {
+                    QueueBridgeAgentsPromptProbe(pinnedBridgeObjectId, "trusted bridge object");
                     Console.WriteLine("[dialog-bridge] pinned bridge object present in new region; no auto-provision needed.");
                     return;
                 }
@@ -7939,6 +8632,7 @@ internal sealed partial class BotSession : IDisposable
                                     _trustedDialogBridgeOwnerId = client.Self.AgentID;
                                 }
                                 TrySaveDialogBridgeTrustStateToFile();
+                                QueueBridgeAgentsPromptProbe(attachedObjectId, "worn bridge attachment");
                                 Console.WriteLine($"[dialog-bridge] bridge attachment already worn; refreshed trusted pin object={attachedObjectId} localId={attachedLocalId}.");
                             }
                             else
@@ -7995,7 +8689,7 @@ internal sealed partial class BotSession : IDisposable
                     }
 
                     Console.WriteLine("[dialog-bridge] bridge missing in new region; attempting automatic install...");
-                    var install = await DialogBridgeInstallAsync(null, null, null, null, 1f, 0f, 0f, pinAsTrustedSender: true, CancellationToken.None).ConfigureAwait(false);
+                    var install = await DialogBridgeInstallAsync(CancellationToken.None).ConfigureAwait(false);
                     if (install.Ok)
                     {
                         Console.WriteLine($"[dialog-bridge] auto-installed bridge: {install.Message}");

@@ -91,6 +91,24 @@ internal sealed class BotMcpTools
         return _bot.SendImAsync(agentId, message, cancellationToken);
     }
 
+    [McpServerTool, Description("Set the cube bot mood/emotion on the bridge-controlled emoter attachment.")]
+    public Task<BotToolResult> SetBotMood(
+        [Description("Emotion name (for example: happy, sad, angry, surprised, neutral).")]
+        string emotion,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetBotMoodAsync(emotion, cancellationToken);
+    }
+
+    [McpServerTool, Description("List available cube-bot mood names from textures inside the trusted dialog bridge object.")]
+    public Task<DataToolResult> MoodList(
+        [Description("When true, include utility textures such as 'base' and 'cross' in moodNames.")]
+        bool includeUtilityTextures,
+        CancellationToken cancellationToken)
+    {
+        return _bot.BotMoodListAsync(includeUtilityTextures, cancellationToken);
+    }
+
     [McpServerTool, Description("Get current region EEP environment (ExtEnvironment capability).")]
     public Task<EnvironmentToolResult> EnvGetRegion(CancellationToken cancellationToken)
     {
@@ -1649,37 +1667,17 @@ internal sealed class BotMcpTools
         return _bot.AppearanceBakeDiagnosticsAsync(requestCacheProbe, cacheProbeTimeoutMs, cancellationToken);
     }
 
-    [McpServerTool, Description("Bootstrap-install the dialog bridge by uploading script inventory, creating a prim, and copying script into task inventory.")]
-    public Task<DialogBridgeInstallResult> DialogBridgeInstall(
-        [Description("Optional local path or HTTP/HTTPS URL to dialog-bridge.lsl. Empty = auto-discover lsl/dialog-bridge.lsl.")] string? scriptSource,
-        [Description("Optional bridge prim name. Empty uses default.")] string? objectName,
-        [Description("Optional bridge prim description. Empty uses default.")] string? objectDescription,
-        [Description("Optional destination inventory folder UUID for uploaded script item.")] string? folderId,
-        [Description("Create offset on X axis from bot position.")] float offsetX,
-        [Description("Create offset on Y axis from bot position.")] float offsetY,
-        [Description("Create offset on Z axis from bot position.")] float offsetZ,
-        [Description("If true, pin the installed object as trusted bridge sender at runtime.")] bool pinAsTrustedSender,
-        CancellationToken cancellationToken)
+    [McpServerTool, Description("Bootstrap-install the dialog bridge by uploading and attaching prim containing scripts.")]
+    public Task<DialogBridgeInstallResult> DialogBridgeInstall(CancellationToken cancellationToken)
     {
-        return _bot.DialogBridgeInstallAsync(
-            scriptSource,
-            objectName,
-            objectDescription,
-            folderId,
-            offsetX,
-            offsetY,
-            offsetZ,
-            pinAsTrustedSender,
-            cancellationToken);
+        return _bot.DialogBridgeInstallAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("Uninstall the dialog bridge: delete pinned bridge prim in-world, optionally delete inventory script copies, and clear trust pins.")]
+    [McpServerTool, Description("Uninstall the dialog bridge: delete pinned bridge prim in-world and clear trust pins.")]
     public Task<BotToolResult> DialogBridgeUninstall(
-        [Description("If true, also delete dialog-bridge.lsl copies from inventory Scripts folder.")] bool deleteInventoryScripts,
-        [Description("If true, clear trusted bridge object/owner pins and persist updated trust state.")] bool clearTrustPins,
         CancellationToken cancellationToken)
     {
-        return _bot.DialogBridgeUninstallAsync(deleteInventoryScripts, clearTrustPins, cancellationToken);
+        return _bot.DialogBridgeUninstallAsync(true, cancellationToken);
     }
 
     [McpServerTool, Description("Upload script source (path or URL) to an existing agent inventory script item.")]

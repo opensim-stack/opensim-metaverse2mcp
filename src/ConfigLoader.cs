@@ -44,7 +44,8 @@ internal static class ConfigLoader
             PromptProjectAgentsFile = Env("PROMPT_PROJECT_AGENTS_FILE") ?? "AGENTS.md",
             PromptNotecardEnabled = ParseBool(Env("PROMPT_NOTECARD_ENABLED"), true),
             PromptNotecardRequireHandler = ParseBool(Env("PROMPT_NOTECARD_REQUIRE_HANDLER"), true),
-            PromptMaxChars = ParseInt(Env("PROMPT_MAX_CHARS"), 16000)
+            PromptMaxChars = ParseInt(Env("PROMPT_MAX_CHARS"), 16000),
+            RequesterContextDebugLogging = ParseBool(Env("REQUESTER_CONTEXT_DEBUG_LOGGING"), false)
         };
 
         options.McpPort = ParseInt(Env("MCP_PORT"), 8999);
@@ -132,6 +133,9 @@ internal static class ConfigLoader
             "                                (env: PROMPT_NOTECARD_REQUIRE_HANDLER, default: true)",
             "  --prompt-max-chars <int>      Per-source maximum characters after normalization",
             "                                (env: PROMPT_MAX_CHARS, default: 16000)",
+            "  --requester-context-debug-logging <bool>",
+            "                                Emit debug logs when requester-context prompt layers are attached",
+            "                                (env: REQUESTER_CONTEXT_DEBUG_LOGGING, default: false)",
             string.Empty,
             "MCP HTTP options:",
             "  --mcp-transport <http|sse>     Transport (env: MCP_TRANSPORT, default: http)",
@@ -255,6 +259,9 @@ internal static class ConfigLoader
                     break;
                 case "--prompt-max-chars":
                     options.PromptMaxChars = ParseInt(RequireValue(args, ref i, arg), options.PromptMaxChars);
+                    break;
+                case "--requester-context-debug-logging":
+                    options.RequesterContextDebugLogging = ParseBool(RequireValue(args, ref i, arg), options.RequesterContextDebugLogging);
                     break;
                 case "--mcp-transport":
                     options.McpTransport = RequireValue(args, ref i, arg);

@@ -226,21 +226,6 @@ internal sealed partial class BotSession
         };
     }
 
-    private void LogRetryStatusEvent(string sessionId, string? message)
-    {
-        if (string.IsNullOrWhiteSpace(sessionId))
-        {
-            return;
-        }
-
-        var normalizedSessionId = sessionId.Trim();
-        var normalizedMessage = string.IsNullOrWhiteSpace(message)
-            ? "(no retry details provided by Opencode event payload)"
-            : message.Trim();
-
-        Console.WriteLine($"[opencode] session.status retry: session={normalizedSessionId} message={normalizedMessage}");
-    }
-
     private sealed record OpencodeSessionStateModel(
         int Version,
         string? SessionId,

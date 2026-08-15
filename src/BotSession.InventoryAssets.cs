@@ -1088,16 +1088,7 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<DialogBridgeInstallResult> DialogBridgeInstallAsync(
-        string? scriptSource,
-        string? objectName,
-        string? objectDescription,
-        string? folderId,
-        float offsetX,
-        float offsetY,
-        float offsetZ,
-        bool pinAsTrustedSender,
-        CancellationToken cancellationToken)
+    public async Task<DialogBridgeInstallResult> DialogBridgeInstallAsync(CancellationToken cancellationToken)
     {
         var client = EnsureClient();
 
@@ -1248,7 +1239,7 @@ internal sealed partial class BotSession
             await Task.Delay(400, cancellationToken).ConfigureAwait(false);
         }
 
-        if (pinAsTrustedSender && attachedObjectId != UUID.Zero)
+        if (attachedObjectId != UUID.Zero)
         {
             lock (_dialogBridgeTrustLock)
             {
@@ -1501,12 +1492,12 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> DialogBridgeUninstallAsync(bool deleteInventoryScripts, bool clearTrustPins, CancellationToken cancellationToken)
+    public async Task<BotToolResult> DialogBridgeUninstallAsync(bool clearTrustPins, CancellationToken cancellationToken)
     {
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var details = new List<string>();
-            var bridgeDeleted = false;
+            var bridgeDetached = false;
 
             if (TryGetPinnedBridgeObjectInCurrentSim(out var pinnedObjectId, out var pinnedLocalId))
             {
@@ -1532,19 +1523,6 @@ internal sealed partial class BotSession
                         client.Appearance.Detach(attachItemId);
                         details.Add($"Requested detach for worn bridge attachment item {attachItemId}.");
 
-                        // Give simulator a moment to process detach before removing inventory item.
-                        await Task.Delay(TimeSpan.FromMilliseconds(350), token).ConfigureAwait(false);
-
-                        try
-                        {
-                            await client.Inventory.RemoveItemAsync(attachItemId, token).ConfigureAwait(false);
-                            bridgeDeleted = true;
-                            details.Add($"Delete request sent for bridge attachment inventory item {attachItemId}.");
-                        }
-                        catch (Exception ex)
-                        {
-                            details.Add($"Detach sent for bridge attachment item {attachItemId}, but delete request failed: {ex.Message}");
-                        }
                     }
                     else
                     {
@@ -1554,56 +1532,13 @@ internal sealed partial class BotSession
                 else
                 {
                     client.Inventory.RequestDeRezToInventory(pinnedLocalId);
-                    bridgeDeleted = true;
+                    bridgeDetached  = true;
                     details.Add($"Requested bridge prim delete (de-rez): object={pinnedObjectId}, localId={pinnedLocalId}.");
                 }
             }
             else
             {
                 details.Add("No pinned bridge object was found in the current simulator cache.");
-            }
-
-            if (deleteInventoryScripts)
-            {
-                var rootFolder = client.Inventory.Store?.RootFolder;
-                if (rootFolder == null)
-                {
-                    details.Add("Could not resolve inventory root folder for bridge script cleanup.");
-                }
-                else
-                {
-                    var scriptItems = await FindDialogBridgeScriptItemIdsAsync(client, rootFolder.UUID, token).ConfigureAwait(false);
-
-                    var deleteErrors = 0;
-                    foreach (var scriptItemId in scriptItems)
-                    {
-                        try
-                        {
-                            await client.Inventory.RemoveItemAsync(scriptItemId, token).ConfigureAwait(false);
-                        }
-                        catch
-                        {
-                            deleteErrors++;
-                        }
-                    }
-
-                    // Allow inventory cache to settle before reporting what remains.
-                    await Task.Delay(TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
-                    var remaining = await FindDialogBridgeScriptItemIdsAsync(client, rootFolder.UUID, token).ConfigureAwait(false);
-
-                    details.Add(scriptItems.Count == 0
-                        ? "No dialog-bridge.lsl script items were found in inventory."
-                        : $"Delete requests sent for {scriptItems.Count} dialog-bridge.lsl inventory script item(s).");
-
-                    if (deleteErrors > 0)
-                    {
-                        details.Add($"{deleteErrors} delete request(s) failed immediately.");
-                    }
-
-                    details.Add(remaining.Count == 0
-                        ? "No dialog-bridge.lsl inventory script items remain (from current recursive listing)."
-                        : $"{remaining.Count} dialog-bridge.lsl inventory script item(s) still listed after delete request.");
-                }
             }
 
             if (clearTrustPins)
@@ -1618,7 +1553,7 @@ internal sealed partial class BotSession
                 details.Add("Cleared runtime trusted bridge object/owner pins.");
             }
 
-            if (!bridgeDeleted && !deleteInventoryScripts && !clearTrustPins)
+            if (!bridgeDetached && !clearTrustPins)
             {
                 details.Add("No uninstall actions were requested.");
             }
@@ -1947,22 +1882,6 @@ internal sealed partial class BotSession
             uploadedAssetId.ToString(),
             data.Length,
             $"Uploaded {data.Length} bytes as script into folder {folderUuid} (item={createdItem.UUID}, status='{upload.uploadStatus}', compileSuccess={upload.compileSuccess}).");
-    }
-
-    private static async Task<List<UUID>> FindDialogBridgeScriptItemIdsAsync(
-        GridClient client,
-        UUID rootFolderId,
-        CancellationToken cancellationToken)
-    {
-        var folders = new List<InventoryFolder>();
-        var items = new List<InventoryItem>();
-        await client.Inventory.GetInventoryRecursiveAsync(rootFolderId, client.Self.AgentID, folders, items, cancellationToken).ConfigureAwait(false);
-
-        return items
-            .Where(item => string.Equals(item.Name?.Trim(), "dialog-bridge.lsl", StringComparison.OrdinalIgnoreCase))
-            .Select(item => item.UUID)
-            .Distinct()
-            .ToList();
     }
 
     private static bool TryResolveUploadTypes(
@@ -3153,56 +3072,6 @@ internal sealed partial class BotSession
         return false;
     }
 
-    private static bool TryResolveDialogBridgeScriptSource(string? requestedSource, out string resolvedSource, out string error)
-    {
-        resolvedSource = string.Empty;
-        error = string.Empty;
-
-        var trimmed = requestedSource?.Trim();
-        if (!string.IsNullOrWhiteSpace(trimmed))
-        {
-            if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
-                && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
-            {
-                resolvedSource = trimmed;
-                return true;
-            }
-
-            var explicitPath = Path.GetFullPath(trimmed);
-            if (!File.Exists(explicitPath))
-            {
-                error = $"dialog bridge script source was not found: {explicitPath}";
-                return false;
-            }
-
-            resolvedSource = explicitPath;
-            return true;
-        }
-
-        var candidates = new[]
-        {
-            Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "lsl", "dialog-bridge.lsl")),
-            Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", "lsl", "dialog-bridge.lsl")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "lsl", "dialog-bridge.lsl")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "lsl", "dialog-bridge.lsl")),
-            "/app/lsl/dialog-bridge.lsl"
-        };
-
-        foreach (var candidate in candidates)
-        {
-            if (!File.Exists(candidate))
-            {
-                continue;
-            }
-
-            resolvedSource = candidate;
-            return true;
-        }
-
-        error = "dialog bridge script source was not provided and lsl/dialog-bridge.lsl was not found. Provide scriptSource as a local path or URL.";
-        return false;
-    }
-
     private static InventoryEntry ToInventoryEntry(InventoryBase entry)
     {
         if (entry is InventoryFolder folder)
@@ -3808,4 +3677,3 @@ internal sealed record DialogBridgeInstallResult(
     public static DialogBridgeInstallResult FailResult(string message)
         => new(false, message, 0, null, null, null, null);
 }
-

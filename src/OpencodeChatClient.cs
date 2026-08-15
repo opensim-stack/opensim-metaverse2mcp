@@ -58,7 +58,12 @@ internal sealed record OpencodePendingQuestion(string Id, string SessionId, stri
 internal sealed record OpencodeProviderAuthMethod(int MethodIndex, string Type, string Label);
 internal sealed record OpencodeOAuthStartResult(string Url, string? Method, string? Instructions);
 internal sealed record OpencodeOAuthCompleteResult(bool CallbackAccepted, bool ProviderConfigured, string Message);
-internal sealed record OpencodeSessionStatusEvent(string SessionId, string StatusType, string? StatusMessage = null);
+internal sealed record OpencodeSessionStatusEvent(
+    string SessionId,
+    string StatusType,
+    string? StatusMessage = null,
+    DateTimeOffset? NextRetryAt = null,
+    int? Attempt = null);
 internal sealed record OpencodeMessagePartUpdatedEvent(string SessionId, string PartType);
 
 internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
@@ -427,8 +432,82 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             statusMessage = TryExtractStatusMessage(root);
         }
 
-        statusEvent = new OpencodeSessionStatusEvent(sessionId, statusType, statusMessage);
+        DateTimeOffset? nextRetryAt = null;
+        int? attempt = null;
+        if (statusType.Equals("retry", StringComparison.OrdinalIgnoreCase))
+        {
+            nextRetryAt = TryExtractRetryNextAt(source) ?? TryExtractRetryNextAt(root);
+            attempt = TryExtractRetryAttempt(source) ?? TryExtractRetryAttempt(root);
+        }
+
+        statusEvent = new OpencodeSessionStatusEvent(sessionId, statusType, statusMessage, nextRetryAt, attempt);
         return true;
+    }
+
+    private static DateTimeOffset? TryExtractRetryNextAt(JsonElement source)
+    {
+        if (source.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        long? millis = null;
+        if (source.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.Object
+            && status.TryGetProperty("next", out var nestedNext)
+            && nestedNext.ValueKind == JsonValueKind.Number
+            && nestedNext.TryGetInt64(out var nestedMillis))
+        {
+            millis = nestedMillis;
+        }
+
+        if (millis == null
+            && source.TryGetProperty("next", out var directNext)
+            && directNext.ValueKind == JsonValueKind.Number
+            && directNext.TryGetInt64(out var directMillis))
+        {
+            millis = directMillis;
+        }
+
+        if (millis == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return DateTimeOffset.FromUnixTimeMilliseconds(millis.Value);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int? TryExtractRetryAttempt(JsonElement source)
+    {
+        if (source.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (source.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.Object
+            && status.TryGetProperty("attempt", out var nestedAttempt)
+            && nestedAttempt.ValueKind == JsonValueKind.Number
+            && nestedAttempt.TryGetInt32(out var nestedValue))
+        {
+            return nestedValue;
+        }
+
+        if (source.TryGetProperty("attempt", out var directAttempt)
+            && directAttempt.ValueKind == JsonValueKind.Number
+            && directAttempt.TryGetInt32(out var directValue))
+        {
+            return directValue;
+        }
+
+        return null;
     }
 
     private static string? TryExtractStatusMessage(JsonElement source)
@@ -2361,6 +2440,14 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             ? parsedResponse!.Trim().ToLowerInvariant()
             : null;
         if (response is "once" or "always" or "reject" or "allow" or "deny")
+        {
+            return false;
+        }
+
+        var reply = TryGetStringProperty(element, "reply", out var parsedReply) && !string.IsNullOrWhiteSpace(parsedReply)
+            ? parsedReply!.Trim().ToLowerInvariant()
+            : null;
+        if (reply is "once" or "always" or "reject" or "allow" or "deny")
         {
             return false;
         }

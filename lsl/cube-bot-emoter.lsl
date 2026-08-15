@@ -25,31 +25,41 @@ applyFaces()
     ]);
 }
 
+setMood(string rawMood)
+{
+    string mood = llToLower(llStringTrim(rawMood, STRING_TRIM));
+    key tex = textureByName(mood);
+    if (tex == NULL_KEY)
+    {
+        llOwnerSay("No texture named '" + mood + "' in my inventory.");
+        return;
+    }
+
+    applyFaces();
+
+    llSetLinkPrimitiveParamsFast(LINK_THIS,
+    [
+        PRIM_TEXTURE, 1, tex, <1,1,0>, ZERO_VECTOR, 0.0,
+        PRIM_TEXTURE, 2, tex, <1,1,0>, ZERO_VECTOR, 0.0,
+        PRIM_TEXTURE, 3, tex, <1,1,0>, ZERO_VECTOR, 0.0,
+        PRIM_TEXTURE, 4, tex, <1,1,0>, ZERO_VECTOR, 0.0
+    ]);
+}
+
 default
 {
     state_entry()
     {
-        llListen(CHANNEL, "", NULL_KEY, "");
         applyFaces();
     }
 
-    listen(integer channel, string name, key id, string message)
+    link_message(integer sender_num, integer num, string str, key id)
     {
-        key tex = textureByName(message);
-        if (tex == NULL_KEY)
+        if (num != CHANNEL)
         {
-            llOwnerSay("No texture named '" + message + "' in my inventory.");
             return;
         }
 
-        applyFaces();
-
-        llSetLinkPrimitiveParamsFast(LINK_THIS,
-        [
-            PRIM_TEXTURE, 1, tex, <1,1,0>, ZERO_VECTOR, 0.0,
-            PRIM_TEXTURE, 2, tex, <1,1,0>, ZERO_VECTOR, 0.0,
-            PRIM_TEXTURE, 3, tex, <1,1,0>, ZERO_VECTOR, 0.0,
-            PRIM_TEXTURE, 4, tex, <1,1,0>, ZERO_VECTOR, 0.0
-        ]);
+        setMood(str);
     }
 }
