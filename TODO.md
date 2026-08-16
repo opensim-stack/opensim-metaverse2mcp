@@ -78,12 +78,6 @@ Scope notes:
 
 ## 5) Inventory and Asset Management
 
-- [x] **[P1] Inventory browsing ergonomics**
-  - Add search/filter by name/type/date/creator.
-  - Return paginated results with cursors for large inventories.
-- [ ] **[P1] Inventory CRUD tools**
-  - Create/rename/move/delete folders and items.
-  - Copy/link items and folder-level organization tools.
 - [ ] **[P1] Notecard and script text editing workflows**
   - Fetch/edit/save textual assets with version checks.
 - [ ] **[P1] Asset type coverage expansion**

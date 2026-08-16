@@ -1354,6 +1354,82 @@ internal sealed class BotMcpTools
             cancellationToken);
     }
 
+    [McpServerTool, Description("Create a new inventory folder under a parent folder (or root if omitted).")]
+    public Task<BotToolResult> InventoryCreateFolder(
+        [Description("Optional parent folder UUID. Leave empty for inventory root.")] string? parentFolderId,
+        [Description("Folder name.")] string name,
+        [Description("Preferred folder type (optional, defaults to None).") ] string? preferredType,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryCreateFolderAsync(parentFolderId, name, preferredType, cancellationToken);
+    }
+
+    [McpServerTool, Description("Rename an inventory folder by UUID.")]
+    public Task<BotToolResult> InventoryRenameFolder(
+        [Description("Inventory folder UUID to rename.")] string folderId,
+        [Description("New folder name.")] string newName,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryRenameFolderAsync(folderId, newName, cancellationToken);
+    }
+
+    [McpServerTool, Description("Rename an inventory item by UUID.")]
+    public Task<BotToolResult> InventoryRenameItem(
+        [Description("Inventory item UUID to rename.")] string itemId,
+        [Description("New item name.")] string newName,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryRenameItemAsync(itemId, newName, cancellationToken);
+    }
+
+    [McpServerTool, Description("Move an inventory folder to a new parent folder.")]
+    public Task<BotToolResult> InventoryMoveFolder(
+        [Description("Inventory folder UUID to move.")] string folderId,
+        [Description("Destination parent folder UUID.")] string destinationParentFolderId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryMoveFolderAsync(folderId, destinationParentFolderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Move an inventory item to a destination folder.")]
+    public Task<BotToolResult> InventoryMoveItem(
+        [Description("Inventory item UUID to move.")] string itemId,
+        [Description("Destination folder UUID.")] string destinationFolderId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryMoveItemAsync(itemId, destinationFolderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Move multiple inventory items to a destination folder.")]
+    public Task<BotToolResult> InventoryMoveMany(
+        [Description("Comma-separated inventory item UUIDs.")] string itemIdsCsv,
+        [Description("Destination folder UUID.")] string destinationFolderId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryMoveManyAsync(itemIdsCsv, destinationFolderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Copy an inventory item to another folder, optionally with a new name.")]
+    public Task<BotToolResult> InventoryCopyItem(
+        [Description("Source inventory item UUID.")] string itemId,
+        [Description("Destination folder UUID.")] string destinationFolderId,
+        [Description("Optional new name for the copied item.")] string? newName,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryCopyItemAsync(itemId, destinationFolderId, newName, cancellationToken);
+    }
+
+    [McpServerTool, Description("Create an inventory link item pointing to another inventory item.")]
+    public Task<BotToolResult> InventoryLinkItem(
+        [Description("Source inventory item UUID to link to.")] string itemId,
+        [Description("Destination folder UUID for the link item.")] string destinationFolderId,
+        [Description("Optional link item name. Defaults to source item name.")] string? linkName,
+        [Description("Optional link item description. Defaults to source item description.")] string? linkDescription,
+        CancellationToken cancellationToken)
+    {
+        return _bot.InventoryLinkItemAsync(itemId, destinationFolderId, linkName, linkDescription, cancellationToken);
+    }
+
     [McpServerTool, Description("Give one inventory item to another avatar UUID.")]
     public Task<BotToolResult> InventoryGiveItem(
         [Description("Inventory item UUID to send.")] string itemId,
