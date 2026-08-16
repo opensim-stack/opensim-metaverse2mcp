@@ -1047,11 +1047,50 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> ScriptCopyInventoryToTaskAsync(uint objectLocalId, string inventoryScriptItemId, bool enableScript, CancellationToken cancellationToken)
+    public async Task<BotToolResult> ScriptCopyInventoryToTaskAsync(
+        uint objectLocalId,
+        string inventoryScriptItemId,
+        bool enableScript,
+        bool forceOverwrite,
+        CancellationToken cancellationToken)
     {
-        if (!UUID.TryParse(inventoryScriptItemId, out var scriptItemUuid))
+        return await CopyInventoryItemToTaskAsync(
+            objectLocalId,
+            inventoryScriptItemId,
+            expectedKind: "script",
+            enableScript,
+            forceOverwrite,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> NotecardCopyInventoryToTaskAsync(
+        uint objectLocalId,
+        string inventoryNotecardItemId,
+        bool forceOverwrite,
+        CancellationToken cancellationToken)
+    {
+        return await CopyInventoryItemToTaskAsync(
+            objectLocalId,
+            inventoryNotecardItemId,
+            expectedKind: "notecard",
+            enableScript: false,
+            forceOverwrite,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<BotToolResult> CopyInventoryItemToTaskAsync(
+        uint objectLocalId,
+        string inventoryItemId,
+        string expectedKind,
+        bool enableScript,
+        bool forceOverwrite,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(inventoryItemId, out var inventoryItemUuid))
         {
-            return BotToolResult.Fail("inventoryScriptItemId is not a valid UUID.");
+            return BotToolResult.Fail(expectedKind == "script"
+                ? "inventoryScriptItemId is not a valid UUID."
+                : "inventoryNotecardItemId is not a valid UUID.");
         }
 
         return await ExecuteLockedAsync(async (client, token) =>
@@ -1062,26 +1101,60 @@ internal sealed partial class BotSession
                 return BotToolResult.Fail("No current simulator available.");
             }
 
-            if (!sim.ObjectsPrimitives.ContainsKey(objectLocalId))
+            if (!sim.ObjectsPrimitives.TryGetValue(objectLocalId, out var targetPrim) || targetPrim == null)
             {
                 return BotToolResult.Fail($"Object localId={objectLocalId} is not present in simulator cache.");
             }
 
-            var item = await ResolveInventoryItemAsync(client, scriptItemUuid, token).ConfigureAwait(false);
+            var item = await ResolveInventoryItemAsync(client, inventoryItemUuid, token).ConfigureAwait(false);
             if (item == null)
             {
-                return BotToolResult.Fail($"Inventory item {scriptItemUuid} was not found.");
+                return BotToolResult.Fail($"Inventory item {inventoryItemUuid} was not found.");
             }
 
-            if (item.AssetType != AssetType.LSLText || item.InventoryType != InventoryType.LSL)
+            var isScript = item.AssetType == AssetType.LSLText && item.InventoryType == InventoryType.LSL;
+            var isNotecard = item.AssetType == AssetType.Notecard && item.InventoryType == InventoryType.Notecard;
+            var kind = isScript ? "script" : isNotecard ? "notecard" : "unsupported";
+
+            if (!string.Equals(kind, expectedKind, StringComparison.Ordinal))
             {
                 return BotToolResult.Fail(
-                    $"Inventory item {item.UUID} is not script-typed (assetType={item.AssetType}, inventoryType={item.InventoryType}). " +
-                    "Bridge install requires a real LSL script inventory item.");
+                    expectedKind == "script"
+                        ? $"Inventory item {item.UUID} is not script-typed (assetType={item.AssetType}, inventoryType={item.InventoryType})."
+                        : $"Inventory item {item.UUID} is not notecard-typed (assetType={item.AssetType}, inventoryType={item.InventoryType}).");
             }
 
-            var transaction = client.Inventory.CopyScriptToTask(objectLocalId, item, enableScript, sim);
-            return BotToolResult.OkResult($"Requested script copy to object {objectLocalId}; transactionId={transaction}, enableScript={enableScript}.");
+            var removedCount = 0;
+            if (forceOverwrite)
+            {
+                var taskEntries = await client.Inventory
+                    .GetTaskInventoryAsync(targetPrim.ID, objectLocalId, sim, token)
+                    .ConfigureAwait(false);
+
+                var duplicates = taskEntries
+                    .OfType<InventoryItem>()
+                    .Where(taskItem =>
+                        taskItem.UUID != UUID.Zero
+                        && taskItem.AssetType == item.AssetType
+                        && taskItem.InventoryType == item.InventoryType
+                        && string.Equals(taskItem.Name, item.Name, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var duplicate in duplicates)
+                {
+                    client.Inventory.RemoveTaskInventory(objectLocalId, duplicate.UUID, sim);
+                }
+
+                removedCount = duplicates.Count;
+            }
+
+            var transaction = kind == "script"
+                ? client.Inventory.CopyScriptToTask(objectLocalId, item, enableScript, sim)
+                : client.Inventory.UpdateTaskInventory(objectLocalId, item, sim, only_mod_meta: true);
+
+            return BotToolResult.OkResult(
+                $"Requested {kind} copy to object {objectLocalId}; transactionId={transaction}, forceOverwrite={forceOverwrite}, removed={removedCount}" +
+                (kind == "script" ? $", enableScript={enableScript}." : "."));
         }, cancellationToken).ConfigureAwait(false);
     }
 

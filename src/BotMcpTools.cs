@@ -415,6 +415,176 @@ internal sealed class BotMcpTools
         return _bot.EstateRestartScheduleSetAsync(mode, daysCsv, timeUtc, cancellationToken);
     }
 
+    [McpServerTool, Description("List current friends and online state.")]
+    public Task<DataToolResult> FriendList(
+        [Description("Include rights detail fields in each friend row.")] bool includeDetails,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FriendListAsync(includeDetails, cancellationToken);
+    }
+
+    [McpServerTool, Description("List pending incoming friendship offers.")]
+    public Task<DataToolResult> FriendOffersList(CancellationToken cancellationToken)
+    {
+        return _bot.FriendOffersListAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Offer friendship to an avatar UUID.")]
+    public Task<BotToolResult> FriendOfferSend(
+        [Description("Target avatar UUID.")] string targetAgentId,
+        [Description("Optional message to include with the offer.")] string? message,
+        [Description("Seconds to wait for accept/decline response (0 = do not wait, max 60).") ] int waitForResponseSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FriendOfferSendAsync(targetAgentId, message, waitForResponseSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Accept or decline a pending incoming friendship offer.")]
+    public Task<BotToolResult> FriendOfferRespond(
+        [Description("Agent UUID that sent the friendship offer.")] string fromAgentId,
+        [Description("Action: accept or decline.")] string action,
+        [Description("Use capability endpoints when available (recommended for offline-cap offers).") ] bool useCapabilities,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FriendOfferRespondAsync(fromAgentId, action, useCapabilities, cancellationToken);
+    }
+
+    [McpServerTool, Description("Terminate friendship with a friend UUID.")]
+    public Task<BotToolResult> FriendRemove(
+        [Description("Friend avatar UUID.")] string friendAgentId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FriendRemoveAsync(friendAgentId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set rights granted to a friend (see online/map status and modify objects).")]
+    public Task<BotToolResult> FriendSetRights(
+        [Description("Friend avatar UUID.")] string friendAgentId,
+        [Description("Grant right to see your online status.")] bool canSeeOnline,
+        [Description("Grant right to see your map location (requires canSeeOnline=true).") ] bool canSeeOnMap,
+        [Description("Grant right to modify your objects.")] bool canModifyObjects,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FriendSetRightsAsync(friendAgentId, canSeeOnline, canSeeOnMap, canModifyObjects, cancellationToken);
+    }
+
+    [McpServerTool, Description("Request map location for a friend UUID and optionally wait for reply.")]
+    public Task<DataToolResult> FriendMapLocate(
+        [Description("Friend avatar UUID.")] string friendAgentId,
+        [Description("Seconds to wait for location reply (0 = do not wait, max 60).") ] int waitForReplySeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FriendMapLocateAsync(friendAgentId, waitForReplySeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("Send a teleport offer (lure) to an avatar UUID.")]
+    public Task<BotToolResult> TeleportOfferSend(
+        [Description("Target avatar UUID.")] string targetAgentId,
+        [Description("Optional lure message.")] string? message,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TeleportOfferSendAsync(targetAgentId, message, cancellationToken);
+    }
+
+    [McpServerTool, Description("Request a teleport invite from another avatar UUID.")]
+    public Task<BotToolResult> TeleportRequestSend(
+        [Description("Target avatar UUID.")] string targetAgentId,
+        [Description("Optional request message.")] string? message,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TeleportRequestSendAsync(targetAgentId, message, cancellationToken);
+    }
+
+    [McpServerTool, Description("List pending incoming teleport offers (lures) captured during this session.")]
+    public Task<DataToolResult> TeleportOffersList(CancellationToken cancellationToken)
+    {
+        return _bot.TeleportOffersListAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("List pending incoming teleport requests captured during this session.")]
+    public Task<DataToolResult> TeleportRequestsList(CancellationToken cancellationToken)
+    {
+        return _bot.TeleportRequestsListAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Accept or decline a pending teleport offer using requester and IM session IDs.")]
+    public Task<BotToolResult> TeleportOfferRespond(
+        [Description("Requester avatar UUID (sender of the offer)." )] string requesterAgentId,
+        [Description("IM session UUID from the teleport offer message.")] string sessionId,
+        [Description("True to accept and teleport, false to decline.")] bool accept,
+        CancellationToken cancellationToken)
+    {
+        return _bot.TeleportOfferRespondAsync(requesterAgentId, sessionId, accept, cancellationToken);
+    }
+
+    [McpServerTool, Description("Search the avatar directory for people by name text.")]
+    public Task<DataToolResult> DirectorySearchPeople(
+        [Description("Name text to search for.")] string query,
+        [Description("Directory query start/page offset (typically 0,1,2...).")] int queryStart,
+        CancellationToken cancellationToken)
+    {
+        return _bot.DirectorySearchPeopleAsync(query, queryStart, cancellationToken);
+    }
+
+    [McpServerTool, Description("Search the directory for groups by name text.")]
+    public Task<DataToolResult> DirectorySearchGroups(
+        [Description("Group name text to search for.")] string query,
+        [Description("Directory query start/page offset (typically 0,1,2...).")] int queryStart,
+        CancellationToken cancellationToken)
+    {
+        return _bot.DirectorySearchGroupsAsync(query, queryStart, cancellationToken);
+    }
+
+    [McpServerTool, Description("Search the places directory for parcels listed in search.")]
+    public Task<DataToolResult> DirectorySearchPlaces(
+        [Description("Place search text (keywords).") ] string query,
+        [Description("Directory query start/page offset (typically 0,1,2...).")] int queryStart,
+        CancellationToken cancellationToken)
+    {
+        return _bot.DirectorySearchPlacesAsync(query, queryStart, cancellationToken);
+    }
+
+    [McpServerTool, Description("Search land-for-sale listings in the directory.")]
+    public Task<DataToolResult> DirectorySearchLand(
+        [Description("Land scope: any, mainland, estate, auction.")] string landType,
+        [Description("Directory query start offset for land search (commonly 0,100,200...).")] int queryStart,
+        [Description("Optional maximum sale price filter (0 disables).") ] int maxPrice,
+        [Description("Optional minimum parcel area filter (0 disables).") ] int minArea,
+        CancellationToken cancellationToken)
+    {
+        return _bot.DirectorySearchLandAsync(landType, queryStart, maxPrice, minArea, cancellationToken);
+    }
+
+    [McpServerTool, Description("Fetch avatar profile and interests for an avatar UUID, with optional AgentProfile capability details.")]
+    public Task<DataToolResult> AvatarProfileGet(
+        [Description("Target avatar UUID.")] string avatarId,
+        [Description("When true, also query AgentProfile capability data if available.")] bool includeAgentProfileCapability,
+        [Description("Seconds to wait for UDP profile/interests replies (1..30).") ] int waitForReplySeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AvatarProfileGetAsync(avatarId, includeAgentProfileCapability, waitForReplySeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("List profile picks for an avatar UUID, with optional per-pick detail reads.")]
+    public Task<DataToolResult> AvatarPicksList(
+        [Description("Target avatar UUID.")] string avatarId,
+        [Description("When true, request full details for each returned pick.")] bool includeDetails,
+        [Description("Seconds to wait for each pick detail reply when includeDetails=true (1..30).") ] int detailWaitSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AvatarPicksListAsync(avatarId, includeDetails, detailWaitSeconds, cancellationToken);
+    }
+
+    [McpServerTool, Description("List avatar classifieds for an avatar UUID, with optional per-classified detail reads.")]
+    public Task<DataToolResult> AvatarClassifiedsList(
+        [Description("Target avatar UUID.")] string avatarId,
+        [Description("When true, request full details for each classified entry.")] bool includeDetails,
+        [Description("Seconds to wait for each classified detail reply when includeDetails=true (1..30).") ] int detailWaitSeconds,
+        CancellationToken cancellationToken)
+    {
+        return _bot.AvatarClassifiedsListAsync(avatarId, includeDetails, detailWaitSeconds, cancellationToken);
+    }
+
     [McpServerTool, Description("List current groups the bot is a member of.")]
     public Task<DataToolResult> GroupListCurrent(
         [Description("Include detailed group profile fields in the result payload.")] bool includeDetails,
@@ -1809,9 +1979,20 @@ internal sealed class BotMcpTools
         [Description("Target object local ID.")] uint objectLocalId,
         [Description("Agent inventory script item UUID.")] string inventoryScriptItemId,
         [Description("True to run script after copy.")] bool enableScript,
+        [Description("True to remove same-name script entries from task inventory before copy.")] bool forceOverwrite,
         CancellationToken cancellationToken)
     {
-        return _bot.ScriptCopyInventoryToTaskAsync(objectLocalId, inventoryScriptItemId, enableScript, cancellationToken);
+        return _bot.ScriptCopyInventoryToTaskAsync(objectLocalId, inventoryScriptItemId, enableScript, forceOverwrite, cancellationToken);
+    }
+
+    [McpServerTool, Description("Copy a notecard from agent inventory into an object's task inventory.")]
+    public Task<BotToolResult> NotecardCopyInventoryToTask(
+        [Description("Target object local ID.")] uint objectLocalId,
+        [Description("Agent inventory notecard item UUID.")] string inventoryNotecardItemId,
+        [Description("True to remove same-name notecard entries from task inventory before copy.")] bool forceOverwrite,
+        CancellationToken cancellationToken)
+    {
+        return _bot.NotecardCopyInventoryToTaskAsync(objectLocalId, inventoryNotecardItemId, forceOverwrite, cancellationToken);
     }
 
     [McpServerTool, Description("Get running state for a script item in task inventory.")]

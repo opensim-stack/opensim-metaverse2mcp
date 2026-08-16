@@ -78,8 +78,6 @@ Scope notes:
 
 ## 5) Inventory and Asset Management
 
-- [ ] **[P1] Notecard and script text editing workflows**
-  - Fetch/edit/save textual assets with version checks.
 - [ ] **[P1] Asset type coverage expansion**
   - Explicit helpers for landmarks, calling cards, bodyparts, clothing, gestures.
 - [-] **[P1] Upload validation pipeline**
@@ -105,15 +103,6 @@ Scope notes:
   - Richer estate settings mutation coverage and stronger capability/permission-specific error classification.
 - [ ] **[P1] EEP/Windlight usability layer**
   - High-level presets and patch operations instead of raw LLSD only.
-
-## 8) Social, Groups, Search, and Directory
-
-- [ ] **[P1] Friends operations (`FriendsManager`)**
-  - Friends list, friendship offers, online status, teleport offers/requests.
-- [ ] **[P1] Directory/search (`DirectoryManager`)**
-  - Search people, groups, land, places; return structured pagination.
-- [ ] **[P2] Avatar profile tools (`AvatarManager`)**
-  - Read profile/interests/picks/classifieds where supported.
 
 ## 9) Communications Beyond IM
 
