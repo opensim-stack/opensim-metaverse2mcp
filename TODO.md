@@ -17,6 +17,9 @@ Scope notes:
 
 ---
 
+## 0) Current Task Cleannp
+
+- Get rid of `os-webrtc-janus`, apparently since Feb. this year it is in OpenSimulator core
 
 ## 1) Platform, Reliability, and Security
 
@@ -104,7 +107,7 @@ Scope notes:
 - [ ] **[P1] EEP/Windlight usability layer**
   - High-level presets and patch operations instead of raw LLSD only.
 
-## 9) Communications Beyond IM
+## 8) Communications Beyond IM
 
 - [ ] **[P1] Chat modalities**
   - Add explicit whisper/shout tools and receive-side filters.
@@ -113,15 +116,15 @@ Scope notes:
 - [ ] **[P2] Conferencing/voice signaling integration hooks**
   - Text-side signaling for out-of-band media bridges.
 
-## 10) Voice / WebRTC
+## 9) Voice / WebRTC
 
-- [ ] **[P1] Voice bridge support (`LibreMetaverse.Voice.WebRTC`)**
+- [ ] **[P1] Voice bridge supp8rt (`LibreMetaverse.Voice.WebRTC`)**
   - Connect/disconnect voice, peer events, mute/unmute, volume.
   - Optional audio processing toggles (NS/HPF/AGC/AEC) via MCP tools.
 - [ ] **[P2] Voice moderation policies**
   - Auto-mute/auto-join policies and permission checks.
 
-## 11) OSD/LLSD and Data Utilities
+## 10) OSD/LLSD and Data Utilities
 
 - [ ] **[P1] Generic OSD conversion tools**
   - JSON/XML/Binary LLSD conversion and validation tools for agent workflows.
@@ -130,7 +133,7 @@ Scope notes:
 - [ ] **[P2] Object/asset serialization helpers**
   - Export/import structured snapshots for reproducible scene edits.
 
-## 12) MCP UX and Contract Quality
+## 11) MCP UX and Contract Quality
 
 - [ ] **[P0] Tool contract consistency**
   - Normalize result schemas (status/error codes, transient/permanent flags, correlation IDs).
@@ -141,7 +144,7 @@ Scope notes:
 - [ ] **[P1] Safer defaults for destructive tools**
   - Confirm/delete guardrails similar to session delete flow.
 
-## 13) Testing and Validation Gaps
+## 12) Testing and Validation Gaps
 
 - [ ] **[P0] Capability-level integration tests**
   - End-to-end tests for movement, prim edit, inventory transfer, script upload, policy decisions.
@@ -152,7 +155,7 @@ Scope notes:
 - [ ] **[P1] Regression tests for IM command parser**
   - Commands, aliases, chunking, prompt/permission/question flows.
 
-## 14) Navigation / Pathfinding (DotRecast Plan)
+## 13) Navigation / Pathfinding (DotRecast Plan)
 
 Goal: replace heuristic-only movement with a full walk-first navigation stack that reliably handles walls/corners/doors, and only falls back to teleport when policies allow.
 
@@ -211,8 +214,6 @@ Goal: replace heuristic-only movement with a full walk-first navigation stack th
 
 ### Phase 2 (P1 capability expansion)
 
-- Parcel/friends/directory tools
-- Rich inventory CRUD + pagination
 - Local/group chat routing and controls
 - Voice baseline controls
 

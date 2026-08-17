@@ -82,6 +82,41 @@ internal sealed class BotMcpTools
         return _bot.SayChatAsync(message, channel, cancellationToken);
     }
 
+    [McpServerTool, Description("Enable or disable voice routing for synthesized speech output.")]
+    public Task<BotToolResult> Voice(
+        [Description("True to enable Piper -> voice backend routing; false to disable.")] bool enabled,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SetVoiceRoutingAsync(enabled, cancellationToken);
+    }
+
+    [McpServerTool, Description("List available Piper voices from the configured /voices endpoint.")]
+    public Task<DataToolResult> Voices(CancellationToken cancellationToken)
+    {
+        return _bot.ListVoicesAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Query current voice routing, backend, and Piper endpoint state.")]
+    public Task<DataToolResult> QueryVoice(CancellationToken cancellationToken)
+    {
+        return _bot.QueryVoiceAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Synthesize text with Piper and play it through the configured voice backend.")]
+    public Task<BotToolResult> Say(
+        [Description("Text to synthesize and speak.")] string text,
+        [Description("Optional Piper voice name; defaults to configured PIPER_DEFAULT_VOICE.")] string? voice,
+        [Description("Optional Piper speaker id.")] int? speaker,
+        [Description("Optional Piper speaker_id alias (used when speaker is omitted).") ] int? speakerId,
+        [Description("Optional Piper length_scale.")] float? lengthScale,
+        [Description("Optional Piper noise_scale.")] float? noiseScale,
+        [Description("Optional Piper noise_w.")] float? noiseW,
+        [Description("Optional Piper sentence_silence.")] float? sentenceSilence,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SayAsync(text, voice, speaker, speakerId, lengthScale, noiseScale, noiseW, sentenceSilence, cancellationToken);
+    }
+
     [McpServerTool, Description("Send an instant message to an avatar UUID.")]
     public Task<BotToolResult> SendInstantMessage(
         [Description("Recipient agent UUID.")] string agentId,

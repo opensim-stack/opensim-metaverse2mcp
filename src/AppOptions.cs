@@ -34,6 +34,15 @@ internal sealed class AppOptions
     public int OpencodeRequestTimeoutSeconds { get; set; } = 60;
     public string? OpencodeHandlerFirstName { get; set; }
     public string? OpencodeHandlerLastName { get; set; }
+    public bool VoiceRoutingEnabled { get; set; }
+    public string VoiceBackend { get; set; } = "webrtc";
+    public string PiperScheme { get; set; } = "http";
+    public string PiperHost { get; set; } = "opensim-piper";
+    public int PiperPort { get; set; } = 8995;
+    public string PiperTtsPath { get; set; } = "/tts";
+    public string PiperVoicesPath { get; set; } = "/voices";
+    public int PiperRequestTimeoutSeconds { get; set; } = 60;
+    public string PiperDefaultVoice { get; set; } = "en_US-lessac-medium";
     public string? LslDialogBridgeTrustedObjectId { get; set; }
     public string? LslDialogBridgeTrustedOwnerId { get; set; }
     public bool LslDialogBridgeRequireTrustedSender { get; set; } = true;
@@ -172,6 +181,46 @@ internal sealed class AppOptions
                 {
                     errors.Add("LSL dialog bridge trust state file path is invalid.");
                 }
+            }
+        }
+
+        if (VoiceRoutingEnabled)
+        {
+            var backend = (VoiceBackend ?? string.Empty).Trim().ToLowerInvariant();
+            if (backend != "webrtc")
+            {
+                errors.Add("Voice backend must be 'webrtc'.");
+            }
+
+            var piperScheme = (PiperScheme ?? string.Empty).Trim().ToLowerInvariant();
+            if (piperScheme != "http" && piperScheme != "https")
+            {
+                errors.Add("Piper scheme must be 'http' or 'https'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(PiperHost))
+            {
+                errors.Add("Piper host is required when voice routing is enabled.");
+            }
+
+            if (PiperPort < 1 || PiperPort > 65535)
+            {
+                errors.Add("Piper port must be in range 1..65535.");
+            }
+
+            if (PiperRequestTimeoutSeconds < 1)
+            {
+                errors.Add("Piper timeout must be at least 1 second.");
+            }
+
+            if (string.IsNullOrWhiteSpace(PiperTtsPath) || !PiperTtsPath.TrimStart().StartsWith('/'))
+            {
+                errors.Add("Piper TTS path must start with '/'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(PiperVoicesPath) || !PiperVoicesPath.TrimStart().StartsWith('/'))
+            {
+                errors.Add("Piper voices path must start with '/'.");
             }
         }
 

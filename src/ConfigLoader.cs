@@ -32,6 +32,15 @@ internal static class ConfigLoader
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 1800),
             OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
             OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
+            VoiceRoutingEnabled = ParseBool(Env("VOICE_ROUTING_ENABLED"), false),
+            VoiceBackend = Env("VOICE_BACKEND") ?? "webrtc",
+            PiperScheme = Env("PIPER_SCHEME") ?? "http",
+            PiperHost = Env("PIPER_HOST") ?? "opensim-piper",
+            PiperPort = ParseInt(Env("PIPER_PORT"), 8995),
+            PiperTtsPath = Env("PIPER_TTS_PATH") ?? "/tts",
+            PiperVoicesPath = Env("PIPER_VOICES_PATH") ?? "/voices",
+            PiperRequestTimeoutSeconds = ParseInt(Env("PIPER_TIMEOUT_SECONDS"), 60),
+            PiperDefaultVoice = Env("PIPER_DEFAULT_VOICE") ?? "en_US-lessac-medium",
             LslDialogBridgeTrustedObjectId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID"),
             LslDialogBridgeTrustedOwnerId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID"),
             LslDialogBridgeRequireTrustedSender = ParseBool(FirstDefined("LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER", "OPENCODE_LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER"), true),
@@ -51,6 +60,8 @@ internal static class ConfigLoader
         options.McpPort = ParseInt(Env("MCP_PORT"), 8999);
         ApplyCliOverrides(options, args);
         options.McpHttpEndpoint = NormalizeEndpoint(options.McpHttpEndpoint);
+        options.PiperTtsPath = NormalizeEndpoint(options.PiperTtsPath);
+        options.PiperVoicesPath = NormalizeEndpoint(options.PiperVoicesPath);
         options.McpTransport = (options.McpTransport ?? "http").Trim().ToLowerInvariant();
 
         return options;
@@ -97,6 +108,17 @@ internal static class ConfigLoader
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
             "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
             "  --handler-last-name <value>    Optional handler last name (env: OPENCODE_HANDLER_LASTNAME)",
+            string.Empty,
+            "Voice routing (Piper + grid voice backend):",
+            "  --voice-enabled <bool>         Enable voice routing for Say tool (env: VOICE_ROUTING_ENABLED, default: false)",
+            "  --voice-backend <webrtc>       Voice backend for WAV playback to nearby avatars (env: VOICE_BACKEND, default: webrtc)",
+            "  --piper-scheme <http|https>    Piper URL scheme (env: PIPER_SCHEME, default: http)",
+            "  --piper-host <host>            Piper host (env: PIPER_HOST, default: opensim-piper)",
+            "  --piper-port <port>            Piper port (env: PIPER_PORT, default: 8995)",
+            "  --piper-tts-path <path>        Piper synthesis path (env: PIPER_TTS_PATH, default: /tts)",
+            "  --piper-voices-path <path>     Piper voices list path (env: PIPER_VOICES_PATH, default: /voices)",
+            "  --piper-timeout-seconds <int>  Piper request timeout in seconds (env: PIPER_TIMEOUT_SECONDS, default: 60)",
+            "  --piper-default-voice <name>   Default voice name used by Say when omitted (env: PIPER_DEFAULT_VOICE, default: en_US-lessac-medium)",
             "  --lsl-dialog-bridge-trusted-object-id <uuid>",
             "                                Optional trusted bridge object UUID for dialog replies",
             "                                (env: LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID)",
@@ -220,6 +242,33 @@ internal static class ConfigLoader
                     break;
                 case "--handler-last-name":
                     options.OpencodeHandlerLastName = RequireValue(args, ref i, arg);
+                    break;
+                case "--voice-enabled":
+                    options.VoiceRoutingEnabled = ParseBool(RequireValue(args, ref i, arg), options.VoiceRoutingEnabled);
+                    break;
+                case "--voice-backend":
+                    options.VoiceBackend = RequireValue(args, ref i, arg);
+                    break;
+                case "--piper-scheme":
+                    options.PiperScheme = RequireValue(args, ref i, arg);
+                    break;
+                case "--piper-host":
+                    options.PiperHost = RequireValue(args, ref i, arg);
+                    break;
+                case "--piper-port":
+                    options.PiperPort = ParseInt(RequireValue(args, ref i, arg), options.PiperPort);
+                    break;
+                case "--piper-tts-path":
+                    options.PiperTtsPath = RequireValue(args, ref i, arg);
+                    break;
+                case "--piper-voices-path":
+                    options.PiperVoicesPath = RequireValue(args, ref i, arg);
+                    break;
+                case "--piper-timeout-seconds":
+                    options.PiperRequestTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.PiperRequestTimeoutSeconds);
+                    break;
+                case "--piper-default-voice":
+                    options.PiperDefaultVoice = RequireValue(args, ref i, arg);
                     break;
                 case "--lsl-dialog-bridge-trusted-object-id":
                     options.LslDialogBridgeTrustedObjectId = RequireValue(args, ref i, arg);

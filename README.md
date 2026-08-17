@@ -51,6 +51,13 @@ export OPENCODE_HOST="localhost"
 export OPENCODE_PORT="8998"
 export OPENCODE_HANDLER_FIRSTNAME="Admin"
 export OPENCODE_HANDLER_LASTNAME="User"
+# voice routing (optional)
+export VOICE_ROUTING_ENABLED="true"
+export VOICE_BACKEND="webrtc"
+export PIPER_SCHEME="http"
+export PIPER_HOST="localhost"
+export PIPER_PORT="8995"
+export PIPER_DEFAULT_VOICE="en_US-lessac-medium"
 # optional Basic auth:
 # export OPENCODE_USERNAME="opencode"
 # export OPENCODE_PASSWORD="change-me"
@@ -110,6 +117,18 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `OPENCODE_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
 - `OPENCODE_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
 
+### Voice routing (Piper + grid voice)
+
+- `VOICE_ROUTING_ENABLED` (`true`/`false`, default: `false`)
+- `VOICE_BACKEND` (`webrtc`, default: `webrtc`)
+- `PIPER_SCHEME` (`http` or `https`, default: `http`)
+- `PIPER_HOST` (default: `opensim-piper`)
+- `PIPER_PORT` (default: `8995`)
+- `PIPER_TTS_PATH` (default: `/tts`)
+- `PIPER_VOICES_PATH` (default: `/voices`)
+- `PIPER_TIMEOUT_SECONDS` (default: `60`)
+- `PIPER_DEFAULT_VOICE` (default: `en_US-lessac-medium`)
+
 ### Layered prompt handling
 
 - `PROMPT_HANDLING_ENABLED` (`true`/`false`, default: `true`)
@@ -141,6 +160,10 @@ The server publishes tools including:
 - `ActiveAnimations`
 - `Chat`
 - `SendInstantMessage`
+- `Voice`
+- `QueryVoice`
+- `Voices`
+- `Say`
 - `MoveBy`
 - `WalkTo`
 - `FlyTo`
@@ -278,6 +301,7 @@ Chat notes:
 - Bulk delete confirmation behavior: run `*session delete --all` first to get a safety prompt, then rerun with `--force`.
 - Inventory offers from the configured handler are always accepted (policy rules are bypassed for handler offers).
 - TODO: add local chat and group chat routing.
+- Voice routing note: `VOICE_BACKEND=webrtc` is the supported backend for Piper WAV injection in this service.
 - TODO: add a security policy to control which users the AI may respond to.
 
 UV preset notes:

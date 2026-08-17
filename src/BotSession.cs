@@ -240,6 +240,7 @@ internal sealed partial class BotSession : IDisposable
     public BotSession(AppOptions options)
     {
         _options = options;
+        InitializeVoiceSupport();
         InitializeDialogBridgeTrustFromOptions();
         _handlerFullName = BuildHandlerFullName(_options.OpencodeHandlerFirstName, _options.OpencodeHandlerLastName);
         if (_options.OpencodeChatEnabled)
@@ -351,6 +352,7 @@ internal sealed partial class BotSession : IDisposable
 
             // client already assigned to _client above; mark connected.
             _connected = true;
+            await EnsureVoiceBackendOnLoginAsync(client, cancellationToken).ConfigureAwait(false);
 
             // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
             TryLoadDialogBridgeTrustStateFromFile();
@@ -2649,6 +2651,7 @@ internal sealed partial class BotSession : IDisposable
         _pendingTextPromptReplyByConversation.Clear();
         _busyOpencodeSessions.Clear();
         ClearBusyHoverText();
+        DisposeVoiceSupport();
         _client = null;
         _connected = false;
         StopFollowInternal();
@@ -4936,6 +4939,15 @@ internal sealed partial class BotSession : IDisposable
                 case "projects":
                     await HandleProjectCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
                     return true;
+                case "voice":
+                    await HandleVoiceCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    return true;
+                case "voices":
+                    await HandleVoicesCommandAsync(client, agentId, from).ConfigureAwait(false);
+                    return true;
+                case "say":
+                    await HandleSayCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    return true;
                 default:
                     SendImText(client, agentId, from, $"Unknown command '*{command}'. Try *help.");
                     return true;
@@ -4971,6 +4983,9 @@ internal sealed partial class BotSession : IDisposable
                 "*auth - Provider API key/OAuth flows",
                 "*session - Manage Opencode sessions",
                 "*project - Inspect Opencode project context",
+                "*voice - Manage voice routing (on/off/status)",
+                "*voices - List available Piper voices",
+                "*say - Speak text via Piper + configured voice backend",
                 "*configure - Configure provider/model/thinking for this IM",
                 "*reset - Alias for '*configure reset'");
         }
@@ -5012,6 +5027,9 @@ internal sealed partial class BotSession : IDisposable
                 BuildStarHelpText("auth"),
                 BuildStarHelpText("session"),
                 BuildStarHelpText("project"),
+                BuildStarHelpText("voice"),
+                BuildStarHelpText("voices"),
+                BuildStarHelpText("say"),
                 BuildStarHelpText("configure"),
                 BuildStarHelpText("reset")),
             "status" => "*status - Show current provider/model/thinking/session and prompt source state for this IM.",
@@ -5081,6 +5099,19 @@ internal sealed partial class BotSession : IDisposable
                 "*project variants:",
                 "*projects - List all Opencode projects",
                 "*project current - Show current Opencode project"),
+            "voice" => string.Join(
+                "\n",
+                "*voice variants:",
+                "*voice status - Show voice routing/backend/Piper endpoint status",
+                "*voice on - Enable routing and connect the configured backend",
+                "*voice off - Disable routing"),
+            "voices" => "*voices - List available Piper voices and default voice.",
+            "say" => string.Join(
+                "\n",
+                "*say usage:",
+                "*say <text>",
+                "*say voice=<voice-name> <text>",
+                "Example: *say voice=en_US-lessac-medium Hello from OpenSim."),
             "configure" => string.Join(
                 "\n",
                 "*configure variants:",
@@ -8734,6 +8765,7 @@ internal sealed partial class BotSession : IDisposable
     private void OnDisconnected(object? sender, DisconnectedEventArgs e)
     {
         _connected = false;
+        HandleVoiceDisconnected();
         StopFollowInternal();
         CancelMovementAutoStop();
         Console.WriteLine($"[bot] disconnected: {e.Reason} - {e.Message}");
