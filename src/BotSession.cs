@@ -240,6 +240,7 @@ internal sealed partial class BotSession : IDisposable
     public BotSession(AppOptions options)
     {
         _options = options;
+        _controlGroupName = BuildControlGroupName();
         InitializeVoiceSupport();
         InitializeDialogBridgeTrustFromOptions();
         _handlerFullName = BuildHandlerFullName(_options.OpencodeHandlerFirstName, _options.OpencodeHandlerLastName);
@@ -359,6 +360,7 @@ internal sealed partial class BotSession : IDisposable
             TryLoadOpencodeSessionStateFromFile();
 
             await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
+            StartControlGroupBootstrap(client);
             return true;
         }
         finally
