@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LibreMetaverse;
@@ -10,11 +11,13 @@ internal sealed partial class BotSession
 {
     private readonly object _voiceStateLock = new();
     private readonly SemaphoreSlim _voicePlaybackGate = new(1, 1);
+    private long _voiceTraceSequence;
 
     private HttpClient? _piperHttp;
     private WebRtcVoiceManager? _webRtcVoice;
     private bool _voiceRoutingEnabled;
     private string _activeVoiceBackend = "none";
+    private bool _webRtcVoiceEventsHooked;
 
     private sealed record PiperVoicesResponse(IReadOnlyList<string>? Voices, string? DefaultVoice);
 
@@ -95,6 +98,7 @@ internal sealed partial class BotSession
 
             _webRtcVoice = null;
             _activeVoiceBackend = "none";
+            _webRtcVoiceEventsHooked = false;
         }
 
         try
@@ -147,8 +151,11 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task HandleVoiceCommandAsync(GridClient client, UUID agentId, string from, string arg)
+    private async Task HandleVoiceCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
+        var channelLabel = GetConversationChannelLabel(conversationKey);
+        Console.WriteLine($"[voice] command=voice from={from} channel={channelLabel} key={conversationKey} arg='{arg?.Trim() ?? string.Empty}'");
+
         var sub = (arg ?? string.Empty).Trim().ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(sub) || sub == "status")
         {
@@ -173,8 +180,11 @@ internal sealed partial class BotSession
         SendImText(client, agentId, from, "Usage: *voice status | *voice on | *voice off");
     }
 
-    private async Task HandleVoicesCommandAsync(GridClient client, UUID agentId, string from)
+    private async Task HandleVoicesCommandAsync(GridClient client, UUID agentId, string from, string conversationKey)
     {
+        var channelLabel = GetConversationChannelLabel(conversationKey);
+        Console.WriteLine($"[voice] command=voices from={from} channel={channelLabel} key={conversationKey}");
+
         var http = _piperHttp;
         if( http == null)
         {
@@ -221,13 +231,20 @@ internal sealed partial class BotSession
         }
     }
 
-    private async Task HandleSayCommandAsync(GridClient client, UUID agentId, string from, string arg)
+    private async Task HandleSayCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
+        var traceId = NextVoiceTraceId();
+        var channelLabel = GetConversationChannelLabel(conversationKey);
+
         if (!TryParseSayStarCommand(arg, out var text, out var voiceOverride, out var parseError))
         {
+            Console.WriteLine($"[voice][trace:{traceId}] command=say parse-failed from={from} channel={channelLabel} key={conversationKey} error='{parseError}'");
             SendImText(client, agentId, from, parseError);
             return;
         }
+
+        Console.WriteLine(
+            $"[voice][trace:{traceId}] command=say accepted from={from} channel={channelLabel} key={conversationKey} textChars={text.Length} voiceOverride={(string.IsNullOrWhiteSpace(voiceOverride) ? "<default>" : voiceOverride)}");
 
         var say = await SayAsync(
             text,
@@ -239,6 +256,8 @@ internal sealed partial class BotSession
             noiseW: null,
             sentenceSilence: null,
             CancellationToken.None).ConfigureAwait(false);
+
+        Console.WriteLine($"[voice][trace:{traceId}] command=say result ok={say.Ok} message='{say.Message}'");
 
         SendImText(client, agentId, from, say.Message);
     }
@@ -322,6 +341,9 @@ internal sealed partial class BotSession
         float? sentenceSilence,
         CancellationToken cancellationToken)
     {
+        var traceId = NextVoiceTraceId();
+        var overall = Stopwatch.StartNew();
+
         if (string.IsNullOrWhiteSpace(text))
         {
             return BotToolResult.Fail("text is required.");
@@ -335,11 +357,15 @@ internal sealed partial class BotSession
         await _voicePlaybackGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            Console.WriteLine(
+                $"[voice][trace:{traceId}] say.begin textChars={text.Length} requestedVoice={(string.IsNullOrWhiteSpace(voice) ? "<default>" : voice.Trim())} routingEnabled={_voiceRoutingEnabled} activeBackend={_activeVoiceBackend}");
+
             return await ExecuteLockedAsync(async (client, token) =>
             {
-                var backend = await EnsureVoiceBackendConnectedAsync(client, token).ConfigureAwait(false);
+                var backend = await EnsureVoiceBackendReadyForPlaybackAsync(client, token, traceId).ConfigureAwait(false);
                 if (!backend.Ok)
                 {
+                    Console.WriteLine($"[voice][trace:{traceId}] say.backend-unavailable message='{backend.Message}'");
                     return BotToolResult.Fail(backend.Message);
                 }
 
@@ -358,26 +384,55 @@ internal sealed partial class BotSession
                         sentenceSilence,
                         token).ConfigureAwait(false);
 
+                    var wavDuration = EstimateWavDuration(wavPath);
+                    long wavBytes = 0;
+                    try { wavBytes = new FileInfo(wavPath).Length; } catch { }
+                    Console.WriteLine($"[voice][trace:{traceId}] say.wav-ready file={wavPath} bytes={wavBytes} durationMs={(long)wavDuration.TotalMilliseconds}");
+
                     if (string.Equals(_activeVoiceBackend, "webrtc", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (_webRtcVoice == null)
+                        // Give WebRTC a brief settle window before injection, and keep mic open slightly
+                        // after WAV ends so trailing audio is less likely to be cut.
+                        var preRoll = TimeSpan.FromMilliseconds(300);
+                        var playbackWindow = wavDuration > TimeSpan.Zero
+                            ? wavDuration
+                            : TimeSpan.FromSeconds(4);
+                        var postRoll = TimeSpan.FromMilliseconds(900);
+
+                        var played = await TryPlayWavViaWebRtcAsync(wavPath, preRoll, playbackWindow, postRoll, token, traceId, attempt: 1).ConfigureAwait(false);
+                        if (!played)
                         {
-                            return BotToolResult.Fail("WebRTC voice backend is unavailable.");
+                            Console.WriteLine($"[voice][trace:{traceId}] say.playback-retry reconnecting-webrtc");
+                            var reconnect = await EnsureVoiceBackendConnectedAsync(client, token).ConfigureAwait(false);
+                            if (!reconnect.Ok)
+                            {
+                                Console.WriteLine($"[voice][trace:{traceId}] say.playback-retry reconnect-failed message='{reconnect.Message}'");
+                                return BotToolResult.Fail(reconnect.Message);
+                            }
+
+                            played = await TryPlayWavViaWebRtcAsync(wavPath, preRoll, playbackWindow, postRoll, token, traceId, attempt: 2).ConfigureAwait(false);
+                            if (!played)
+                            {
+                                return BotToolResult.Fail("WebRTC voice playback did not stay active long enough to transmit audio.");
+                            }
                         }
 
-                        _webRtcVoice.PlayWavAsMic(wavPath, loop: false);
-
-                        var duration = EstimateWavDuration(wavPath);
-                        var wait = duration > TimeSpan.Zero
-                            ? duration + TimeSpan.FromMilliseconds(350)
-                            : TimeSpan.FromSeconds(4);
-
-                        await Task.Delay(wait, token).ConfigureAwait(false);
-                        _webRtcVoice.StopWavAsMic();
+                        Console.WriteLine($"[voice][trace:{traceId}] say.playback-stop elapsedMs={(long)overall.Elapsed.TotalMilliseconds}");
                         return BotToolResult.OkResult($"Spoke via {_activeVoiceBackend} using voice '{resolvedVoice}'.");
                     }
 
+                    Console.WriteLine($"[voice][trace:{traceId}] say.unsupported-backend backend={_activeVoiceBackend}");
                     return BotToolResult.Fail($"Voice backend '{_activeVoiceBackend}' does not support WAV playback yet.");
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine($"[voice][trace:{traceId}] say.canceled elapsedMs={(long)overall.Elapsed.TotalMilliseconds}");
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[voice][trace:{traceId}] say.error type={ex.GetType().Name} message={ex.Message}");
+                    throw;
                 }
                 finally
                 {
@@ -397,15 +452,104 @@ internal sealed partial class BotSession
         }
         finally
         {
+            Console.WriteLine($"[voice][trace:{traceId}] say.end elapsedMs={(long)overall.Elapsed.TotalMilliseconds}");
             _voicePlaybackGate.Release();
+        }
+    }
+
+    private async Task<(bool Ok, string Message)> EnsureVoiceBackendReadyForPlaybackAsync(
+        GridClient client,
+        CancellationToken cancellationToken,
+        string traceId)
+    {
+        var backend = NormalizeVoiceBackend(_options.VoiceBackend);
+        if (!string.Equals(backend, "webrtc", StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, $"Unsupported voice backend '{backend}'. Only 'webrtc' is available.");
+        }
+
+        lock (_voiceStateLock)
+        {
+            if (string.Equals(_activeVoiceBackend, "webrtc", StringComparison.OrdinalIgnoreCase) && _webRtcVoice != null)
+            {
+                Console.WriteLine($"[voice][trace:{traceId}] backend.reuse active={_activeVoiceBackend}");
+                return (true, "Voice routing enabled using WebRTC backend.");
+            }
+        }
+
+        Console.WriteLine($"[voice][trace:{traceId}] backend.reuse-miss reconnecting");
+        return await EnsureVoiceBackendConnectedAsync(client, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> TryPlayWavViaWebRtcAsync(
+        string wavPath,
+        TimeSpan preRoll,
+        TimeSpan playbackWindow,
+        TimeSpan postRoll,
+        CancellationToken cancellationToken,
+        string traceId,
+        int attempt)
+    {
+        WebRtcVoiceManager? manager;
+        lock (_voiceStateLock)
+        {
+            manager = _webRtcVoice;
+        }
+
+        if (manager == null)
+        {
+            Console.WriteLine($"[voice][trace:{traceId}] say.webrtc-missing-manager attempt={attempt}");
+            return false;
+        }
+
+        try
+        {
+            var totalWindow = playbackWindow + postRoll;
+            Console.WriteLine(
+                $"[voice][trace:{traceId}] say.playback-start backend=webrtc attempt={attempt} preRollMs={(long)preRoll.TotalMilliseconds} playbackMs={(long)playbackWindow.TotalMilliseconds} postRollMs={(long)postRoll.TotalMilliseconds} totalMs={(long)totalWindow.TotalMilliseconds}");
+
+            if (preRoll > TimeSpan.Zero)
+            {
+                await Task.Delay(preRoll, cancellationToken).ConfigureAwait(false);
+            }
+
+            manager.PlayWavAsMic(wavPath, loop: false);
+            await Task.Delay(totalWindow, cancellationToken).ConfigureAwait(false);
+            manager.StopWavAsMic();
+            Console.WriteLine($"[voice][trace:{traceId}] say.playback-complete attempt={attempt}");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"[voice][trace:{traceId}] say.playback-canceled attempt={attempt}");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[voice][trace:{traceId}] say.playback-failed attempt={attempt} type={ex.GetType().Name} message={ex.Message}");
+            try
+            {
+                manager.StopWavAsMic();
+            }
+            catch
+            {
+                // Best effort cleanup after failed playback attempt.
+            }
+
+            return false;
         }
     }
 
     private async Task<(bool Ok, string Message)> EnsureVoiceBackendConnectedAsync(GridClient client, CancellationToken cancellationToken)
     {
         var backend = NormalizeVoiceBackend(_options.VoiceBackend);
+        var traceId = NextVoiceTraceId();
+        var sw = Stopwatch.StartNew();
+        Console.WriteLine($"[voice][trace:{traceId}] backend.connect.begin requested={backend} active={_activeVoiceBackend}");
+
         if (!string.Equals(backend, "webrtc", StringComparison.OrdinalIgnoreCase))
         {
+            Console.WriteLine($"[voice][trace:{traceId}] backend.connect.unsupported backend={backend}");
             return (false, $"Unsupported voice backend '{backend}'. Only 'webrtc' is available.");
         }
 
@@ -417,6 +561,11 @@ internal sealed partial class BotSession
                     lock (_voiceStateLock)
                     {
                         manager = _webRtcVoice ??= new WebRtcVoiceManager(client);
+                        if (!_webRtcVoiceEventsHooked)
+                        {
+                            AttachWebRtcVoiceEventHandlers(manager);
+                            _webRtcVoiceEventsHooked = true;
+                        }
                     }
 
                     try
@@ -424,6 +573,7 @@ internal sealed partial class BotSession
                         var connected = await manager.ConnectPrimaryRegionAsync().ConfigureAwait(false);
                         if (!connected)
                         {
+                            Console.WriteLine($"[voice][trace:{traceId}] backend.connect.failed elapsedMs={(long)sw.Elapsed.TotalMilliseconds} reason=connect-returned-false");
                             return (false, "WebRTC voice backend failed to connect for current parcel/region.");
                         }
 
@@ -432,18 +582,22 @@ internal sealed partial class BotSession
                             _activeVoiceBackend = "webrtc";
                         }
 
+                        Console.WriteLine($"[voice][trace:{traceId}] backend.connect.ok elapsedMs={(long)sw.Elapsed.TotalMilliseconds} active={_activeVoiceBackend}");
                         return (true, "Voice routing enabled using WebRTC backend.");
                     }
                     catch (OperationCanceledException)
                     {
+                        Console.WriteLine($"[voice][trace:{traceId}] backend.connect.canceled elapsedMs={(long)sw.Elapsed.TotalMilliseconds}");
                         throw;
                     }
                     catch (Exception ex)
                     {
+                        Console.WriteLine($"[voice][trace:{traceId}] backend.connect.error elapsedMs={(long)sw.Elapsed.TotalMilliseconds} type={ex.GetType().Name} message={ex.Message}");
                         return (false, $"WebRTC voice backend is unavailable in this region/client session: {ex.Message}");
                     }
                 }
             default:
+                Console.WriteLine($"[voice][trace:{traceId}] backend.connect.unsupported backend={backend}");
                 return (false, $"Unsupported voice backend '{backend}'. Only 'webrtc' is available.");
         }
     }
@@ -520,6 +674,7 @@ internal sealed partial class BotSession
 
         using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
         var audioBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        Console.WriteLine($"[voice][debug] Piper synth response: {(int)response.StatusCode} {response.ReasonPhrase}; bytes={audioBytes.Length}");
         if (!response.IsSuccessStatusCode)
         {
             var errorBody = TrimForMessage(System.Text.Encoding.UTF8.GetString(audioBytes), 300);
@@ -528,7 +683,57 @@ internal sealed partial class BotSession
 
         var tempFile = Path.Combine(Path.GetTempPath(), $"opensim-piper-{Guid.NewGuid():N}.wav");
         await File.WriteAllBytesAsync(tempFile, audioBytes, cancellationToken).ConfigureAwait(false);
+        Console.WriteLine($"[voice][debug] Piper synth wrote wav: {tempFile}");
         return tempFile;
+    }
+
+    private string NextVoiceTraceId()
+    {
+        var id = Interlocked.Increment(ref _voiceTraceSequence);
+        return id.ToString("D6");
+    }
+
+    private void AttachWebRtcVoiceEventHandlers(WebRtcVoiceManager manager)
+    {
+        manager.OnP2PCallIncoming += callerId =>
+        {
+            Console.WriteLine($"[voice][p2p] incoming call from={callerId}; auto-accept enabled");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    WebRtcVoiceManager? current;
+                    lock (_voiceStateLock)
+                    {
+                        current = _webRtcVoice;
+                    }
+
+                    if (current == null)
+                    {
+                        Console.WriteLine($"[voice][p2p] incoming call dropped: voice manager unavailable for caller={callerId}");
+                        return;
+                    }
+
+                    var accepted = await current.AcceptIncomingP2PCallAsync(callerId).ConfigureAwait(false);
+                    Console.WriteLine($"[voice][p2p] incoming call accept-result caller={callerId} accepted={accepted}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[voice][p2p] incoming call accept-error caller={callerId} type={ex.GetType().Name} message={ex.Message}");
+                }
+            });
+        };
+
+        manager.OnP2PCallAccepted += callerId =>
+            Console.WriteLine($"[voice][p2p] call accepted caller={callerId}");
+        manager.OnP2PCallDeclined += callerId =>
+            Console.WriteLine($"[voice][p2p] call declined caller={callerId}");
+        manager.OnP2PCallStarted += callerId =>
+            Console.WriteLine($"[voice][p2p] call started caller={callerId}");
+        manager.OnP2PCallEnded += callerId =>
+            Console.WriteLine($"[voice][p2p] call ended caller={callerId}");
+        manager.OnP2PCallFailed += (callerId, ex) =>
+            Console.WriteLine($"[voice][p2p] call failed caller={callerId} type={ex.GetType().Name} message={ex.Message}");
     }
 
     private static TimeSpan EstimateWavDuration(string path)

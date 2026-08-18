@@ -16,6 +16,19 @@ internal sealed partial class BotSession : IDisposable
         Question
     }
 
+    private enum ConversationChannel
+    {
+        Im,
+        Group,
+        Local
+    }
+
+    private sealed record ConversationRoute(
+        ConversationChannel Channel,
+        UUID ReplyTargetId,
+        UUID SpeakerAgentId,
+        string SpeakerName);
+
     private async Task NotifyUserOfRetryLimitAsync(OpencodeSessionStatusEvent statusEvent)
     {
         if (!statusEvent.NextRetryAt.HasValue)
@@ -55,7 +68,7 @@ internal sealed partial class BotSession : IDisposable
 
         try
         {
-            SendImText(client, agentId, from, message);
+            SendImText(client, agentId, from, message, conversationKey);
         }
         catch (Exception ex)
         {
@@ -124,11 +137,14 @@ internal sealed partial class BotSession : IDisposable
 
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
+    private readonly SemaphoreSlim _globalConversationGate = new(1, 1);
     private readonly IOpencodeChatClient? _opencodeChat;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentImEvents = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<UUID, DateTimeOffset> _primPropertiesRefreshedAtByObjectId = new();
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _imConversationLocks = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, ImConversationConfig> _imConversationConfigs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _conversationLocks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ConversationConfig> _conversationConfigs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ConversationRoute> _conversationRouteByKey = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<UUID, string> _conversationKeyBySpeakerAgent = new();
     private readonly ConcurrentDictionary<string, OpencodeUsageSummary> _latestUsageByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
@@ -141,6 +157,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
+    private readonly AsyncLocal<string?> _ambientConversationKey = new();
     private readonly string? _handlerFullName;
     private readonly object _promptStateLock = new();
     private readonly object _recentImSpeakerLock = new();
@@ -174,7 +191,7 @@ internal sealed partial class BotSession : IDisposable
     private bool _lslDialogBridgeRequireTrustedSender = true;
     private readonly ConcurrentDictionary<string, byte> _busyOpencodeSessions = new(StringComparer.OrdinalIgnoreCase);
     private string? _restoredOpencodeSessionId;
-    private ImConversationConfig? _persistedOpencodeDefaultConfig;
+    private ConversationConfig? _persistedOpencodeDefaultConfig;
     private DateTimeOffset _lastTypingPulseAt = DateTimeOffset.MinValue;
     private CancellationTokenSource? _typingStopCts;
     private bool _typingIndicatorActive;
@@ -183,6 +200,7 @@ internal sealed partial class BotSession : IDisposable
     private int _dialogBridgeAutoProvisionInFlight;
     private DateTimeOffset _lastDialogBridgeAutoProvisionAttemptAt = DateTimeOffset.MinValue;
     private const int LslDialogBridgeRequestChannel = -919191;
+    private const string LocalChatConversationKey = "local-chat";
     private const string LslDialogBridgeRequestPrefix = "dlgreq";
     private const string LslDialogBridgeTextRequestPrefix = "txtreq";
     private const string LslDialogBridgeAckPrefix = "dlgack";
@@ -2678,7 +2696,7 @@ internal sealed partial class BotSession : IDisposable
             disposableOpencodeChat.Dispose();
         }
 
-        foreach (var gate in _imConversationLocks.Values)
+        foreach (var gate in _conversationLocks.Values)
         {
             gate.Dispose();
         }
@@ -3670,10 +3688,12 @@ internal sealed partial class BotSession : IDisposable
             && e.IM.Dialog != InstantMessageDialog.MessageFromObject
             && !isDialogBridgePayload)
         {
+            // Diagnostic visibility for viewer/system IM dialogs (including voice-call control signals).
+            Console.WriteLine($"[im][diag] ignored dialog={e.IM.Dialog} group={e.IM.GroupIM} session={e.IM.IMSessionID} from={from} to={e.IM.ToAgentID} text={SanitizeImLogText(text)}");
             return;
         }
 
-        Console.WriteLine($"[im] ({e.IM.Dialog}) {from}: {SanitizeImLogText(text)}");
+        Console.WriteLine($"[im] ({e.IM.Dialog}, group={e.IM.GroupIM}, session={e.IM.IMSessionID}, to={e.IM.ToAgentID}) {from}: {SanitizeImLogText(text)}");
 
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -3708,24 +3728,17 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        if (IsHandlerRestricted() && !IsHandlerAvatar(from))
-        {
-            Console.WriteLine($"[im] denied non-handler IM from {from}. Handler is '{_handlerFullName}'.");
-            try
-            {
-                client.Self.InstantMessage(e.IM.FromAgentID, $"Hi! I can currently only accept instructions from my handler ({_handlerFullName}).");
-            }
-            catch
-            {
-                // Ignore failures while trying to send access-denied feedback.
-            }
-
-            return;
-        }
-
-        var conversationKey = $"im:{e.IM.FromAgentID}";
-        _conversationAgentByKey[conversationKey] = e.IM.FromAgentID;
-        _conversationNameByKey[conversationKey] = from;
+        var isGroupIm = IsGroupSessionMessage(e.IM);
+        var groupSessionId = ResolveGroupSessionId(e.IM);
+        var conversationKey = isGroupIm
+            ? BuildGroupConversationKey(groupSessionId)
+            : BuildImConversationKey(e.IM.FromAgentID);
+        RegisterConversationRoute(
+            conversationKey,
+            isGroupIm ? ConversationChannel.Group : ConversationChannel.Im,
+            isGroupIm ? groupSessionId : e.IM.FromAgentID,
+            e.IM.FromAgentID,
+            from);
         lock (_recentImSpeakerLock)
         {
             _lastImSpeakerAgentId = e.IM.FromAgentID;
@@ -3733,28 +3746,101 @@ internal sealed partial class BotSession : IDisposable
             _lastImConversationKey = conversationKey;
         }
 
-        _ = Task.Run(async () =>
+        _ = Task.Run(() => HandleIncomingConversationMessageAsync(
+            client,
+            e.IM.FromAgentID,
+            from,
+            conversationKey,
+            text,
+            isGroupIm ? $"OpenSim group chat with {from}" : $"OpenSim IM with {from}"));
+    }
+
+    private static bool IsGroupSessionMessage(InstantMessage message)
+        => message.GroupIM || (message.Dialog == InstantMessageDialog.SessionSend && message.IMSessionID != UUID.Zero);
+
+    private static UUID ResolveGroupSessionId(InstantMessage message)
+    {
+        if (message.IMSessionID != UUID.Zero)
         {
-            var gate = _imConversationLocks.GetOrAdd(conversationKey, _ => new SemaphoreSlim(1, 1));
-            CancellationTokenSource? inFlightRequestCts = null;
-            if (!await gate.WaitAsync(0).ConfigureAwait(false))
+            return message.IMSessionID;
+        }
+
+        return message.ToAgentID;
+    }
+
+    private static string BuildImConversationKey(UUID senderAgentId)
+        => $"im-{senderAgentId}";
+
+    private static string BuildGroupConversationKey(UUID groupId)
+        => $"group-{groupId}";
+
+    private void RegisterConversationRoute(
+        string conversationKey,
+        ConversationChannel channel,
+        UUID replyTargetId,
+        UUID speakerAgentId,
+        string speakerName)
+    {
+        _conversationRouteByKey[conversationKey] = new ConversationRoute(channel, replyTargetId, speakerAgentId, speakerName);
+        if (speakerAgentId != UUID.Zero)
+        {
+            _conversationAgentByKey[conversationKey] = speakerAgentId;
+            _conversationKeyBySpeakerAgent[speakerAgentId] = conversationKey;
+        }
+
+        _conversationNameByKey[conversationKey] = speakerName;
+    }
+
+    private async Task HandleIncomingConversationMessageAsync(
+        GridClient client,
+        UUID senderAgentId,
+        string from,
+        string conversationKey,
+        string text,
+        string title)
+    {
+        var priorAmbientConversationKey = _ambientConversationKey.Value;
+        _ambientConversationKey.Value = conversationKey;
+        var channelLabel = GetConversationChannelLabel(conversationKey);
+        if (!TryNormalizeConversationTextForRouting(conversationKey, text, out var routedText))
+        {
+            Console.WriteLine($"[{channelLabel}] ignored message without wake word from {from} ({conversationKey}).");
+            _ambientConversationKey.Value = priorAmbientConversationKey;
+            return;
+        }
+
+        var access = await EvaluateConversationAccessAsync(client, senderAgentId, from, conversationKey, CancellationToken.None).ConfigureAwait(false);
+        if (!access.Allowed)
+        {
+            Console.WriteLine($"[{channelLabel}] denied sender {from} ({senderAgentId}) for {conversationKey}: {access.Reason}");
+            SendImText(client, senderAgentId, from, access.DenialMessage, conversationKey);
+            _ambientConversationKey.Value = priorAmbientConversationKey;
+            return;
+        }
+
+        var gate = _conversationLocks.GetOrAdd(conversationKey, _ => new SemaphoreSlim(1, 1));
+        CancellationTokenSource? inFlightRequestCts = null;
+        var globalGateHeld = false;
+        if (!await gate.WaitAsync(0).ConfigureAwait(false))
+        {
+            try
             {
-                if (text.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
-                    || text.StartsWith("*usage", StringComparison.OrdinalIgnoreCase)
-                    || text.StartsWith("*help", StringComparison.OrdinalIgnoreCase)
-                    || text.StartsWith("*dialog", StringComparison.OrdinalIgnoreCase)
-                    || text.StartsWith("*dialogs", StringComparison.OrdinalIgnoreCase)
-                    || text.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
-                    || text.StartsWith("*question", StringComparison.OrdinalIgnoreCase))
+                if (routedText.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
+                    || routedText.StartsWith("*usage", StringComparison.OrdinalIgnoreCase)
+                    || routedText.StartsWith("*help", StringComparison.OrdinalIgnoreCase)
+                    || routedText.StartsWith("*dialog", StringComparison.OrdinalIgnoreCase)
+                    || routedText.StartsWith("*dialogs", StringComparison.OrdinalIgnoreCase)
+                    || routedText.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
+                    || routedText.StartsWith("*question", StringComparison.OrdinalIgnoreCase))
                 {
-                    var handledBusyCommand = await TryHandleStarCommandAsync(client, e.IM.FromAgentID, from, conversationKey, text).ConfigureAwait(false);
+                    var handledBusyCommand = await TryHandleStarCommandAsync(client, senderAgentId, from, conversationKey, routedText).ConfigureAwait(false);
                     if (handledBusyCommand)
                     {
                         return;
                     }
                 }
 
-                var handledBusyDialog = TryHandlePendingScriptDialogBeforeRouting(client, e.IM.FromAgentID, from, conversationKey, text);
+                var handledBusyDialog = TryHandlePendingScriptDialogBeforeRouting(client, senderAgentId, from, conversationKey, routedText);
                 if (handledBusyDialog)
                 {
                     return;
@@ -3762,25 +3848,25 @@ internal sealed partial class BotSession : IDisposable
 
                 var handledBusyPromptReply = await TryHandlePendingTextPromptReplyBeforeRoutingAsync(
                     client,
-                    e.IM.FromAgentID,
+                    senderAgentId,
                     from,
                     conversationKey,
-                    text).ConfigureAwait(false);
+                    routedText).ConfigureAwait(false);
                 if (handledBusyPromptReply)
                 {
                     return;
                 }
 
-                if (text.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase))
+                if (routedText.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase))
                 {
-                    await HandleCancelCommandAsync(client, e.IM.FromAgentID, from, conversationKey).ConfigureAwait(false);
+                    await HandleCancelCommandAsync(client, senderAgentId, from, conversationKey).ConfigureAwait(false);
                     return;
                 }
 
                 try
                 {
-                    Console.WriteLine($"[im] overlapping message while previous request is still in flight for {from} ({conversationKey}).");
-                    client.Self.InstantMessage(e.IM.FromAgentID, "I am still working on your previous request. You can send *cancel to abort while waiting.");
+                    Console.WriteLine($"[{channelLabel}] overlapping message while previous request is still in flight for {from} ({conversationKey}).");
+                    SendImText(client, senderAgentId, from, "I am still working on your previous request. You can send *cancel to abort while waiting.", conversationKey);
                 }
                 catch
                 {
@@ -3789,256 +3875,367 @@ internal sealed partial class BotSession : IDisposable
 
                 return;
             }
-
-            var startedAt = Stopwatch.StartNew();
-            try
+            finally
             {
-                if (_opencodeChat == null)
+                _ambientConversationKey.Value = priorAmbientConversationKey;
+            }
+        }
+
+        var startedAt = Stopwatch.StartNew();
+        try
+        {
+            if (_opencodeChat == null)
+            {
+                SendImText(client, senderAgentId, from, "AI chat is currently disabled by configuration.", conversationKey);
+                return;
+            }
+
+            if (routedText.StartsWith('*'))
+            {
+                var handled = await TryHandleStarCommandAsync(client, senderAgentId, from, conversationKey, routedText).ConfigureAwait(false);
+                if (handled)
                 {
-                    client.Self.InstantMessage(e.IM.FromAgentID, "AI chat is currently disabled by configuration.");
                     return;
                 }
+            }
 
-                if (text.StartsWith('*'))
-                {
-                    var handled = await TryHandleStarCommandAsync(client, e.IM.FromAgentID, from, conversationKey, text).ConfigureAwait(false);
-                    if (handled)
-                    {
-                        return;
-                    }
-                }
+            var handledDialog = TryHandlePendingScriptDialogBeforeRouting(client, senderAgentId, from, conversationKey, routedText);
+            if (handledDialog)
+            {
+                return;
+            }
 
-                var handledDialog = TryHandlePendingScriptDialogBeforeRouting(client, e.IM.FromAgentID, from, conversationKey, text);
-                if (handledDialog)
-                {
-                    return;
-                }
+            var handledPromptReply = await TryHandlePendingTextPromptReplyBeforeRoutingAsync(
+                client,
+                senderAgentId,
+                from,
+                conversationKey,
+                routedText).ConfigureAwait(false);
+            if (handledPromptReply)
+            {
+                return;
+            }
 
-                var handledPromptReply = await TryHandlePendingTextPromptReplyBeforeRoutingAsync(
+            if (!routedText.StartsWith('*') && !await _globalConversationGate.WaitAsync(0).ConfigureAwait(false))
+            {
+                SendImText(
                     client,
-                    e.IM.FromAgentID,
+                    senderAgentId,
                     from,
-                    conversationKey,
-                    text).ConfigureAwait(false);
-                if (handledPromptReply)
-                {
-                    return;
-                }
-
-                TryBindRestoredOpencodeSessionToConversation(conversationKey);
-                var sendOptions = BuildSendOptions(conversationKey, e.IM.FromAgentID, from);
-                // TEMP(event-first migration): remove this watcher once event-driven permission/question
-                // routing is proven stable under reconnect/load; keep only bounded fallback polling.
-                using var requestCts = new CancellationTokenSource();
-                inFlightRequestCts = requestCts;
-                _inFlightRequestCtsByConversation.AddOrUpdate(
-                    conversationKey,
-                    requestCts,
-                    (_, previous) =>
-                    {
-                        try
-                        {
-                            previous.Cancel();
-                        }
-                        catch
-                        {
-                            // Best effort: old inflight token may already be disposed.
-                        }
-
-                        previous.Dispose();
-                        return requestCts;
-                    });
-
-                using var inFlightQuestionWatchCts = CancellationTokenSource.CreateLinkedTokenSource(requestCts.Token);
-                var inFlightQuestionWatchTask = Task.Run(() =>
-                    NotifyPendingQuestionDuringInFlightRequestAsync(
-                        client,
-                        e.IM.FromAgentID,
-                        from,
-                        conversationKey,
-                        inFlightQuestionWatchCts.Token));
-
-                // TODO(security): enforce who the AI is allowed to talk to (allowlist, roles, or parcel/group checks).
-                Console.WriteLine($"[im] routing to opencode: from={from} conversation={conversationKey} textLength={text.Length} model={(sendOptions?.ModelId ?? "(default)")}");
-                var reply = await _opencodeChat.SendMessageAsync(
-                    conversationKey: conversationKey,
-                    title: $"OpenSim IM with {from}",
-                    message: text,
-                    options: sendOptions,
-                    cancellationToken: requestCts.Token).ConfigureAwait(false);
-                if (reply.Usage != null)
-                {
-                    _latestUsageByConversation[conversationKey] = reply.Usage;
-                }
-
-                TrySaveOpencodeSessionStateForConversation(conversationKey);
-                startedAt.Stop();
-                Console.WriteLine($"[im] opencode reply received in {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey} replyLength={reply.Text.Length}");
-
-                var responseText = reply.IsConfirmationPrompt
-                    ? reply.Text + "\n\nReply with yes or no to continue."
-                    : reply.Text;
-
-                if (reply.PendingPermissions != null && reply.PendingPermissions.Count > 0)
-                {
-                    var latestPermission = reply.PendingPermissions
-                        .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Id));
-                    if (latestPermission != null)
-                    {
-                        await OfferPermissionPromptWithFallbackAsync(client, e.IM.FromAgentID, from, conversationKey, latestPermission.SessionId, latestPermission).ConfigureAwait(false);
-                    }
-                }
-                else
-                {
-                    var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
-                    if (!string.IsNullOrWhiteSpace(currentSessionId))
-                    {
-                        var eventFirstPermissions = await GetPendingPermissionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
-                        if (eventFirstPermissions.Count > 0)
-                        {
-                            var latestPermission = eventFirstPermissions[0];
-                            if (!_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
-                                || !announcedPermissionId.Equals(latestPermission.Id, StringComparison.OrdinalIgnoreCase))
-                            {
-                                await OfferPermissionPromptWithFallbackAsync(client, e.IM.FromAgentID, from, conversationKey, currentSessionId, latestPermission).ConfigureAwait(false);
-                            }
-                        }
-                    }
-                }
-
-                if (reply.PendingQuestions != null && reply.PendingQuestions.Count > 0)
-                {
-                    var latestQuestion = reply.PendingQuestions
-                        .FirstOrDefault(q => !string.IsNullOrWhiteSpace(q.Id));
-                    if (latestQuestion != null)
-                    {
-                        await OfferQuestionPromptWithFallbackAsync(client, e.IM.FromAgentID, from, conversationKey, latestQuestion.SessionId, latestQuestion).ConfigureAwait(false);
-                    }
-                }
-                else
-                {
-                    // TEMP(event-first migration): this post-reply poll is a safety net for delayed emits.
-                    // Delete after event stream handlers populate pending question state reliably.
-                    // Some prompts are emitted asynchronously after the initial message response.
-                    var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
-                    if (!string.IsNullOrWhiteSpace(currentSessionId))
-                    {
-                        var polledQuestions = await GetPendingQuestionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
-                        if (polledQuestions.Count > 0)
-                        {
-                            if (!_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedQuestionId)
-                                || !announcedQuestionId.Equals(polledQuestions[0].Id, StringComparison.OrdinalIgnoreCase))
-                            {
-                                await OfferQuestionPromptWithFallbackAsync(client, e.IM.FromAgentID, from, conversationKey, currentSessionId, polledQuestions[0]).ConfigureAwait(false);
-                            }
-                        }
-                    }
-                }
-
-                foreach (var chunk in SplitForInstantMessage(responseText, 900))
-                {
-                    client.Self.InstantMessage(e.IM.FromAgentID, chunk);
-                    Console.WriteLine($"[im] -> {from}: {chunk}");
-                }
-
-                StopTypingIndicatorIfActive();
-
-                inFlightQuestionWatchCts.Cancel();
-                try
-                {
-                    await inFlightQuestionWatchTask.ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Ignore watcher cancellation or transient polling errors.
-                }
-
-                // TEMP(event-first migration): remove this delayed poll task once event-driven prompt
-                // delivery is reliable across reconnects and all tested providers.
-                // Some question prompts can arrive slightly after the first reply payload.
-                _ = Task.Run(() => NotifyPendingQuestionIfAppearsAsync(client, e.IM.FromAgentID, from, conversationKey));
+                    "Sorry, I am currently busy with another chat session. Please wait and try again shortly.",
+                    conversationKey);
+                return;
             }
-            catch (OperationCanceledException) when (inFlightRequestCts?.IsCancellationRequested == true)
-            {
-                startedAt.Stop();
-                Console.WriteLine($"[im] opencode request canceled by handler after {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey}");
-                try
+
+            globalGateHeld = !routedText.StartsWith('*');
+
+            TryBindRestoredOpencodeSessionToConversation(conversationKey);
+            var sendOptions = BuildSendOptions(conversationKey, senderAgentId, from);
+            using var requestCts = new CancellationTokenSource();
+            inFlightRequestCts = requestCts;
+            _inFlightRequestCtsByConversation.AddOrUpdate(
+                conversationKey,
+                requestCts,
+                (_, previous) =>
                 {
-                    client.Self.InstantMessage(e.IM.FromAgentID, "Canceled the current request.");
-                }
-                catch
-                {
-                    // Ignore failures while trying to report cancellation.
-                }
-            }
-            catch (OperationCanceledException ex) when (IsLikelyBackendTimeout(ex))
-            {
-                startedAt.Stop();
-                Console.WriteLine($"[im] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
-                _opencodeChat?.ResetConversation(conversationKey);
-                try
-                {
-                    client.Self.InstantMessage(
-                        e.IM.FromAgentID,
-                        "The AI is taking longer than expected and timed out. Please try again in a moment.");
-                }
-                catch
-                {
-                    // Ignore failures while trying to report backend timeout errors.
-                }
-            }
-            catch (Exception ex)
-            {
-                startedAt.Stop();
-                if (IsLikelyBackendTimeout(ex))
-                {
-                    Console.WriteLine($"[im] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
-                    _opencodeChat?.ResetConversation(conversationKey);
                     try
                     {
-                        client.Self.InstantMessage(
-                            e.IM.FromAgentID,
-                            "The AI is taking longer than expected and timed out. Please try again in a moment.");
+                        previous.Cancel();
                     }
                     catch
                     {
-                        // Ignore failures while trying to report backend timeout errors.
+                        // Best effort: old inflight token may already be disposed.
                     }
 
-                    return;
-                }
+                    previous.Dispose();
+                    return requestCts;
+                });
 
-                Console.WriteLine($"[im] failed to route to opencode after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
-                _opencodeChat?.ResetConversation(conversationKey);
-                // Preserve per-IM overrides (provider/model/thinking) across transient backend failures.
-                try
-                {
-                    client.Self.InstantMessage(e.IM.FromAgentID, "Sorry, I could not reach the AI service right now.");
-                }
-                catch
-                {
-                    // Ignore failures while trying to report backend errors.
-                }
-            }
-            finally
+            using var inFlightQuestionWatchCts = CancellationTokenSource.CreateLinkedTokenSource(requestCts.Token);
+            var inFlightQuestionWatchTask = Task.Run(() =>
+                NotifyPendingQuestionDuringInFlightRequestAsync(
+                    client,
+                    senderAgentId,
+                    from,
+                    conversationKey,
+                    inFlightQuestionWatchCts.Token));
+
+            Console.WriteLine($"[{channelLabel}] routing to opencode: from={from} conversation={conversationKey} textLength={routedText.Length} model={(sendOptions?.ModelId ?? "(default)")}");
+            var reply = await _opencodeChat.SendMessageAsync(
+                conversationKey: conversationKey,
+                title: title,
+                message: routedText,
+                options: sendOptions,
+                cancellationToken: requestCts.Token).ConfigureAwait(false);
+            if (reply.Usage != null)
             {
-                if (inFlightRequestCts != null
-                    && _inFlightRequestCtsByConversation.TryGetValue(conversationKey, out var currentInFlightCts)
-                    && ReferenceEquals(currentInFlightCts, inFlightRequestCts))
-                {
-                    _inFlightRequestCtsByConversation.TryRemove(conversationKey, out _);
-                }
-
-                var activeSessionId = _opencodeChat?.GetConversationSessionId(conversationKey);
-                if (!string.IsNullOrWhiteSpace(activeSessionId))
-                {
-                    MarkOpencodeSessionIdle(activeSessionId);
-                }
-
-                StopTypingIndicatorIfActive();
-                gate.Release();
+                _latestUsageByConversation[conversationKey] = reply.Usage;
             }
-        });
+
+            TrySaveOpencodeSessionStateForConversation(conversationKey);
+            startedAt.Stop();
+            Console.WriteLine($"[{channelLabel}] opencode reply received in {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey} replyLength={reply.Text.Length}");
+
+            var responseText = reply.IsConfirmationPrompt
+                ? reply.Text + "\n\nReply with yes or no to continue."
+                : reply.Text;
+
+            if (reply.PendingPermissions != null && reply.PendingPermissions.Count > 0)
+            {
+                var latestPermission = reply.PendingPermissions
+                    .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Id));
+                if (latestPermission != null)
+                {
+                    await OfferPermissionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, latestPermission.SessionId, latestPermission).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                if (!string.IsNullOrWhiteSpace(currentSessionId))
+                {
+                    var eventFirstPermissions = await GetPendingPermissionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
+                    if (eventFirstPermissions.Count > 0)
+                    {
+                        var latestPermission = eventFirstPermissions[0];
+                        if (!_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
+                            || !announcedPermissionId.Equals(latestPermission.Id, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await OfferPermissionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, currentSessionId, latestPermission).ConfigureAwait(false);
+                        }
+                    }
+                }
+            }
+
+            if (reply.PendingQuestions != null && reply.PendingQuestions.Count > 0)
+            {
+                var latestQuestion = reply.PendingQuestions
+                    .FirstOrDefault(q => !string.IsNullOrWhiteSpace(q.Id));
+                if (latestQuestion != null)
+                {
+                    await OfferQuestionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, latestQuestion.SessionId, latestQuestion).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                if (!string.IsNullOrWhiteSpace(currentSessionId))
+                {
+                    var polledQuestions = await GetPendingQuestionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
+                    if (polledQuestions.Count > 0)
+                    {
+                        if (!_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedQuestionId)
+                            || !announcedQuestionId.Equals(polledQuestions[0].Id, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await OfferQuestionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, currentSessionId, polledQuestions[0]).ConfigureAwait(false);
+                        }
+                    }
+                }
+            }
+
+            SendImText(client, senderAgentId, from, responseText, conversationKey);
+
+            StopTypingIndicatorIfActive();
+
+            inFlightQuestionWatchCts.Cancel();
+            try
+            {
+                await inFlightQuestionWatchTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Ignore watcher cancellation or transient polling errors.
+            }
+
+            _ = Task.Run(() => NotifyPendingQuestionIfAppearsAsync(client, senderAgentId, from, conversationKey));
+        }
+        catch (OperationCanceledException) when (inFlightRequestCts?.IsCancellationRequested == true)
+        {
+            startedAt.Stop();
+            Console.WriteLine($"[{channelLabel}] opencode request canceled by user after {startedAt.ElapsedMilliseconds}ms: from={from} conversation={conversationKey}");
+            SendImText(client, senderAgentId, from, "Canceled the current request.", conversationKey);
+        }
+        catch (OperationCanceledException ex) when (IsLikelyBackendTimeout(ex))
+        {
+            startedAt.Stop();
+            Console.WriteLine($"[{channelLabel}] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
+            _opencodeChat?.ResetConversation(conversationKey);
+            SendImText(client, senderAgentId, from, "The AI is taking longer than expected and timed out. Please try again in a moment.", conversationKey);
+        }
+        catch (Exception ex)
+        {
+            startedAt.Stop();
+            if (IsLikelyBackendTimeout(ex))
+            {
+                Console.WriteLine($"[{channelLabel}] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
+                _opencodeChat?.ResetConversation(conversationKey);
+                SendImText(client, senderAgentId, from, "The AI is taking longer than expected and timed out. Please try again in a moment.", conversationKey);
+                return;
+            }
+
+            Console.WriteLine($"[{channelLabel}] failed to route to opencode after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
+            _opencodeChat?.ResetConversation(conversationKey);
+            SendImText(client, senderAgentId, from, "Sorry, I could not reach the AI service right now.", conversationKey);
+        }
+        finally
+        {
+            if (inFlightRequestCts != null
+                && _inFlightRequestCtsByConversation.TryGetValue(conversationKey, out var currentInFlightCts)
+                && ReferenceEquals(currentInFlightCts, inFlightRequestCts))
+            {
+                _inFlightRequestCtsByConversation.TryRemove(conversationKey, out _);
+            }
+
+            var activeSessionId = _opencodeChat?.GetConversationSessionId(conversationKey);
+            if (!string.IsNullOrWhiteSpace(activeSessionId))
+            {
+                MarkOpencodeSessionIdle(activeSessionId);
+            }
+
+            if (globalGateHeld)
+            {
+                _globalConversationGate.Release();
+            }
+
+            StopTypingIndicatorIfActive();
+            gate.Release();
+            _ambientConversationKey.Value = priorAmbientConversationKey;
+        }
+    }
+
+    private static string GetConversationChannelLabel(string conversationKey)
+    {
+        if (conversationKey.StartsWith("group-", StringComparison.OrdinalIgnoreCase))
+        {
+            return "group";
+        }
+
+        if (conversationKey.Equals(LocalChatConversationKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return "local";
+        }
+
+        return "im";
+    }
+
+    private bool TryNormalizeConversationTextForRouting(string conversationKey, string text, out string routedText)
+    {
+        routedText = text.Trim();
+        if (conversationKey.StartsWith("im-", StringComparison.OrdinalIgnoreCase))
+        {
+            return !string.IsNullOrWhiteSpace(routedText);
+        }
+
+        if (TryConsumeWakeWordPrefix(routedText, allowShortBotWakeWord: IsControlGroupConversation(conversationKey), out var remainder))
+        {
+            routedText = remainder;
+            return !string.IsNullOrWhiteSpace(routedText);
+        }
+
+        return false;
+    }
+
+    private async Task<(bool Allowed, string Reason, string DenialMessage)> EvaluateConversationAccessAsync(
+        GridClient client,
+        UUID senderAgentId,
+        string senderName,
+        string conversationKey,
+        CancellationToken cancellationToken)
+    {
+        if (!IsHandlerRestricted())
+        {
+            return (false, "handler_not_configured", "Sorry, I am currently locked down until a handler is configured.");
+        }
+
+        if (conversationKey.StartsWith("group-", StringComparison.OrdinalIgnoreCase)
+            && IsControlGroupConversation(conversationKey))
+        {
+            // In bot C&C group chat, membership already scopes participants.
+            return (true, "control_group_chat", string.Empty);
+        }
+
+        if (IsHandlerAgent(senderAgentId, senderName))
+        {
+            return (true, "handler", string.Empty);
+        }
+
+        if (await IsAgentInControlGroupAsync(client, senderAgentId, cancellationToken).ConfigureAwait(false))
+        {
+            return (true, "control_group_member", string.Empty);
+        }
+
+        return (
+            false,
+            "not_handler_or_control_group_member",
+            "Sorry, I can only accept instructions from my handler or avatars in my C&C group.");
+    }
+
+    private bool IsControlGroupConversation(string conversationKey)
+    {
+        if (!conversationKey.StartsWith("group-", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var groupIdText = conversationKey["group-".Length..].Trim();
+        if (!UUID.TryParse(groupIdText, out var groupId) || groupId == UUID.Zero)
+        {
+            return false;
+        }
+
+        lock (_controlGroupStateLock)
+        {
+            return _controlGroupId != UUID.Zero && _controlGroupId == groupId;
+        }
+    }
+
+    private bool TryConsumeWakeWordPrefix(string text, bool allowShortBotWakeWord, out string remainder)
+    {
+        remainder = string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var botFirst = (_options.BotFirstName ?? string.Empty).Trim();
+        var botLast = (_options.BotLastName ?? string.Empty).Trim();
+        if (botFirst.Length > 0 && botLast.Length > 0)
+        {
+            var fullWakeWord = $"@{botFirst} {botLast}";
+            if (TryConsumeWakeWordVariant(text, fullWakeWord, out remainder))
+            {
+                return true;
+            }
+        }
+
+        if (allowShortBotWakeWord && TryConsumeWakeWordVariant(text, "@Bot", out remainder))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryConsumeWakeWordVariant(string text, string wakeWord, out string remainder)
+    {
+        remainder = string.Empty;
+        if (!text.StartsWith(wakeWord, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var rest = text[wakeWord.Length..];
+        if (rest.Length > 0)
+        {
+            var next = rest[0];
+            if (!char.IsWhiteSpace(next) && next != ':' && next != ',' && next != '-' && next != '.' && next != '!')
+            {
+                return false;
+            }
+        }
+
+        remainder = rest.TrimStart(' ', '\t', ':', ',', '-', '.', '!').Trim();
+        return true;
     }
 
     private void OnOpencodeSessionStatusChanged(OpencodeSessionStatusEvent statusEvent)
@@ -4319,7 +4516,7 @@ internal sealed partial class BotSession : IDisposable
 
     private OpencodeSendOptions? BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
     {
-        _imConversationConfigs.TryGetValue(conversationKey, out var cfg);
+        _conversationConfigs.TryGetValue(conversationKey, out var cfg);
         cfg ??= GetPersistedDefaultConversationConfigSnapshot();
 
         var requesterContextLayer = BuildRequesterContextPrompt(requesterAgentId, requesterName, conversationKey);
@@ -4436,7 +4633,7 @@ internal sealed partial class BotSession : IDisposable
         {
             "[requester context]",
             "Treat first-person references ('me', 'my', 'mine', 'here') as the requester below unless explicitly overridden.",
-            "channel: im",
+            $"channel: {GetConversationChannelLabel(conversationKey)}",
             $"conversation_key: {conversationKey}",
             $"requester_name: {(trimmedName.Length == 0 ? "(unknown)" : trimmedName)}",
             $"requester_uuid: {(requesterAgentId == UUID.Zero ? "(unknown)" : requesterAgentId.ToString())}"
@@ -4872,6 +5069,18 @@ internal sealed partial class BotSession : IDisposable
             return false;
         }
 
+        if (!IsHandlerRestricted())
+        {
+            SendImText(client, agentId, from, "Star commands are disabled until handler identity is configured.", conversationKey);
+            return true;
+        }
+
+        if (!IsHandlerAgent(agentId, from))
+        {
+            SendImText(client, agentId, from, "Sorry, only my configured handler can run star commands.", conversationKey);
+            return true;
+        }
+
         var commandLine = raw.Length == 1 ? string.Empty : raw[1..].Trim();
         var split = commandLine.Split(' ', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         var command = split.Length > 0 ? split[0].ToLowerInvariant() : "help";
@@ -4891,7 +5100,7 @@ internal sealed partial class BotSession : IDisposable
                     SendImText(client, agentId, from, BuildUsageText(conversationKey));
                     return true;
                 case "reset":
-                    _imConversationConfigs.TryRemove(conversationKey, out _);
+                    _conversationConfigs.TryRemove(conversationKey, out _);
                     _opencodeChat?.ResetConversation(conversationKey);
                     SetPersistedDefaultConversationConfig(null);
                     TrySaveOpencodeSessionStateForConversation(conversationKey, null);
@@ -4942,13 +5151,13 @@ internal sealed partial class BotSession : IDisposable
                     await HandleProjectCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
                     return true;
                 case "voice":
-                    await HandleVoiceCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    await HandleVoiceCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
                 case "voices":
-                    await HandleVoicesCommandAsync(client, agentId, from).ConfigureAwait(false);
+                    await HandleVoicesCommandAsync(client, agentId, from, conversationKey).ConfigureAwait(false);
                     return true;
                 case "say":
-                    await HandleSayCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
+                    await HandleSayCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
                 default:
                     SendImText(client, agentId, from, $"Unknown command '*{command}'. Try *help.");
@@ -5159,7 +5368,7 @@ internal sealed partial class BotSession : IDisposable
         var currentSessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
         var promptState = BuildPromptStatusText();
 
-        if (!_imConversationConfigs.TryGetValue(conversationKey, out var cfg))
+        if (!_conversationConfigs.TryGetValue(conversationKey, out var cfg))
         {
             var startupModel = GetStartupDefaultModelId();
             var startupProvider = GetStartupDefaultProviderId(startupModel);
@@ -7385,7 +7594,7 @@ internal sealed partial class BotSession : IDisposable
         {
             providerFilter = NormalizeLooseQuery(arg);
         }
-        else if (_imConversationConfigs.TryGetValue(conversationKey, out var cfg) && !string.IsNullOrWhiteSpace(cfg.ProviderId))
+        else if (_conversationConfigs.TryGetValue(conversationKey, out var cfg) && !string.IsNullOrWhiteSpace(cfg.ProviderId))
         {
             providerFilter = cfg.ProviderId;
         }
@@ -7432,12 +7641,12 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        var config = _imConversationConfigs.GetOrAdd(conversationKey, _ => new ImConversationConfig());
+        var config = _conversationConfigs.GetOrAdd(conversationKey, _ => new ConversationConfig());
         var normalizedArg = arg.Trim();
 
         if (normalizedArg.Equals("reset", StringComparison.OrdinalIgnoreCase))
         {
-            _imConversationConfigs.TryRemove(conversationKey, out _);
+            _conversationConfigs.TryRemove(conversationKey, out _);
             _opencodeChat.ResetConversation(conversationKey);
             SetPersistedDefaultConversationConfig(null);
             TrySaveOpencodeSessionStateForConversation(conversationKey, null);
@@ -7662,7 +7871,7 @@ internal sealed partial class BotSession : IDisposable
             return;
         }
 
-        var config = _imConversationConfigs.GetOrAdd(conversationKey, _ => new ImConversationConfig());
+        var config = _conversationConfigs.GetOrAdd(conversationKey, _ => new ConversationConfig());
         if (!string.IsNullOrWhiteSpace(config.ProviderId) || !string.IsNullOrWhiteSpace(config.ModelId))
         {
             return;
@@ -8186,6 +8395,128 @@ internal sealed partial class BotSession : IDisposable
         return !string.IsNullOrWhiteSpace(_handlerFullName);
     }
 
+    private bool IsHandlerAgent(UUID agentId, string? avatarName)
+    {
+        if (!IsHandlerRestricted())
+        {
+            return false;
+        }
+
+        UUID handlerAgentId;
+        lock (_controlGroupStateLock)
+        {
+            handlerAgentId = _handlerAgentId;
+        }
+
+        if (handlerAgentId != UUID.Zero && agentId != UUID.Zero && handlerAgentId == agentId)
+        {
+            return true;
+        }
+
+        return IsHandlerAvatar(avatarName);
+    }
+
+    private bool IsControlGroupId(UUID groupId)
+    {
+        if (groupId == UUID.Zero)
+        {
+            return false;
+        }
+
+        UUID controlGroupId;
+        lock (_controlGroupStateLock)
+        {
+            controlGroupId = _controlGroupId;
+        }
+
+        return controlGroupId != UUID.Zero && controlGroupId == groupId;
+    }
+
+    private bool TryGetActiveConversationRequester(out UUID requesterAgentId, out string requesterName)
+    {
+        requesterAgentId = UUID.Zero;
+        requesterName = string.Empty;
+
+        var conversationKey = _ambientConversationKey.Value;
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return false;
+        }
+
+        if (!_conversationRouteByKey.TryGetValue(conversationKey, out var route))
+        {
+            return false;
+        }
+
+        requesterAgentId = route.SpeakerAgentId;
+        requesterName = route.SpeakerName;
+        return requesterAgentId != UUID.Zero || !string.IsNullOrWhiteSpace(requesterName);
+    }
+
+    private async Task<bool> IsAgentInControlGroupAsync(GridClient client, UUID agentId, CancellationToken cancellationToken)
+    {
+        if (agentId == UUID.Zero)
+        {
+            return false;
+        }
+
+        var controlGroupId = await EnsureControlGroupExistsAsync(client, cancellationToken).ConfigureAwait(false);
+        if (controlGroupId == UUID.Zero)
+        {
+            return false;
+        }
+
+        var requestId = client.Groups.RequestGroupMembers(controlGroupId);
+        var membersReply = await WaitForGroupMembersReplyAsync(client, requestId, controlGroupId, cancellationToken).ConfigureAwait(false);
+        return membersReply != null && membersReply.Members.ContainsKey(agentId);
+    }
+
+    private async Task<(bool Allowed, string Error)> ValidateFriendshipTargetPolicyAsync(GridClient client, UUID targetAgentId, string? targetName, CancellationToken cancellationToken)
+    {
+        if (!IsHandlerRestricted())
+        {
+            return (false, "Handler identity is not configured; friendship policy enforcement requires OPENCODE_HANDLER_FIRSTNAME and OPENCODE_HANDLER_LASTNAME.");
+        }
+
+        if (IsHandlerAgent(targetAgentId, targetName))
+        {
+            return (true, string.Empty);
+        }
+
+        var inControlGroup = await IsAgentInControlGroupAsync(client, targetAgentId, cancellationToken).ConfigureAwait(false);
+        if (inControlGroup)
+        {
+            return (true, string.Empty);
+        }
+
+        return (false, "Friendship is restricted: only the configured handler or members of this bot's C&C group are allowed.");
+    }
+
+    private (bool Allowed, string Error) ValidateControlGroupAdditionPolicy(UUID targetAgentId, string? targetName)
+    {
+        if (!IsHandlerRestricted())
+        {
+            return (false, "Handler identity is not configured; refusing C&C group membership changes.");
+        }
+
+        if (IsHandlerAgent(targetAgentId, targetName))
+        {
+            return (true, string.Empty);
+        }
+
+        if (!TryGetActiveConversationRequester(out var requesterAgentId, out var requesterName))
+        {
+            return (false, "Cannot verify requester identity for C&C group membership change.");
+        }
+
+        if (!IsHandlerAgent(requesterAgentId, requesterName))
+        {
+            return (false, "Only the configured handler may add other avatars to this bot's C&C group.");
+        }
+
+        return (true, string.Empty);
+    }
+
     private bool IsHandlerAvatar(string? avatarName)
     {
         if (string.IsNullOrWhiteSpace(_handlerFullName))
@@ -8375,13 +8706,58 @@ internal sealed partial class BotSession : IDisposable
             || p.Name.Contains(q, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static void SendImText(GridClient client, UUID agentId, string from, string responseText)
+    private void SendImText(GridClient client, UUID agentId, string from, string responseText, string? conversationKey = null)
     {
+        conversationKey ??= _ambientConversationKey.Value;
+        conversationKey ??= ResolveConversationKeyForSpeaker(agentId);
+        _conversationRouteByKey.TryGetValue(conversationKey ?? string.Empty, out var route);
         foreach (var chunk in SplitForInstantMessage(responseText, 900))
         {
-            client.Self.InstantMessage(agentId, chunk);
-            Console.WriteLine($"[im] -> {from}: {chunk}");
+            try
+            {
+                if (route != null && route.Channel == ConversationChannel.Group && route.ReplyTargetId != UUID.Zero)
+                {
+                    client.Self.InstantMessageGroup(route.ReplyTargetId, chunk);
+                    Console.WriteLine($"[group] -> {from}: {chunk}");
+                    continue;
+                }
+
+                if (route != null && route.Channel == ConversationChannel.Local)
+                {
+                    client.Self.Chat(chunk, 0, ChatType.Normal);
+                    Console.WriteLine($"[local] -> {from}: {chunk}");
+                    continue;
+                }
+
+                var targetId = route?.ReplyTargetId ?? agentId;
+                if (targetId == UUID.Zero)
+                {
+                    targetId = agentId;
+                }
+
+                if (targetId != UUID.Zero)
+                {
+                    client.Self.InstantMessage(targetId, chunk);
+                    Console.WriteLine($"[im] -> {from}: {chunk}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[chat] failed to send reply for conversation '{conversationKey ?? "(none)"}': {ex.Message}");
+            }
         }
+    }
+
+    private string? ResolveConversationKeyForSpeaker(UUID agentId)
+    {
+        if (agentId == UUID.Zero)
+        {
+            return null;
+        }
+
+        return _conversationKeyBySpeakerAgent.TryGetValue(agentId, out var conversationKey)
+            ? conversationKey
+            : null;
     }
 
     private static bool IsLikelyTypingIndicator(InstantMessage message, string text)
@@ -8455,19 +8831,45 @@ internal sealed partial class BotSession : IDisposable
         }
 
         var text = e.Message?.Trim() ?? string.Empty;
-        if (!text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase))
+        if (text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[chat] ({e.SourceType}/{e.Type}) {e.FromName}: {SanitizeImLogText(text)}");
+            _ = Task.Run(async () =>
+            {
+                await TryHandleLslDialogBridgeReplyAsync(client, e.SourceID, e.FromName, text).ConfigureAwait(false);
+            });
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(text)
+            || e.SourceType != ChatSourceType.Agent
+            || e.SourceID == UUID.Zero)
         {
             return;
         }
 
-        Console.WriteLine($"[chat] ({e.SourceType}/{e.Type}) {e.FromName}: {SanitizeImLogText(text)}");
-        _ = Task.Run(async () =>
+        var from = string.IsNullOrWhiteSpace(e.FromName) ? e.SourceID.ToString() : e.FromName.Trim();
+        RegisterConversationRoute(
+            LocalChatConversationKey,
+            ConversationChannel.Local,
+            UUID.Zero,
+            e.SourceID,
+            from);
+        lock (_recentImSpeakerLock)
         {
-            await TryHandleLslDialogBridgeReplyAsync(client, e.SourceID, e.FromName, text).ConfigureAwait(false);
-        });
+            _lastImSpeakerAgentId = e.SourceID;
+            _lastImSpeakerName = from;
+            _lastImConversationKey = LocalChatConversationKey;
+        }
 
-        // TODO(ai-chat): route local chat to Opencode after conversation UX and anti-spam policies are finalized.
-        // TODO(ai-chat): add group chat routing once we define session mapping semantics for groups.
+        Console.WriteLine($"[local] ({e.SourceType}/{e.Type}) {from}: {SanitizeImLogText(text)}");
+        _ = Task.Run(() => HandleIncomingConversationMessageAsync(
+            client,
+            e.SourceID,
+            from,
+            LocalChatConversationKey,
+            text,
+            $"OpenSim local chat with {from}"));
     }
 
     private void OnScriptDialog(object? sender, ScriptDialogEventArgs e)
@@ -8511,7 +8913,7 @@ internal sealed partial class BotSession : IDisposable
             DateTimeOffset.UtcNow);
         _latestScriptDialogByConversation[conversationKey] = pending;
 
-        SendImText(client, targetAgentId, from, BuildFriendlyScriptDialogPrompt(pending));
+        SendImText(client, targetAgentId, from, BuildFriendlyScriptDialogPrompt(pending), conversationKey);
         Console.WriteLine($"[dialog] forwarded script dialog from '{pending.ObjectName}' to {from} ({conversationKey}).");
     }
 
@@ -9089,7 +9491,7 @@ internal sealed record CameraStateResult(bool Ok, string Message, CameraState? S
     public static CameraStateResult FailResult(string message) => new(false, message, null);
 }
 
-internal sealed class ImConversationConfig
+internal sealed class ConversationConfig
 {
     public string? ProviderId { get; set; }
     public string? ProviderName { get; set; }

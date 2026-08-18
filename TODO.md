@@ -118,11 +118,14 @@ Scope notes:
 
 ## 9) Voice / WebRTC
 
+*Some work has been done on this. Janus and Piper are part of the stack, but neither spatial or P2P calls are working yet.*
+
 - [ ] **[P1] Voice bridge supp8rt (`LibreMetaverse.Voice.WebRTC`)**
   - Connect/disconnect voice, peer events, mute/unmute, volume.
   - Optional audio processing toggles (NS/HPF/AGC/AEC) via MCP tools.
 - [ ] **[P2] Voice moderation policies**
   - Auto-mute/auto-join policies and permission checks.
+
 
 ## 10) OSD/LLSD and Data Utilities
 

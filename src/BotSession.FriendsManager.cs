@@ -121,6 +121,12 @@ internal sealed partial class BotSession
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
+            var friendshipPolicy = await ValidateFriendshipTargetPolicyAsync(client, targetAgentUuid, null, token).ConfigureAwait(false);
+            if (!friendshipPolicy.Allowed)
+            {
+                return BotToolResult.Fail(friendshipPolicy.Error);
+            }
+
             var text = string.IsNullOrWhiteSpace(message)
                 ? "Do ya wanna be my buddy?"
                 : message.Trim();
@@ -169,6 +175,12 @@ internal sealed partial class BotSession
 
             if (normalizedAction == "accept")
             {
+                var friendshipPolicy = await ValidateFriendshipTargetPolicyAsync(client, fromAgentUuid, null, token).ConfigureAwait(false);
+                if (!friendshipPolicy.Allowed)
+                {
+                    return BotToolResult.Fail(friendshipPolicy.Error);
+                }
+
                 if (useCapabilities)
                 {
                     await client.Friends.AcceptFriendshipViaCapAsync(fromAgentUuid, token).ConfigureAwait(false);

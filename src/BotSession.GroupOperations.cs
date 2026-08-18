@@ -439,6 +439,15 @@ internal sealed partial class BotSession
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
+            if (IsControlGroupId(groupUuid))
+            {
+                var controlPolicy = ValidateControlGroupAdditionPolicy(memberUuid, null);
+                if (!controlPolicy.Allowed)
+                {
+                    return BotToolResult.Fail(controlPolicy.Error);
+                }
+            }
+
             client.Groups.AddToRole(groupUuid, roleUuid, memberUuid);
             if (!verifyAfterSubmit)
             {
@@ -534,6 +543,15 @@ internal sealed partial class BotSession
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
+            if (IsControlGroupId(groupUuid))
+            {
+                var controlPolicy = ValidateControlGroupAdditionPolicy(targetAgentId, null);
+                if (!controlPolicy.Allowed)
+                {
+                    return DataToolResult.FailResult(controlPolicy.Error);
+                }
+            }
+
             var roleIds = ParseUuidList(invite.RoleIdsCsv);
             if (roleIds.Count == 0 && invite.UseEveryoneRoleIfEmpty)
             {

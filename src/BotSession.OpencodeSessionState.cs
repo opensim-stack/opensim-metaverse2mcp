@@ -56,7 +56,7 @@ internal sealed partial class BotSession
             lock (_opencodeSessionStateLock)
             {
                 _restoredOpencodeSessionId = loadedSessionId;
-                var loadedConfig = new ImConversationConfig
+                var loadedConfig = new ConversationConfig
                 {
                     ProviderId = loadedProviderId,
                     ProviderName = loadedProviderName,
@@ -80,7 +80,7 @@ internal sealed partial class BotSession
         }
     }
 
-    private void TrySaveOpencodeSessionStateForConversation(string conversationKey, ImConversationConfig? configuredOverride = null)
+    private void TrySaveOpencodeSessionStateForConversation(string conversationKey, ConversationConfig? configuredOverride = null)
     {
         if (_opencodeChat == null)
         {
@@ -96,14 +96,14 @@ internal sealed partial class BotSession
         try
         {
             var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
-            ImConversationConfig? activeConfig = configuredOverride;
+            ConversationConfig? activeConfig = configuredOverride;
             if (activeConfig == null)
             {
-                _imConversationConfigs.TryGetValue(conversationKey, out activeConfig);
+                _conversationConfigs.TryGetValue(conversationKey, out activeConfig);
             }
 
             var persistedSnapshot = GetPersistedDefaultConversationConfigSnapshot();
-            var mergedConfig = new ImConversationConfig
+            var mergedConfig = new ConversationConfig
             {
                 ProviderId = activeConfig?.ProviderId ?? persistedSnapshot?.ProviderId,
                 ProviderName = activeConfig?.ProviderName ?? persistedSnapshot?.ProviderName,
@@ -183,7 +183,7 @@ internal sealed partial class BotSession
         Console.WriteLine($"[opencode] restored persisted session mapping for conversation '{conversationKey}' -> {restoredSessionId}");
     }
 
-    private ImConversationConfig? GetPersistedDefaultConversationConfigSnapshot()
+    private ConversationConfig? GetPersistedDefaultConversationConfigSnapshot()
     {
         lock (_opencodeSessionStateLock)
         {
@@ -191,7 +191,7 @@ internal sealed partial class BotSession
         }
     }
 
-    private void SetPersistedDefaultConversationConfig(ImConversationConfig? config)
+    private void SetPersistedDefaultConversationConfig(ConversationConfig? config)
     {
         lock (_opencodeSessionStateLock)
         {
@@ -201,7 +201,7 @@ internal sealed partial class BotSession
         }
     }
 
-    private static bool IsConversationConfigEmpty(ImConversationConfig? config)
+    private static bool IsConversationConfigEmpty(ConversationConfig? config)
     {
         return config == null
             || (string.IsNullOrWhiteSpace(config.ProviderId)
@@ -210,14 +210,14 @@ internal sealed partial class BotSession
                 && string.IsNullOrWhiteSpace(config.ThinkingLevel));
     }
 
-    private static ImConversationConfig? CloneConversationConfig(ImConversationConfig? source)
+    private static ConversationConfig? CloneConversationConfig(ConversationConfig? source)
     {
         if (source == null)
         {
             return null;
         }
 
-        return new ImConversationConfig
+        return new ConversationConfig
         {
             ProviderId = source.ProviderId,
             ProviderName = source.ProviderName,
