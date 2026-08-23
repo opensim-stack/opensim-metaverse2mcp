@@ -40,17 +40,20 @@ export OPENSIM_LOGIN_LASTNAME="User"
 export OPENSIM_LOGIN_PASSWORD="botpassword"
 export OPENSIM_LOGIN_URI="http://localhost:9000"
 
-export MCP_TRANSPORT="http"
-export MCP_HOST="0.0.0.0"
-export MCP_PORT="8999"
-export MCP_HTTP_ENDPOINT="/mcp"
+export METAVERSE_MCP_TRANSPORT="http"
+export METAVERSE_MCP_HOST="0.0.0.0"
+export METAVERSE_MCP_PORT="8999"
+export METAVERSE_MCP_HTTP_ENDPOINT="/mcp"
 
-export OPENCODE_CHAT_ENABLED="true"
 export OPENCODE_SCHEME="http"
 export OPENCODE_HOST="localhost"
 export OPENCODE_PORT="8998"
-export OPENCODE_HANDLER_FIRSTNAME="Admin"
-export OPENCODE_HANDLER_LASTNAME="User"
+export OPENSIM_BOT_HANDLER_FIRSTNAME="Bot"
+export OPENSIM_BOT_HANDLER_LASTNAME="Handler"
+export SPAWNER_HOST="opensim-spawner"
+export SPAWNER_PORT="8993"
+# optional bearer token if OPENSIM_SPAWNER_TOKEN is set on opensim-spawner:
+# export SPAWNER_TOKEN=""
 # voice routing (optional)
 export VOICE_ROUTING_ENABLED="true"
 export VOICE_BACKEND="webrtc"
@@ -59,8 +62,8 @@ export PIPER_HOST="localhost"
 export PIPER_PORT="8995"
 export PIPER_DEFAULT_VOICE="en_US-lessac-medium"
 # optional Basic auth:
-# export OPENCODE_USERNAME="opencode"
-# export OPENCODE_PASSWORD="change-me"
+# export OPENCODE_SERVER_USERNAME="opencode"
+# export OPENCODE_SERVER_PASSWORD="change-me"
 
 dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release
 ```
@@ -90,32 +93,37 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 
 - `OPENSIM_LOGIN_URI` (default: `http://opensim:9000`)
 - `OPENSIM_LOGIN_START` (default: `last`)
-- `BOT_LOGIN_TIMEOUT_SECONDS` (default: `30`)
+- `OPENSIM_LOGIN_TIMEOUT_SECONDS` (default: `30`)
+
+### Spawner API integration
+
+- `SPAWNER_HOST` (default: `opensim-spawner`)
+- `SPAWNER_PORT` (default: `8993`)
+- `SPAWNER_TOKEN` (optional bearer token for spawner auth)
+- Bot-management API path is fixed to `/api/bot` (for example `GET /api/bot`, `POST /api/bot/{first}/{last}`).
 
 ### MCP server
 
-- `MCP_TRANSPORT` (`http` or `sse`; default: `http`)
-- `MCP_HOST` (default: `0.0.0.0`)
-- `MCP_PORT` (default: `8999`)
-- `MCP_HTTP_ENDPOINT` (default: `/mcp`)
-- `MCP_HTTP_BEARER_TOKEN` (optional)
-- `MCP_HTTP_DISALLOW_DELETE` (`true`/`false`, default: `false`)
-- `MCP_DIAGNOSTICS` (`true`/`false`, default: `false`)
+- `METAVERSE_MCP_TRANSPORT` (`http` or `sse`; default: `http`)
+- `METAVERSE_MCP_HOST` (default: `0.0.0.0`)
+- `METAVERSE_MCP_PORT` (default: `8999`)
+- `METAVERSE_MCP_HTTP_ENDPOINT` (default: `/mcp`)
+- `METAVERSE_MCP_HTTP_BEARER_TOKEN` (optional)
+- `METAVERSE_MCP_HTTP_DISALLOW_DELETE` (`true`/`false`, default: `false`)
+- `METAVERSE_MCP_DIAGNOSTICS` (`true`/`false`, default: `false`)
 - `INVENTORY_OFFER_POLICY_FILE` (optional JSON file path)
 - `INVENTORY_OFFER_POLICY_AUTOSAVE` (`true`/`false`, default: `true`)
 
 ### Opencode chat bridge
 
-- `OPENCODE_CHAT_ENABLED` (`true`/`false`, default: `true`)
 - `OPENCODE_SCHEME` (`http` or `https`, default: `http`)
 - `OPENCODE_HOST` (default: `opensim-opencode`)
 - `OPENCODE_PORT` (default: `8998`)
-- `OPENCODE_USERNAME` (optional Basic auth username)
-- `OPENCODE_PASSWORD` (optional Basic auth password)
-- `OPENCODE_SERVER_PASSWORD` (optional fallback alias for `OPENCODE_PASSWORD`)
+- `OPENCODE_SERVER_USERNAME` (optional Basic auth username)
+- `OPENCODE_SERVER_PASSWORD` (optional Basic auth password)
 - `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `1800`)
-- `OPENCODE_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
-- `OPENCODE_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
+- `OPENSIM_BOT_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
+- `OPENSIM_BOT_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
 
 ### Voice routing (Piper + grid voice)
 
@@ -150,6 +158,13 @@ Notes:
 The server publishes tools including:
 
 - `GetStatus`
+- `BotList`
+- `BotGet`
+- `BotCreate`
+- `BotStart`
+- `BotStop`
+- `BotRestart`
+- `BotDelete`
 - `Sit`
 - `Stand`
 - `Fly`
@@ -243,7 +258,7 @@ The server publishes tools including:
 
 Chat notes:
 - In this stage, only avatar-to-bot IM is routed to Opencode.
-- Optional handler mode: when `OPENCODE_HANDLER_FIRSTNAME` + `OPENCODE_HANDLER_LASTNAME` are set, only that avatar may control the bot; others get a friendly deny reply.
+- Optional handler mode: when `OPENSIM_BOT_HANDLER_FIRSTNAME` + `OPENSIM_BOT_HANDLER_LASTNAME` are set, only that avatar may control the bot; others get a friendly deny reply.
 - Prompt layering is enabled by default with this precedence (low -> high): built-in bridge prompt, project `AGENTS.md`, then in-world `AGENTS.md` notecard.
 - In-world prompt install is strict and handler-gated by default: only notecards named `AGENTS.md` are eligible, and when `PROMPT_NOTECARD_REQUIRE_HANDLER=true`, only the configured handler avatar can install/replace it.
 - IM supports "star commands" (prefixed with `*`) for live AI configuration per avatar conversation:
@@ -656,8 +671,8 @@ Run:
 
 ```bash
 docker run --rm \
-  -e OPENSIM_LOGIN_FIRSTNAME=Bot \
-  -e OPENSIM_LOGIN_LASTNAME=User \
+  -e OPENSIM_LOGIN_FIRSTNAME=Governor \
+  -e OPENSIM_LOGIN_LASTNAME=Bot \
   -e OPENSIM_LOGIN_PASSWORD=botpassword \
   -e OPENSIM_LOGIN_URI=http://host.docker.internal:9000 \
   -e MCP_TRANSPORT=http \

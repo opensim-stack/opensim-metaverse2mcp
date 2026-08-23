@@ -6,32 +6,37 @@ internal static class ConfigLoader
     {
         var options = new AppOptions
         {
-            McpTransport = Env("MCP_TRANSPORT") ?? "http",
-            McpHost = Env("MCP_HOST") ?? "0.0.0.0",
-            McpHttpEndpoint = Env("MCP_HTTP_ENDPOINT") ?? "/mcp",
-            McpHttpBearerToken = Env("MCP_HTTP_BEARER_TOKEN"),
-            McpDiagnostics = ParseBool(Env("MCP_DIAGNOSTICS"), false),
-            McpHttpDisallowDelete = ParseBool(Env("MCP_HTTP_DISALLOW_DELETE"), false),
+            McpTransport = Env("METAVERSE_MCP_TRANSPORT") ?? "http",
+            McpHost = Env("METAVERSE_MCP_HOST") ?? "0.0.0.0",
+            McpHttpEndpoint = Env("METAVERSE_MCP_HTTP_ENDPOINT") ?? "/mcp",
+            McpHttpBearerToken = Env("METAVERSE_MCP_HTTP_BEARER_TOKEN"),
+            McpDiagnostics = ParseBool(Env("METAVERSE_MCP_DIAGNOSTICS"), false),
+            McpHttpDisallowDelete = ParseBool(Env("METAVERSE_MCP_HTTP_DISALLOW_DELETE"), false),
             InventoryOfferPolicyFile = FirstDefined("INVENTORY_OFFER_POLICY_FILE", "OPENSIM_INVENTORY_OFFER_POLICY_FILE"),
             InventoryOfferPolicyAutoSave = ParseBool(FirstDefined("INVENTORY_OFFER_POLICY_AUTOSAVE", "OPENSIM_INVENTORY_OFFER_POLICY_AUTOSAVE"), true),
             BotFirstName = FirstDefined("OPENSIM_LOGIN_FIRSTNAME", "BOT_FIRSTNAME"),
             BotLastName = FirstDefined("OPENSIM_LOGIN_LASTNAME", "BOT_LASTNAME"),
             BotPassword = FirstDefined("OPENSIM_LOGIN_PASSWORD", "BOT_PASSWORD"),
+            BotSpawnerParent = Env("OPENSIM_SPAWNER_PARENT"),
+            BotSpawnerLevel = Env("OPENSIM_SPAWNER_LEVEL"),
+            SpawnerHost = Env("SPAWNER_HOST") ?? "opensim-spawner",
+            SpawnerPort = ParseInt(Env("SPAWNER_PORT"), 8993),
+            SpawnerToken = Env("SPAWNER_TOKEN"),
             BotLoginUri = FirstDefined("OPENSIM_LOGIN_URI", "BOT_LOGIN_URI") ?? "http://opensim:9000",
             BotStartLocation = FirstDefined("OPENSIM_LOGIN_START", "BOT_LOGIN_START") ?? "last",
-            BotLoginTimeoutSeconds = ParseInt(FirstDefined("BOT_LOGIN_TIMEOUT_SECONDS", "OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30),
-            OpencodeChatEnabled = ParseBool(Env("OPENCODE_CHAT_ENABLED"), true),
+            BotLoginTimeoutSeconds = ParseInt(FirstDefined("OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30),
+            WearFolderName = Env("WEAR_FOLDER_NAME") ?? string.Empty,
             OpencodeScheme = Env("OPENCODE_SCHEME") ?? "http",
             OpencodeHost = Env("OPENCODE_HOST") ?? "opensim-opencode",
             OpencodePort = ParseInt(Env("OPENCODE_PORT"), 8998),
-            OpencodeUsername = Env("OPENCODE_USERNAME"),
-            OpencodePassword = FirstDefined("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
+            OpencodeUsername = Env("OPENCODE_SERVER_USERNAME"),
+            OpencodePassword = Env("OPENCODE_SERVER_PASSWORD"),
             OpencodeInitialProvider = Env("OPENCODE_INITIAL_PROVIDER"),
             OpencodeInitialModel = Env("OPENCODE_INITIAL_MODEL"),
             OpencodeEventDebug = ParseBool(Env("OPENCODE_EVENT_DEBUG"), false),
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 1800),
-            OpencodeHandlerFirstName = Env("OPENCODE_HANDLER_FIRSTNAME"),
-            OpencodeHandlerLastName = Env("OPENCODE_HANDLER_LASTNAME"),
+            OpencodeHandlerFirstName = Env("OPENSIM_BOT_HANDLER_FIRSTNAME"),
+            OpencodeHandlerLastName = Env("OPENSIM_BOT_HANDLER_LASTNAME"),
             VoiceRoutingEnabled = ParseBool(Env("VOICE_ROUTING_ENABLED"), false),
             VoiceBackend = Env("VOICE_BACKEND") ?? "webrtc",
             PiperScheme = Env("PIPER_SCHEME") ?? "http",
@@ -49,6 +54,7 @@ internal static class ConfigLoader
             DialogBridgePromptResponseTimeoutSeconds = ParseInt(Env("DIALOG_BRIDGE_PROMPT_RESPONSE_TIMEOUT_SECONDS"), 120),
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
             PromptBuiltInEnabled = ParseBool(Env("PROMPT_BUILTIN_ENABLED"), true),
+            OpencodeDefaultPromptPath = Env("OPENCODE_DEFAULT_PROMPT_PATH"),
             PromptProjectAgentsEnabled = ParseBool(Env("PROMPT_PROJECT_AGENTS_ENABLED"), true),
             PromptProjectAgentsFile = Env("PROMPT_PROJECT_AGENTS_FILE") ?? "AGENTS.md",
             PromptNotecardEnabled = ParseBool(Env("PROMPT_NOTECARD_ENABLED"), true),
@@ -57,7 +63,7 @@ internal static class ConfigLoader
             RequesterContextDebugLogging = ParseBool(Env("REQUESTER_CONTEXT_DEBUG_LOGGING"), false)
         };
 
-        options.McpPort = ParseInt(Env("MCP_PORT"), 8999);
+        options.McpPort = ParseInt(Env("METAVERSE_MCP_PORT"), 8999);
         ApplyCliOverrides(options, args);
         options.McpHttpEndpoint = NormalizeEndpoint(options.McpHttpEndpoint);
         options.PiperTtsPath = NormalizeEndpoint(options.PiperTtsPath);
@@ -86,15 +92,20 @@ internal static class ConfigLoader
             "Bot login options (optional):",
             "  --login-uri <url>              Login URI (env: OPENSIM_LOGIN_URI, default: http://opensim:9000)",
             "  --start-location <value>       Start location (env: OPENSIM_LOGIN_START, default: last)",
-            "  --login-timeout-seconds <int>  Login timeout (env: BOT_LOGIN_TIMEOUT_SECONDS, default: 30)",
+            "  --wear-folder-name <value>     Folder to wear on provision (env: WEAR_FOLDER_NAME, default: EMPTY)",
+            "  --login-timeout-seconds <int>  Login timeout (env: OPENSIM_LOGIN_TIMEOUT_SECONDS, default: 30)",
+            "  --spawner-parent <name>        Parent bot full name (env: OPENSIM_SPAWNER_PARENT)",
+            "  --spawner-level <value>        Spawner-assigned level hint (env: OPENSIM_SPAWNER_LEVEL)",
+            "  --spawner-host <host>          Spawner API host (env: SPAWNER_HOST, default: opensim-spawner)",
+            "  --spawner-port <port>          Spawner API port (env: SPAWNER_PORT, default: 8993)",
+            "  --spawner-token <token>        Optional Spawner API bearer token (env: SPAWNER_TOKEN)",
             string.Empty,
             "Opencode chat bridge:",
-            "  --opencode-chat-enabled <bool> Enable IM -> Opencode chat bridge (env: OPENCODE_CHAT_ENABLED, default: true)",
             "  --opencode-scheme <http|https> Opencode URL scheme (env: OPENCODE_SCHEME, default: http)",
             "  --opencode-host <host>         Opencode server host (env: OPENCODE_HOST, default: opensim-opencode)",
             "  --opencode-port <port>         Opencode server port (env: OPENCODE_PORT, default: 8998)",
-            "  --opencode-username <value>    Optional Basic auth username (env: OPENCODE_USERNAME, default: opencode when password set)",
-            "  --opencode-password <value>    Optional Basic auth password (env: OPENCODE_PASSWORD/OPENCODE_SERVER_PASSWORD)",
+            "  --opencode-username <value>    Optional Basic auth username (env: OPENCODE_SERVER_USERNAME, default: opencode when password set)",
+            "  --opencode-password <value>    Optional Basic auth password (env: OPENCODE_SERVER_PASSWORD)",
             "  --opencode-initial-provider <id>",
             "                                Optional startup provider for IM conversations without runtime overrides",
             "                                (env: OPENCODE_INITIAL_PROVIDER)",
@@ -106,8 +117,8 @@ internal static class ConfigLoader
             "                                (env: OPENCODE_EVENT_DEBUG, default: false)",
             "  --opencode-timeout-seconds <int>",
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
-            "  --handler-first-name <value>   Optional handler first name (env: OPENCODE_HANDLER_FIRSTNAME)",
-            "  --handler-last-name <value>    Optional handler last name (env: OPENCODE_HANDLER_LASTNAME)",
+            "  --handler-first-name <value>   Optional handler first name (env: OPENSIM_BOT_HANDLER_FIRSTNAME)",
+            "  --handler-last-name <value>    Optional handler last name (env: OPENSIM_BOT_HANDLER_LASTNAME)",
             string.Empty,
             "Voice routing (Piper + grid voice backend):",
             "  --voice-enabled <bool>         Enable voice routing for Say tool (env: VOICE_ROUTING_ENABLED, default: false)",
@@ -144,6 +155,7 @@ internal static class ConfigLoader
             "                                Enable layered prompt handling (env: PROMPT_HANDLING_ENABLED, default: true)",
             "  --prompt-builtin-enabled <bool>",
             "                                Include built-in bridge prompt (env: PROMPT_BUILTIN_ENABLED, default: true)",
+            "                                Optional file override via OPENCODE_DEFAULT_PROMPT_PATH when set",
             "  --prompt-project-agents-enabled <bool>",
             "                                Include local AGENTS.md prompt file (env: PROMPT_PROJECT_AGENTS_ENABLED, default: true)",
             "  --prompt-project-agents-file <path>",
@@ -160,13 +172,13 @@ internal static class ConfigLoader
             "                                (env: REQUESTER_CONTEXT_DEBUG_LOGGING, default: false)",
             string.Empty,
             "MCP HTTP options:",
-            "  --mcp-transport <http|sse>     Transport (env: MCP_TRANSPORT, default: http)",
-            "  --mcp-host <host>              Bind host (env: MCP_HOST, default: 0.0.0.0)",
-            "  --mcp-port <port>              Bind port (env: MCP_PORT, default: 8999)",
-            "  --mcp-http-endpoint <path>     Endpoint path (env: MCP_HTTP_ENDPOINT, default: /mcp)",
-            "  --mcp-http-bearer-token <tok>  Bearer auth token (env: MCP_HTTP_BEARER_TOKEN)",
-            "  --mcp-http-disallow-delete     Reject DELETE on MCP endpoint (env: MCP_HTTP_DISALLOW_DELETE)",
-            "  --mcp-diagnostics              Extra bot/MCP diagnostics (env: MCP_DIAGNOSTICS)",
+            "  --mcp-transport <http|sse>     Transport (env: METAVERSE_MCP_TRANSPORT, default: http)",
+            "  --mcp-host <host>              Bind host (env: METAVERSE_MCP_HOST, default: 0.0.0.0)",
+            "  --mcp-port <port>              Bind port (env: METAVERSE_MCP_PORT, default: 8999)",
+            "  --mcp-http-endpoint <path>     Endpoint path (env: METAVERSE_MCP_HTTP_ENDPOINT, default: /mcp)",
+            "  --mcp-http-bearer-token <tok>  Bearer auth token (env: METAVERSE_MCP_HTTP_BEARER_TOKEN)",
+            "  --mcp-http-disallow-delete     Reject DELETE on MCP endpoint (env: METAVERSE_MCP_HTTP_DISALLOW_DELETE)",
+            "  --mcp-diagnostics              Extra bot/MCP diagnostics (env: METAVERSE_MCP_DIAGNOSTICS)",
             "  --inventory-offer-policy-file <path>",
             "                                JSON file for inventory-offer policy rules",
             "                                (env: INVENTORY_OFFER_POLICY_FILE)",
@@ -204,11 +216,26 @@ internal static class ConfigLoader
                 case "--start-location":
                     options.BotStartLocation = RequireValue(args, ref i, arg);
                     break;
+                case "--wear-folder-name":
+                    options.WearFolderName = RequireValue(args, ref i, arg);
+                    break;
                 case "--login-timeout-seconds":
                     options.BotLoginTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.BotLoginTimeoutSeconds);
                     break;
-                case "--opencode-chat-enabled":
-                    options.OpencodeChatEnabled = ParseBool(RequireValue(args, ref i, arg), options.OpencodeChatEnabled);
+                case "--spawner-parent":
+                    options.BotSpawnerParent = RequireValue(args, ref i, arg);
+                    break;
+                case "--spawner-level":
+                    options.BotSpawnerLevel = RequireValue(args, ref i, arg);
+                    break;
+                case "--spawner-host":
+                    options.SpawnerHost = RequireValue(args, ref i, arg);
+                    break;
+                case "--spawner-port":
+                    options.SpawnerPort = ParseInt(RequireValue(args, ref i, arg), options.SpawnerPort);
+                    break;
+                case "--spawner-token":
+                    options.SpawnerToken = RequireValue(args, ref i, arg);
                     break;
                 case "--opencode-scheme":
                     options.OpencodeScheme = RequireValue(args, ref i, arg);

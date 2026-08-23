@@ -18,11 +18,16 @@ internal sealed class AppOptions
     public string? BotFirstName { get; set; }
     public string? BotLastName { get; set; }
     public string? BotPassword { get; set; }
+    public string? BotSpawnerParent { get; set; }
+    public string? BotSpawnerLevel { get; set; }
+    public string SpawnerHost { get; set; } = "opensim-spawner";
+    public int SpawnerPort { get; set; } = 8993;
+    public string? SpawnerToken { get; set; }
     public string BotLoginUri { get; set; } = "http://opensim:9000";
     public string BotStartLocation { get; set; } = "last";
+    public string WearFolderName { get; set; } = "";
     public int BotLoginTimeoutSeconds { get; set; } = 30;
 
-    public bool OpencodeChatEnabled { get; set; } = true;
     public string OpencodeScheme { get; set; } = "http";
     public string OpencodeHost { get; set; } = "opensim-opencode";
     public int OpencodePort { get; set; } = 8998;
@@ -55,6 +60,7 @@ internal sealed class AppOptions
 
     public bool PromptHandlingEnabled { get; set; } = true;
     public bool PromptBuiltInEnabled { get; set; } = true;
+    public string? OpencodeDefaultPromptPath { get; set; }
     public bool PromptProjectAgentsEnabled { get; set; } = true;
     public string PromptProjectAgentsFile { get; set; } = "AGENTS.md";
     public bool PromptNotecardEnabled { get; set; } = true;
@@ -85,6 +91,16 @@ internal sealed class AppOptions
             errors.Add("MCP port must be in range 1..65535.");
         }
 
+        if (string.IsNullOrWhiteSpace(SpawnerHost))
+        {
+            errors.Add("Spawner host is required.");
+        }
+
+        if (SpawnerPort < 1 || SpawnerPort > 65535)
+        {
+            errors.Add("Spawner port must be in range 1..65535.");
+        }
+
         if (string.IsNullOrWhiteSpace(McpHttpEndpoint))
         {
             errors.Add("MCP HTTP endpoint is required.");
@@ -100,87 +116,96 @@ internal sealed class AppOptions
             errors.Add("Bot login timeout must be at least 1 second.");
         }
 
-        if (OpencodeChatEnabled)
+        var scheme = (OpencodeScheme ?? string.Empty).Trim().ToLowerInvariant();
+        if (scheme != "http" && scheme != "https")
         {
-            var scheme = (OpencodeScheme ?? string.Empty).Trim().ToLowerInvariant();
-            if (scheme != "http" && scheme != "https")
-            {
-                errors.Add("Opencode scheme must be 'http' or 'https'.");
-            }
+            errors.Add("Opencode scheme must be 'http' or 'https'.");
+        }
 
-            if (string.IsNullOrWhiteSpace(OpencodeHost))
-            {
-                errors.Add("Opencode host is required when chat bridge is enabled.");
-            }
+        if (string.IsNullOrWhiteSpace(OpencodeHost))
+        {
+            errors.Add("Opencode host is required when chat bridge is enabled.");
+        }
 
-            if (OpencodePort < 1 || OpencodePort > 65535)
-            {
-                errors.Add("Opencode port must be in range 1..65535.");
-            }
+        if (OpencodePort < 1 || OpencodePort > 65535)
+        {
+            errors.Add("Opencode port must be in range 1..65535.");
+        }
 
-            if (OpencodeRequestTimeoutSeconds < 1)
-            {
-                errors.Add("Opencode timeout must be at least 1 second.");
-            }
+        if (OpencodeRequestTimeoutSeconds < 1)
+        {
+            errors.Add("Opencode timeout must be at least 1 second.");
+        }
 
-            if (PromptHandlingEnabled)
-            {
-                if (PromptMaxChars < 512)
-                {
-                    errors.Add("Prompt max chars must be at least 512 when prompt handling is enabled.");
-                }
-
-                if (string.IsNullOrWhiteSpace(PromptProjectAgentsFile))
-                {
-                    errors.Add("Prompt project AGENTS file path must not be empty when prompt handling is enabled.");
-                }
-                else
-                {
-                    try
-                    {
-                        _ = Path.GetFullPath(PromptProjectAgentsFile);
-                    }
-                    catch
-                    {
-                        errors.Add("Prompt project AGENTS file path is invalid.");
-                    }
-                }
-            }
-
-            if (DialogBridgePromptResponseTimeoutSeconds < 5)
-            {
-                errors.Add("Dialog bridge prompt response timeout must be at least 5 seconds.");
-            }
-
-            var hasHandlerFirst = !string.IsNullOrWhiteSpace(OpencodeHandlerFirstName);
-            var hasHandlerLast = !string.IsNullOrWhiteSpace(OpencodeHandlerLastName);
-            if (hasHandlerFirst != hasHandlerLast)
-            {
-                errors.Add("Handler name must include both first and last names (OPENCODE_HANDLER_FIRSTNAME and OPENCODE_HANDLER_LASTNAME). ");
-            }
-
-            if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedObjectId)
-                && !Guid.TryParse(LslDialogBridgeTrustedObjectId, out _))
-            {
-                errors.Add("LSL dialog bridge trusted object id must be a valid UUID.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedOwnerId)
-                && !Guid.TryParse(LslDialogBridgeTrustedOwnerId, out _))
-            {
-                errors.Add("LSL dialog bridge trusted owner id must be a valid UUID.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustStateFile))
+        if (PromptHandlingEnabled) 
+        {
+            if (!string.IsNullOrWhiteSpace(OpencodeDefaultPromptPath))
             {
                 try
                 {
-                    _ = Path.GetFullPath(LslDialogBridgeTrustStateFile);
+                    _ = Path.GetFullPath(OpencodeDefaultPromptPath);
                 }
                 catch
                 {
-                    errors.Add("LSL dialog bridge trust state file path is invalid.");
+                    errors.Add("OPENCODE_DEFAULT_PROMPT_PATH is invalid.");
                 }
+            }
+
+            if (PromptMaxChars < 512)
+            {
+                errors.Add("Prompt max chars must be at least 512 when prompt handling is enabled.");
+            }
+    
+            if (string.IsNullOrWhiteSpace(PromptProjectAgentsFile))
+            {
+                errors.Add("Prompt project AGENTS file path must not be empty when prompt handling is enabled.");
+            }
+            else
+            {
+                try
+                {
+                    _ = Path.GetFullPath(PromptProjectAgentsFile);
+                }
+                catch
+                {
+                    errors.Add("Prompt project AGENTS file path is invalid.");
+                }
+            }
+        }
+
+        if (DialogBridgePromptResponseTimeoutSeconds < 5)
+        {
+            errors.Add("Dialog bridge prompt response timeout must be at least 5 seconds.");
+        }
+
+        var hasHandlerFirst = !string.IsNullOrWhiteSpace(OpencodeHandlerFirstName);
+        var hasHandlerLast = !string.IsNullOrWhiteSpace(OpencodeHandlerLastName);
+        if (hasHandlerFirst != hasHandlerLast)
+        {
+            errors.Add("Handler name must include both first and last names (OPENSIM_BOT_HANDLER_FIRSTNAME and OPENSIM_BOT_HANDLER_LASTNAME). ");
+        }
+
+        if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedObjectId)
+            && !Guid.TryParse(LslDialogBridgeTrustedObjectId, out _))
+        {
+            errors.Add("LSL dialog bridge trusted object id must be a valid UUID.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedOwnerId)
+            && !Guid.TryParse(LslDialogBridgeTrustedOwnerId, out _))
+        {
+            errors.Add("LSL dialog bridge trusted owner id must be a valid UUID.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustStateFile))
+        {
+            try
+            {
+                _ = Path.GetFullPath(LslDialogBridgeTrustStateFile);
+            }
+            catch
+            {
+                errors.Add("LSL dialog bridge trust state file path is invalid.");
             }
         }
 

@@ -22,6 +22,12 @@ internal sealed partial class BotSession
 
     private void StartControlGroupBootstrap(GridClient client)
     {
+        if (!string.IsNullOrWhiteSpace(_parentFullName))
+        {
+            Console.WriteLine("[group-bootstrap] parent controller mode detected; C&C group bootstrap is disabled.");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_controlGroupName))
         {
             Console.WriteLine("[group-bootstrap] control group bootstrap disabled: bot name did not produce a valid control group name.");

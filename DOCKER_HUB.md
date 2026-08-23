@@ -17,14 +17,14 @@ Run the container with your bot credentials and OpenSim login URI:
 
 ```bash
 docker run --rm \
-  -e OPENSIM_LOGIN_FIRSTNAME=Bot \
-  -e OPENSIM_LOGIN_LASTNAME=User \
+  -e OPENSIM_LOGIN_FIRSTNAME=Governor \
+  -e OPENSIM_LOGIN_LASTNAME=Bot \
   -e OPENSIM_LOGIN_PASSWORD=botpassword \
   -e OPENSIM_LOGIN_URI=http://host.docker.internal:9000 \
-  -e MCP_TRANSPORT=http \
-  -e MCP_HOST=0.0.0.0 \
-  -e MCP_PORT=8999 \
-  -e MCP_HTTP_ENDPOINT=/mcp \
+  -e METAVERSE_MCP_TRANSPORT=http \
+  -e METAVERSE_MCP_HOST=0.0.0.0 \
+  -e METAVERSE_MCP_PORT=8999 \
+  -e METAVERSE_MCP_HTTP_ENDPOINT=/mcp \
   -p 8999:8999 \
   bithatch/opensim-metaverse2mcp:latest
 ```

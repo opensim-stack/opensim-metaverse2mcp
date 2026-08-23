@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 using ModelContextProtocol.Server;
 
 namespace Opensim.Metaverse2Mcp;
@@ -7,16 +8,222 @@ namespace Opensim.Metaverse2Mcp;
 internal sealed class BotMcpTools
 {
     private readonly BotSession _bot;
+    private readonly SpawnerClient _spawnerClient;
+    private readonly AppOptions _options;
 
-    public BotMcpTools(BotSession bot)
+    public BotMcpTools(BotSession bot, SpawnerClient spawnerClient, AppOptions options)
     {
         _bot = bot;
+        _spawnerClient = spawnerClient;
+        _options = options;
     }
 
     [McpServerTool, Description("Get bot connection and location status.")]
     public BotStatus GetStatus()
     {
         return _bot.GetStatus();
+    }
+
+    [McpServerTool, Description("List bot instances from the opensim-spawner API.")]
+    public Task<DataToolResult> BotList(CancellationToken cancellationToken)
+    {
+        return _spawnerClient.ListBotsAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Get one bot instance and container status from the opensim-spawner API.")]
+    public Task<DataToolResult> BotGet(
+        [Description("Bot first name.")] string first,
+        [Description("Bot last name.")] string last,
+        CancellationToken cancellationToken)
+    {
+        return _spawnerClient.GetBotAsync(first, last, cancellationToken);
+    }
+
+    [McpServerTool, Description("Create a new bot through opensim-spawner.")]
+    public Task<DataToolResult> BotCreate(
+        [Description("New bot first name.")] string first,
+        [Description("New bot last name.")] string last,
+        [Description("Bot level (for example: GOVERNOR, BUILDER, ACTOR).")]
+        string level,
+        [Description("Optional email override. If omitted, spawner defaults to <first>.<last>@localhost.")]
+        string? email,
+        [Description("Optional 3D avatar model override. If omitted, spawner defaults to Ruth.")]
+        string? model,
+        [Description("Optional appearance name (for example: Cube Bot, Actor, Construction).")]
+        string? appearance,
+        [Description("Optional gender (male, female, neutral).")]
+        string? gender,
+        CancellationToken cancellationToken)
+    {
+        return _spawnerClient.CreateBotAsync(
+            first,
+            last,
+            level,
+            $"{_options.BotFirstName} {_options.BotLastName}".Trim(),
+            email,
+            model,
+            appearance,
+            gender,
+            _options.OpencodeInitialProvider,
+            _options.OpencodeInitialModel,
+            cancellationToken);
+    }
+
+    [McpServerTool, Description("Delete a bot through opensim-spawner (stops/removes its containers).")]
+    public Task<DataToolResult> BotDelete(
+        [Description("Bot first name.")] string first,
+        [Description("Bot last name.")] string last,
+        CancellationToken cancellationToken)
+    {
+        return _spawnerClient.DeleteBotAsync(first, last, cancellationToken);
+    }
+
+    [McpServerTool, Description("Start a bot through opensim-spawner (self or descendant bots only).")]
+    public Task<DataToolResult> BotStart(
+        [Description("Bot first name.")] string first,
+        [Description("Bot last name.")] string last,
+        CancellationToken cancellationToken)
+    {
+        return ChangeBotRunningStateAsync(first, last, "start", cancellationToken);
+    }
+
+    [McpServerTool, Description("Stop a bot through opensim-spawner (self or descendant bots only).")]
+    public Task<DataToolResult> BotStop(
+        [Description("Bot first name.")] string first,
+        [Description("Bot last name.")] string last,
+        CancellationToken cancellationToken)
+    {
+        return ChangeBotRunningStateAsync(first, last, "stop", cancellationToken);
+    }
+
+    [McpServerTool, Description("Restart a bot through opensim-spawner (self or descendant bots only).")]
+    public Task<DataToolResult> BotRestart(
+        [Description("Bot first name.")] string first,
+        [Description("Bot last name.")] string last,
+        CancellationToken cancellationToken)
+    {
+        return ChangeBotRunningStateAsync(first, last, "restart", cancellationToken);
+    }
+
+    private async Task<DataToolResult> ChangeBotRunningStateAsync(
+        string first,
+        string last,
+        string action,
+        CancellationToken cancellationToken)
+    {
+        var ownershipError = await ValidateOwnershipForStateChangeAsync(first, last, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(ownershipError))
+        {
+            return DataToolResult.FailResult(ownershipError);
+        }
+
+        return await _spawnerClient.PatchBotAsync(first, last, action, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string?> ValidateOwnershipForStateChangeAsync(
+        string targetFirst,
+        string targetLast,
+        CancellationToken cancellationToken)
+    {
+        var safeTargetFirst = targetFirst?.Trim() ?? string.Empty;
+        var safeTargetLast = targetLast?.Trim() ?? string.Empty;
+        if (safeTargetFirst.Length == 0 || safeTargetLast.Length == 0)
+        {
+            return "first and last are required.";
+        }
+
+        var selfFirst = _options.BotFirstName?.Trim() ?? string.Empty;
+        var selfLast = _options.BotLastName?.Trim() ?? string.Empty;
+        if (selfFirst.Length == 0 || selfLast.Length == 0)
+        {
+            return "Cannot evaluate ownership: current bot identity is not configured.";
+        }
+
+        var selfFullName = $"{selfFirst} {selfLast}";
+        if (string.Equals(safeTargetFirst, selfFirst, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(safeTargetLast, selfLast, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var currentFirst = safeTargetFirst;
+        var currentLast = safeTargetLast;
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (true)
+        {
+            var currentFullName = $"{currentFirst} {currentLast}";
+            if (!visited.Add(currentFullName))
+            {
+                return $"Ownership check failed for {safeTargetFirst} {safeTargetLast}: parent cycle detected at {currentFullName}.";
+            }
+
+            var targetResult = await _spawnerClient.GetBotAsync(currentFirst, currentLast, cancellationToken).ConfigureAwait(false);
+            if (!targetResult.Ok)
+            {
+                return $"Ownership check failed while reading {currentFullName}: {targetResult.Message}";
+            }
+
+            var parent = TryReadParentName(targetResult.PayloadJson);
+            if (string.IsNullOrWhiteSpace(parent))
+            {
+                return $"Not allowed: {selfFullName} can only change state of itself or descendants.";
+            }
+
+            if (string.Equals(parent.Trim(), selfFullName, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            if (!TrySplitAvatarName(parent, out currentFirst, out currentLast))
+            {
+                return $"Ownership check failed: parent name '{parent}' for {currentFullName} is not in '<first> <last>' form.";
+            }
+        }
+    }
+
+    private static string? TryReadParentName(string? payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            if (!document.RootElement.TryGetProperty("parent", out var parentElement)
+                || parentElement.ValueKind == JsonValueKind.Null)
+            {
+                return null;
+            }
+
+            return parentElement.ValueKind == JsonValueKind.String ? parentElement.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TrySplitAvatarName(string fullName, out string first, out string last)
+    {
+        first = string.Empty;
+        last = string.Empty;
+
+        var parts = fullName.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2)
+        {
+            return false;
+        }
+
+        first = parts[0];
+        last = parts[1];
+        return true;
     }
 
     [McpServerTool, Description("Sit on the ground.")]

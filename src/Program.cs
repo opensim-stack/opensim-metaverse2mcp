@@ -38,6 +38,7 @@ builder.WebHost.UseUrls($"http://{options.McpHost}:{options.McpPort}");
 
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton(botSession);
+builder.Services.AddSingleton<SpawnerClient>();
 
 builder.Services
     .AddMcpServer()

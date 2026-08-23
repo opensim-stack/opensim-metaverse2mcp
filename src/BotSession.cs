@@ -159,6 +159,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
     private readonly AsyncLocal<string?> _ambientConversationKey = new();
     private readonly string? _handlerFullName;
+    private readonly string? _parentFullName;
     private readonly object _promptStateLock = new();
     private readonly object _recentImSpeakerLock = new();
     private readonly object _dialogBridgeTrustLock = new();
@@ -171,6 +172,9 @@ internal sealed partial class BotSession : IDisposable
 
     private string? _projectAgentsPromptCache;
     private DateTime _projectAgentsPromptCacheLastWriteUtc;
+    private string? _builtInPromptOverrideCache;
+    private DateTime _builtInPromptOverrideCacheLastWriteUtc;
+    private string? _builtInPromptOverrideCachePath;
     private string? _activeAgentsNotecardPrompt;
     private string? _activeAgentsNotecardSourceName;
     private string? _activeAgentsNotecardItemId;
@@ -262,21 +266,24 @@ internal sealed partial class BotSession : IDisposable
         InitializeVoiceSupport();
         InitializeDialogBridgeTrustFromOptions();
         _handlerFullName = BuildHandlerFullName(_options.OpencodeHandlerFirstName, _options.OpencodeHandlerLastName);
-        if (_options.OpencodeChatEnabled)
+        _parentFullName = NormalizeAvatarName(_options.BotSpawnerParent);
+        _opencodeChat = new OpencodeChatClient(_options);
+        _opencodeChat.SessionStatusChanged += OnOpencodeSessionStatusChanged;
+        _opencodeChat.MessagePartUpdated += OnOpencodeMessagePartUpdated;
+        var startupModel = GetStartupDefaultModelId();
+        if (!string.IsNullOrWhiteSpace(startupModel))
         {
-            _opencodeChat = new OpencodeChatClient(_options);
-            _opencodeChat.SessionStatusChanged += OnOpencodeSessionStatusChanged;
-            _opencodeChat.MessagePartUpdated += OnOpencodeMessagePartUpdated;
-            var startupModel = GetStartupDefaultModelId();
-            if (!string.IsNullOrWhiteSpace(startupModel))
-            {
-                Console.WriteLine($"[opencode] startup default model configured (runtime-overridable): {startupModel}");
-            }
+            Console.WriteLine($"[opencode] startup default model configured (runtime-overridable): {startupModel}");
         }
 
         if (!string.IsNullOrWhiteSpace(_handlerFullName))
         {
             Console.WriteLine($"[bot] handler restriction enabled: {_handlerFullName}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_parentFullName))
+        {
+            Console.WriteLine($"[bot] parent controller enabled: {_parentFullName}");
         }
     }
 
@@ -4126,6 +4133,12 @@ internal sealed partial class BotSession : IDisposable
             return !string.IsNullOrWhiteSpace(routedText);
         }
 
+        // Always allow explicit star commands from non-IM channels. Authorization is enforced later.
+        if (routedText.StartsWith('*'))
+        {
+            return true;
+        }
+
         if (TryConsumeWakeWordPrefix(routedText, allowShortBotWakeWord: IsControlGroupConversation(conversationKey), out var remainder))
         {
             routedText = remainder;
@@ -4144,7 +4157,7 @@ internal sealed partial class BotSession : IDisposable
     {
         if (!IsHandlerRestricted())
         {
-            return (false, "handler_not_configured", "Sorry, I am currently locked down until a handler is configured.");
+            return (false, "handler_not_configured", "Sorry, I am currently locked down until a handler or parent controller is configured.");
         }
 
         if (conversationKey.StartsWith("group-", StringComparison.OrdinalIgnoreCase)
@@ -4167,7 +4180,7 @@ internal sealed partial class BotSession : IDisposable
         return (
             false,
             "not_handler_or_control_group_member",
-            "Sorry, I can only accept instructions from my handler or avatars in my C&C group.");
+            "Sorry, I can only accept instructions from my handler/parent controller or avatars in my C&C group.");
     }
 
     private bool IsControlGroupConversation(string conversationKey)
@@ -4206,6 +4219,13 @@ internal sealed partial class BotSession : IDisposable
             {
                 return true;
             }
+
+            // Some viewers autocomplete mentions as a bare name without '@'.
+            var bareFullWakeWord = $"{botFirst} {botLast}";
+            if (TryConsumeWakeWordVariant(text, bareFullWakeWord, out remainder))
+            {
+                return true;
+            }
         }
 
         if (allowShortBotWakeWord && TryConsumeWakeWordVariant(text, "@Bot", out remainder))
@@ -4219,12 +4239,12 @@ internal sealed partial class BotSession : IDisposable
     private static bool TryConsumeWakeWordVariant(string text, string wakeWord, out string remainder)
     {
         remainder = string.Empty;
-        if (!text.StartsWith(wakeWord, StringComparison.OrdinalIgnoreCase))
+        if (!TryConsumePrefixWithFlexibleWhitespace(text, wakeWord, out var consumedLength))
         {
             return false;
         }
 
-        var rest = text[wakeWord.Length..];
+        var rest = text[consumedLength..];
         if (rest.Length > 0)
         {
             var next = rest[0];
@@ -4234,7 +4254,58 @@ internal sealed partial class BotSession : IDisposable
             }
         }
 
-        remainder = rest.TrimStart(' ', '\t', ':', ',', '-', '.', '!').Trim();
+        remainder = rest.TrimStart(' ', '\t', '\r', '\n', '\u00A0', ':', ',', '-', '.', '!').Trim();
+        return true;
+    }
+
+    private static bool TryConsumePrefixWithFlexibleWhitespace(string text, string prefix, out int consumedLength)
+    {
+        consumedLength = 0;
+        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(prefix))
+        {
+            return false;
+        }
+
+        var textIndex = 0;
+        var prefixIndex = 0;
+
+        while (prefixIndex < prefix.Length)
+        {
+            if (textIndex >= text.Length)
+            {
+                return false;
+            }
+
+            if (char.IsWhiteSpace(prefix[prefixIndex]))
+            {
+                if (!char.IsWhiteSpace(text[textIndex]))
+                {
+                    return false;
+                }
+
+                while (prefixIndex < prefix.Length && char.IsWhiteSpace(prefix[prefixIndex]))
+                {
+                    prefixIndex++;
+                }
+
+                while (textIndex < text.Length && char.IsWhiteSpace(text[textIndex]))
+                {
+                    textIndex++;
+                }
+
+                continue;
+            }
+
+            if (char.ToUpperInvariant(text[textIndex]) != char.ToUpperInvariant(prefix[prefixIndex]))
+            {
+                return false;
+            }
+
+            textIndex++;
+            prefixIndex++;
+        }
+
+        consumedLength = textIndex;
         return true;
     }
 
@@ -4580,7 +4651,7 @@ internal sealed partial class BotSession : IDisposable
 
         if (_options.PromptBuiltInEnabled)
         {
-            layers.Add("[bridge]\n" + ClampPromptLength(BuiltInBridgePrompt));
+            layers.Add("[bridge]\n" + ResolveBuiltInBridgePromptText());
         }
 
         if (_options.PromptProjectAgentsEnabled)
@@ -4793,6 +4864,64 @@ internal sealed partial class BotSession : IDisposable
         }
 
         return null;
+    }
+
+    private string ResolveBuiltInBridgePromptText()
+    {
+        var overridePath = ResolveBuiltInBridgePromptOverridePath();
+        if (overridePath == null)
+        {
+            return ClampPromptLength(BuiltInBridgePrompt);
+        }
+
+        try
+        {
+            var lastWriteUtc = File.GetLastWriteTimeUtc(overridePath);
+            lock (_promptStateLock)
+            {
+                if (_builtInPromptOverrideCache != null
+                    && string.Equals(_builtInPromptOverrideCachePath, overridePath, StringComparison.Ordinal)
+                    && lastWriteUtc == _builtInPromptOverrideCacheLastWriteUtc)
+                {
+                    return _builtInPromptOverrideCache;
+                }
+            }
+
+            var raw = File.ReadAllText(overridePath);
+            var normalized = NormalizePromptText(raw);
+            lock (_promptStateLock)
+            {
+                _builtInPromptOverrideCache = normalized;
+                _builtInPromptOverrideCacheLastWriteUtc = lastWriteUtc;
+                _builtInPromptOverrideCachePath = overridePath;
+            }
+
+            return normalized;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[prompt] failed to read built-in prompt override file '{overridePath}': {ex.Message}");
+            return ClampPromptLength(BuiltInBridgePrompt);
+        }
+    }
+
+    private string? ResolveBuiltInBridgePromptOverridePath()
+    {
+        var configured = _options.OpencodeDefaultPromptPath?.Trim();
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return null;
+        }
+
+        try
+        {
+            var fullPath = Path.GetFullPath(configured);
+            return File.Exists(fullPath) ? fullPath : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private string NormalizePromptText(string? value)
@@ -5077,7 +5206,7 @@ internal sealed partial class BotSession : IDisposable
 
         if (!IsHandlerAgent(agentId, from))
         {
-            SendImText(client, agentId, from, "Sorry, only my configured handler can run star commands.", conversationKey);
+            SendImText(client, agentId, from, "Sorry, only my configured handler or parent controller can run star commands.", conversationKey);
             return true;
         }
 
@@ -5109,6 +5238,9 @@ internal sealed partial class BotSession : IDisposable
                     return true;
                 case "cancel":
                     await HandleCancelCommandAsync(client, agentId, from, conversationKey).ConfigureAwait(false);
+                    return true;
+                case "restart":
+                    await HandleRestartCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
                     return true;
                 case "providers":
                     await HandleProvidersCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
@@ -5184,6 +5316,7 @@ internal sealed partial class BotSession : IDisposable
                 "*status - Show active AI and prompt settings for this IM",
                 "*usage - Show latest Opencode usage (cost/tokens) for this IM",
                 "*cancel - Abort current in-flight AI request for this IM",
+                "*restart - Restart this bot via opensim-spawner",
                 "*prompt - Manage prompt layers (status/show/clear/reload)",
                 "*bridge - Manage dialog-bridge install/trust status",
                 "*dialog - Manage pending script dialogs",
@@ -5228,6 +5361,7 @@ internal sealed partial class BotSession : IDisposable
                 BuildStarHelpText("status"),
                 BuildStarHelpText("usage"),
                 BuildStarHelpText("cancel"),
+                BuildStarHelpText("restart"),
                 BuildStarHelpText("prompt"),
                 BuildStarHelpText("bridge"),
                 BuildStarHelpText("dialog"),
@@ -5246,6 +5380,7 @@ internal sealed partial class BotSession : IDisposable
             "status" => "*status - Show current provider/model/thinking/session and prompt source state for this IM.",
             "usage" => "*usage - Show the latest Opencode response usage for this IM conversation (cost/input/output/reasoning/cache).",
             "cancel" => "*cancel - Abort the current in-flight AI request for this IM conversation.",
+            "restart" => "*restart - Restart this bot through opensim-spawner.",
             "prompt" => string.Join(
                 "\n",
                 "*prompt variants:",
@@ -5505,7 +5640,7 @@ internal sealed partial class BotSession : IDisposable
         {
             if (_options.PromptNotecardRequireHandler && !IsHandlerAvatar(from))
             {
-                SendImText(client, agentId, from, "Only the configured handler may clear the AGENTS.md notecard prompt layer.");
+                SendImText(client, agentId, from, "Only the configured handler or parent controller may clear the AGENTS.md notecard prompt layer.");
                 return Task.CompletedTask;
             }
 
@@ -5574,7 +5709,7 @@ internal sealed partial class BotSession : IDisposable
         {
             if (IsHandlerRestricted() && !IsHandlerAvatar(from))
             {
-                SendImText(client, agentId, from, "Only the configured handler may run *bridge install.");
+                SendImText(client, agentId, from, "Only the configured handler or parent controller may run *bridge install.");
                 return;
             }
 
@@ -5588,7 +5723,7 @@ internal sealed partial class BotSession : IDisposable
         {
             if (IsHandlerRestricted() && !IsHandlerAvatar(from))
             {
-                SendImText(client, agentId, from, "Only the configured handler may run *bridge uninstall.");
+                SendImText(client, agentId, from, "Only the configured handler or parent controller may run *bridge uninstall.");
                 return;
             }
 
@@ -7823,7 +7958,8 @@ internal sealed partial class BotSession : IDisposable
 
             await _opencodeChat.SetProviderApiKeyAsync(provider.Id, apiKey, CancellationToken.None).ConfigureAwait(false);
             ApplyAuthenticatedProviderAsConversationDefault(conversationKey, provider);
-            SendImText(client, agentId, from, $"Stored API key for provider {provider.Name} ({provider.Id}). Run *providers configured then *models {provider.Id}. OpenCode may need to be restarted for the new API key to take effect.");
+            SendImText(client, agentId, from, $"Stored API key for provider {provider.Name} ({provider.Id}). I will now restart myself. When I'm back, run *configure provider {provider.Id}, then optionally *models to list available models. ");
+            await RestartSelfViaSpawnerAndReportAsync(client, agentId, from).ConfigureAwait(false);
             return;
         }
 
@@ -7852,15 +7988,53 @@ internal sealed partial class BotSession : IDisposable
             if (completed.ProviderConfigured)
             {
                 ApplyAuthenticatedProviderAsConversationDefault(conversationKey, provider);
+                SendImText(client, agentId, from, $"OAuth completed for {provider.Name} ({provider.Id}). I will now restart myself. When I'm back, run *configure provider {provider.Id}, then optionally *models to list available models.");
+                await RestartSelfViaSpawnerAndReportAsync(client, agentId, from).ConfigureAwait(false);
+                return;
             }
 
-            SendImText(client, agentId, from, completed.ProviderConfigured
-                ? $"OAuth completed for {provider.Name} ({provider.Id}). Run *providers configured and *models {provider.Id}. OpenCode may need to be restarted for the new API key to take effect."
-                : completed.Message);
+            SendImText(client, agentId, from, completed.Message);
             return;
         }
 
         SendImText(client, agentId, from, $"Unknown auth mode '{verb}'. Use api, oauth, or oauth-complete.");
+    }
+
+    private async Task HandleRestartCommandAsync(GridClient client, UUID agentId, string from, string arg)
+    {
+        if (!string.IsNullOrWhiteSpace(arg))
+        {
+            SendImText(client, agentId, from, "Usage: *restart");
+            return;
+        }
+
+        SendImText(client, agentId, from, "Restart requested. I will now restart myself.");
+        await RestartSelfViaSpawnerAndReportAsync(client, agentId, from).ConfigureAwait(false);
+    }
+
+    private async Task RestartSelfViaSpawnerAndReportAsync(GridClient client, UUID agentId, string from)
+    {
+        var restart = await RestartSelfViaSpawnerAsync(CancellationToken.None).ConfigureAwait(false);
+        if (!restart.Ok)
+        {
+            SendImText(client, agentId, from, $"Failed to request restart: {restart.Message}");
+            return;
+        }
+
+        SendImText(client, agentId, from, "Restart request accepted by opensim-spawner.");
+    }
+
+    private async Task<DataToolResult> RestartSelfViaSpawnerAsync(CancellationToken cancellationToken)
+    {
+        var first = _options.BotFirstName?.Trim();
+        var last = _options.BotLastName?.Trim();
+        if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+        {
+            return DataToolResult.FailResult("Current bot identity is not configured (first/last name).");
+        }
+
+        using var spawnerClient = new SpawnerClient(_options);
+        return await spawnerClient.PatchBotAsync(first, last, "restart", cancellationToken).ConfigureAwait(false);
     }
 
     private void ApplyAuthenticatedProviderAsConversationDefault(string conversationKey, OpencodeProviderSummary provider)
@@ -8392,7 +8566,8 @@ internal sealed partial class BotSession : IDisposable
 
     private bool IsHandlerRestricted()
     {
-        return !string.IsNullOrWhiteSpace(_handlerFullName);
+        return !string.IsNullOrWhiteSpace(_handlerFullName)
+            || !string.IsNullOrWhiteSpace(_parentFullName);
     }
 
     private bool IsHandlerAgent(UUID agentId, string? avatarName)
@@ -8460,6 +8635,12 @@ internal sealed partial class BotSession : IDisposable
             return false;
         }
 
+        if (!string.IsNullOrWhiteSpace(_parentFullName))
+        {
+            // Parent-controlled bots skip C&C bootstrap and group authorization.
+            return false;
+        }
+
         var controlGroupId = await EnsureControlGroupExistsAsync(client, cancellationToken).ConfigureAwait(false);
         if (controlGroupId == UUID.Zero)
         {
@@ -8475,7 +8656,7 @@ internal sealed partial class BotSession : IDisposable
     {
         if (!IsHandlerRestricted())
         {
-            return (false, "Handler identity is not configured; friendship policy enforcement requires OPENCODE_HANDLER_FIRSTNAME and OPENCODE_HANDLER_LASTNAME.");
+            return (false, "Handler/parent identity is not configured; friendship policy enforcement requires OPENCODE_HANDLER_* or OPENSIM_SPAWNER_PARENT.");
         }
 
         if (IsHandlerAgent(targetAgentId, targetName))
@@ -8489,14 +8670,14 @@ internal sealed partial class BotSession : IDisposable
             return (true, string.Empty);
         }
 
-        return (false, "Friendship is restricted: only the configured handler or members of this bot's C&C group are allowed.");
+        return (false, "Friendship is restricted: only the configured handler/parent controller or members of this bot's C&C group are allowed.");
     }
 
     private (bool Allowed, string Error) ValidateControlGroupAdditionPolicy(UUID targetAgentId, string? targetName)
     {
         if (!IsHandlerRestricted())
         {
-            return (false, "Handler identity is not configured; refusing C&C group membership changes.");
+            return (false, "Handler/parent identity is not configured; refusing C&C group membership changes.");
         }
 
         if (IsHandlerAgent(targetAgentId, targetName))
@@ -8511,7 +8692,7 @@ internal sealed partial class BotSession : IDisposable
 
         if (!IsHandlerAgent(requesterAgentId, requesterName))
         {
-            return (false, "Only the configured handler may add other avatars to this bot's C&C group.");
+            return (false, "Only the configured handler or parent controller may add other avatars to this bot's C&C group.");
         }
 
         return (true, string.Empty);
@@ -8519,13 +8700,20 @@ internal sealed partial class BotSession : IDisposable
 
     private bool IsHandlerAvatar(string? avatarName)
     {
-        if (string.IsNullOrWhiteSpace(_handlerFullName))
+        if (string.IsNullOrWhiteSpace(_handlerFullName) && string.IsNullOrWhiteSpace(_parentFullName))
         {
             return false;
         }
 
         var normalized = NormalizeAvatarName(avatarName);
-        return normalized.Equals(_handlerFullName, StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(_handlerFullName)
+            && normalized.Equals(_handlerFullName, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(_parentFullName)
+            && normalized.Equals(_parentFullName, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildHandlerFullName(string? firstName, string? lastName)
@@ -9049,37 +9237,82 @@ internal sealed partial class BotSession : IDisposable
                     return;
                 }
 
-                var cubeItems = await ResolveCubeBotIarItemsAsync(client, CancellationToken.None).ConfigureAwait(false);
-                if (cubeItems.Ok && cubeItems.AttachmentItem != null)
+                var botItems = await ResolveSetupProvisioningItemsAsync(client, _options.WearFolderName, CancellationToken.None).ConfigureAwait(false);
+                if (botItems.Ok)
                 {
                     var appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
-                    var attached = false;
-                    var alphaWorn = false;
+                    var allAttachmentsWorn = false;
+                    var allWearablesWorn = false;
                     if (appearance.Ok)
                     {
-                        attached = appearance.Attachments.Any(a => string.Equals(a.ItemId, cubeItems.AttachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-                        alphaWorn = cubeItems.AlphaItem != null
-                            && appearance.Wearables.Any(w => string.Equals(w.ItemId, cubeItems.AlphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                        var wornAttachmentIds = appearance.Attachments
+                            .Select(a => a.ItemId)
+                            .Where(id => !string.IsNullOrWhiteSpace(id))
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                            
+                            /*
+                        var wornWearableIds = appearance.Wearables
+                            .Select(w => w.ItemId)
+                            .Where(id => !string.IsNullOrWhiteSpace(id))
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                             */
+
+                        allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
+                        //allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
+                        //var provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
+                        var provisionedStateSatisfied = allAttachmentsWorn;
+                        //if (!allWearablesWorn)
+                        //{
+                          //  LogWearableProvisioningMatches("sim-change initial verification", botItems.WearableItems, wornWearableIds);
+                        //}
 
                         // Appearance snapshots can briefly lag right after login/sim change.
-                        // Re-check a few times before deciding bridge items are missing.
-                        for (var verifyAttempt = 1; verifyAttempt <= 3 && (!attached || !alphaWorn); verifyAttempt++)
+                        // Re-check a few times before deciding setup items are missing.
+                        
+                        /*
+                        for (var verifyAttempt = 1; verifyAttempt <= 3 && !provisionedStateSatisfied; verifyAttempt++)
                         {
-                            await Task.Delay(900).ConfigureAwait(false);
+                            await Task.Delay(5000).ConfigureAwait(false);
                             appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
                             if (!appearance.Ok)
                             {
                                 break;
                             }
 
-                            attached = appearance.Attachments.Any(a => string.Equals(a.ItemId, cubeItems.AttachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-                            alphaWorn = cubeItems.AlphaItem != null
-                                && appearance.Wearables.Any(w => string.Equals(w.ItemId, cubeItems.AlphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-                        }
+                            wornAttachmentIds = appearance.Attachments
+                                .Select(a => a.ItemId)
+                                .Where(id => !string.IsNullOrWhiteSpace(id))
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                            wornWearableIds = appearance.Wearables
+                                .Select(w => w.ItemId)
+                                .Where(id => !string.IsNullOrWhiteSpace(id))
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-                        if (attached)
+                            allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
+                            allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
+                            provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
+                            if (!allWearablesWorn)
+                            {
+                                LogWearableProvisioningMatches($"sim-change verification attempt {verifyAttempt}/3", botItems.WearableItems, wornWearableIds);
+                            }
+                        }
+                         */
+
+                        if (provisionedStateSatisfied)
                         {
-                            if (TryFindAttachedObjectForInventoryItem(client, cubeItems.AttachmentItem.UUID, out var attachedObjectId, out var attachedLocalId))
+                            InventoryItem? anyPinnedAttachment = null;
+                            UUID attachedObjectId = UUID.Zero;
+                            uint attachedLocalId = 0;
+                            foreach (var attachmentItem in botItems.AttachmentItems)
+                            {
+                                if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out attachedObjectId, out attachedLocalId))
+                                {
+                                    anyPinnedAttachment = attachmentItem;
+                                    break;
+                                }
+                            }
+
+                            if (attachedObjectId != UUID.Zero)
                             {
                                 lock (_dialogBridgeTrustLock)
                                 {
@@ -9087,34 +9320,32 @@ internal sealed partial class BotSession : IDisposable
                                     _trustedDialogBridgeOwnerId = client.Self.AgentID;
                                 }
                                 TrySaveDialogBridgeTrustStateToFile();
-                                QueueBridgeAgentsPromptProbe(attachedObjectId, "worn bridge attachment");
-                                Console.WriteLine($"[dialog-bridge] bridge attachment already worn; refreshed trusted pin object={attachedObjectId} localId={attachedLocalId}.");
+                                QueueBridgeAgentsPromptProbe(attachedObjectId, "worn setup attachment");
+                                Console.WriteLine($"[dialog-bridge] setup attachment already worn; refreshed trusted pin from attachment '{anyPinnedAttachment?.Name}' object={attachedObjectId} localId={attachedLocalId}.");
                             }
                             else
                             {
-                                Console.WriteLine("[dialog-bridge] bridge attachment already worn; trusted pin refresh is waiting for simulator cache visibility.");
+                                Console.WriteLine("[dialog-bridge] setup attachment already worn; trusted pin refresh is waiting for simulator cache visibility.");
                             }
 
-                            if (alphaWorn)
+                            if (!allWearablesWorn)
                             {
-                                return;
+                                Console.WriteLine("[dialog-bridge] provisioning attachment is already worn; wearable verification still reports pending items.");
                             }
 
-                            Console.WriteLine("[dialog-bridge] bridge attachment is worn, but alpha is missing; continuing to auto-provision for alpha self-heal.");
+                            return;
                         }
-                        else
-                        {
-                            Console.WriteLine("[dialog-bridge] bridge attachment item found but not currently worn.");
-                        }
+
+                        Console.WriteLine("[dialog-bridge] setup inventory was found but not all setup wearables/attachments are currently worn.");
                     }
                     else
                     {
-                        Console.WriteLine($"[dialog-bridge] could not verify worn bridge attachment state: {appearance.Message}");
+                        Console.WriteLine($"[dialog-bridge] could not verify current setup worn state: {appearance.Message}");
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"[dialog-bridge] Cube Bot IAR inventory lookup failed: {cubeItems.Error}");
+                    Console.WriteLine($"[dialog-bridge] setup inventory lookup failed: {botItems.Error}");
                 }
 
                 if (!_options.DialogBridgeAutoProvisionOnRegionEnter)

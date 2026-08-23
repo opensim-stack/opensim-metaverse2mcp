@@ -56,15 +56,7 @@ internal sealed partial class BotSession
         {
             await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
 
-            var wearables = client.Appearance.GetWearables()
-                .Select(w => new WearableInfo(
-                    w.ItemID.ToString(),
-                    w.AssetID.ToString(),
-                    w.WearableType.ToString(),
-                    w.AssetType.ToString()))
-                .OrderBy(w => w.WearableType, StringComparer.Ordinal)
-                .ThenBy(w => w.ItemId, StringComparer.Ordinal)
-                .ToList();
+            var wearables = await CollectWornWearablesAsync(client, token).ConfigureAwait(false);
 
             var attachments = (await CollectAttachmentPointMappingsAsync(client, token).ConfigureAwait(false))
                 .Select(a =>
@@ -1226,152 +1218,118 @@ internal sealed partial class BotSession
     public async Task<DialogBridgeInstallResult> DialogBridgeInstallAsync(CancellationToken cancellationToken)
     {
         var client = EnsureClient();
+        var provisioningRootFolderName = string.IsNullOrWhiteSpace(_options.WearFolderName)
+            ? "Setup"
+            : _options.WearFolderName.Trim();
 
-        var resolve = await ResolveCubeBotIarItemsAsync(client, cancellationToken).ConfigureAwait(false);
-        if (!resolve.Ok || resolve.Folder == null || resolve.AttachmentItem == null || resolve.AlphaItem == null)
+        var resolve = await ResolveSetupProvisioningItemsAsync(client, _options.WearFolderName, cancellationToken).ConfigureAwait(false);
+        if (!resolve.Ok || resolve.ImportedFolder == null)
         {
-            return DialogBridgeInstallResult.FailResult(resolve.Error ?? "Cube Bot IAR inventory is not available.");
+            return DialogBridgeInstallResult.FailResult(
+                resolve.Error ?? $"Provisioning inventory folder '{provisioningRootFolderName}' is not available.");
         }
 
-        var cubeFolder = resolve.Folder;
-        var attachmentItem = resolve.AttachmentItem;
-        var alphaItem = resolve.AlphaItem;
+        var importedFolder = resolve.ImportedFolder;
+        var wearableCandidates = resolve.WearableItems;
+        var attachmentCandidates = resolve.AttachmentItems;
 
+        if (wearableCandidates.Count == 0 && attachmentCandidates.Count == 0)
+        {
+            return DialogBridgeInstallResult.FailResult(
+                $"Provisioning folder '{importedFolder.Name}' has no wearable or attachment items to apply.");
+        }
+
+        var wearFolder = await AppearanceWearFolderAsync(importedFolder.UUID.ToString(), replaceItems: true, cancellationToken).ConfigureAwait(false);
+        if (!wearFolder.Ok)
+        {
+            return DialogBridgeInstallResult.FailResult(
+                $"Failed to wear provisioning folder '{importedFolder.Name}': {wearFolder.Message}");
+        }
+
+/*
         var appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
         if (!appearanceState.Ok)
         {
             return DialogBridgeInstallResult.FailResult($"Failed to inspect current wearables/attachments: {appearanceState.Message}");
         }
 
-        var alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-        var attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+        var wornWearableIds = appearanceState.Wearables
+            .Select(w => w.ItemId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var wornAttachmentIds = appearanceState.Attachments
+            .Select(a => a.ItemId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        if (!alphaWorn || !attachmentWorn)
+        var wearablesWorn = wearableCandidates.All(item => IsWearableItemPresent(item, wornWearableIds));
+        if (!wearablesWorn)
         {
-            // First normalize to Current Outfit. This is the same reset strategy used during manual recovery.
-            var currentOutfitFolderId = client.Inventory.FindFolderForType(FolderType.CurrentOutfit);
-            if (currentOutfitFolderId != UUID.Zero)
-            {
-                var wearCurrentOutfit = await AppearanceWearFolderAsync(currentOutfitFolderId.ToString(), replaceItems: true, cancellationToken).ConfigureAwait(false);
-                if (!wearCurrentOutfit.Ok)
-                {
-                    Console.WriteLine($"[dialog-bridge] Current Outfit reset failed: {wearCurrentOutfit.Message}");
-                }
-                else
-                {
-                    Console.WriteLine($"[dialog-bridge] requested Current Outfit reset from folder {currentOutfitFolderId} (replaceItems=true).");
-                }
+            LogWearableProvisioningMatches("initial verification", wearableCandidates, wornWearableIds);
+        }
+        var attachmentsWorn = attachmentCandidates.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
 
-                // Reset can arrive slightly later than subsequent wear/attach requests; wait for settle.
-                await Task.Delay(1400, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                Console.WriteLine("[dialog-bridge] Current Outfit folder not found; continuing without reset.");
-            }
-
+        var verifyPasses = 5;
+        for (var pass = 1; pass <= verifyPasses && (!wearablesWorn || !attachmentsWorn); pass++)
+        {
+            await Task.Delay(1200, cancellationToken).ConfigureAwait(false);
             appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
             if (!appearanceState.Ok)
             {
-                return DialogBridgeInstallResult.FailResult($"Failed to verify appearance after Current Outfit reset: {appearanceState.Message}");
+                Console.WriteLine($"[dialog-bridge] worn-state verification pass {pass}/{verifyPasses} failed: {appearanceState.Message}");
+                continue;
             }
 
-            alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-            attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-
-            if (!alphaWorn)
+            wornWearableIds = appearanceState.Wearables
+                .Select(w => w.ItemId)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            wornAttachmentIds = appearanceState.Attachments
+                .Select(a => a.ItemId)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            wearablesWorn = wearableCandidates.All(item => IsWearableItemPresent(item, wornWearableIds));
+            if (!wearablesWorn)
             {
-                var wearAlpha = await AppearanceWearWearableItemAsync(alphaItem.UUID, replaceExistingSlot: true, cancellationToken).ConfigureAwait(false);
-                if (!wearAlpha.Ok)
-                {
-                    Console.WriteLine($"[dialog-bridge] alpha wear request failed: {wearAlpha.Message}");
-                }
-                else
-                {
-                    Console.WriteLine($"[dialog-bridge] requested wear of alpha '{alphaItem.Name}' ({alphaItem.UUID}) from folder '{cubeFolder.Name}'.");
-                }
-
-                await Task.Delay(1200, cancellationToken).ConfigureAwait(false);
-                appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
-                if (!appearanceState.Ok)
-                {
-                    return DialogBridgeInstallResult.FailResult($"Failed to verify appearance after alpha wear request: {appearanceState.Message}");
-                }
-
-                alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-                attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
+                LogWearableProvisioningMatches($"verification pass {pass}/{verifyPasses}", wearableCandidates, wornWearableIds);
             }
-
-            if (!attachmentWorn)
-            {
-                var attach = await AppearanceAttachItemAsync(attachmentItem.UUID.ToString(), "Spine", replace: true, cancellationToken).ConfigureAwait(false);
-                if (!attach.Ok)
-                {
-                    Console.WriteLine($"[dialog-bridge] bridge attach request failed: {attach.Message}");
-                }
-                else
-                {
-                    Console.WriteLine($"[dialog-bridge] requested attach of '{attachmentItem.Name}' ({attachmentItem.UUID}) on Spine.");
-                }
-
-                await Task.Delay(1200, cancellationToken).ConfigureAwait(false);
-                appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
-                if (!appearanceState.Ok)
-                {
-                    return DialogBridgeInstallResult.FailResult($"Failed to verify appearance after attachment request: {appearanceState.Message}");
-                }
-
-                alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-                attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-            }
-
-            // Do not force rebake here; on some grids this can churn appearance state and
-            // temporarily drop late-applied wearables (including alpha).
-
-            // Passive verification only. No repeated attach/wear requests.
-            var verifyPasses = 4;
-            for (var pass = 1; pass <= verifyPasses && (!alphaWorn || !attachmentWorn); pass++)
-            {
-                await Task.Delay(1300, cancellationToken).ConfigureAwait(false);
-                appearanceState = await AppearanceListWornAsync(cancellationToken).ConfigureAwait(false);
-                if (!appearanceState.Ok)
-                {
-                    Console.WriteLine($"[dialog-bridge] worn-state verification pass {pass}/{verifyPasses} failed: {appearanceState.Message}");
-                    continue;
-                }
-
-                alphaWorn = appearanceState.Wearables.Any(w => string.Equals(w.ItemId, alphaItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-                attachmentWorn = appearanceState.Attachments.Any(a => string.Equals(a.ItemId, attachmentItem.UUID.ToString(), StringComparison.OrdinalIgnoreCase));
-            }
+            attachmentsWorn = attachmentCandidates.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
         }
 
-        if (!attachmentWorn || !alphaWorn)
+        if (!wearablesWorn || !attachmentsWorn)
         {
-            var missing = new List<string>(2);
-            if (!attachmentWorn)
+            var missing = new List<string>();
+            if (!wearablesWorn)
             {
-                missing.Add($"attachment '{attachmentItem.Name}' on Spine");
+                missing.AddRange(
+                    wearableCandidates
+                        .Where(item => !IsWearableItemPresent(item, wornWearableIds))
+                        .Select(item => $"wearable '{item.Name}'"));
             }
-
-            if (!alphaWorn)
+            if (!attachmentsWorn)
             {
-                missing.Add($"wearable '{alphaItem.Name}'");
+                missing.AddRange(
+                    attachmentCandidates
+                        .Where(item => !wornAttachmentIds.Contains(item.UUID.ToString()))
+                        .Select(item => $"attachment '{item.Name}'"));
             }
 
             return DialogBridgeInstallResult.FailResult($"Bridge install incomplete; missing {string.Join(" and ", missing)}.");
         }
+         */
 
+        InventoryItem? pinnedAttachmentItem = null;
         UUID attachedObjectId = UUID.Zero;
         uint attachedLocalId = 0;
-        var maxAttempts = 20;
-        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        foreach (var attachmentCandidate in attachmentCandidates)
         {
-            if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out attachedObjectId, out attachedLocalId))
+            if (TryFindAttachedObjectForInventoryItem(client, attachmentCandidate.UUID, out var candidateObjectId, out var candidateLocalId))
             {
+                pinnedAttachmentItem = attachmentCandidate;
+                attachedObjectId = candidateObjectId;
+                attachedLocalId = candidateLocalId;
                 break;
             }
-
-            await Task.Delay(400, cancellationToken).ConfigureAwait(false);
         }
 
         if (attachedObjectId != UUID.Zero)
@@ -1382,19 +1340,20 @@ internal sealed partial class BotSession
                 _trustedDialogBridgeOwnerId = client.Self.AgentID;
             }
             TrySaveDialogBridgeTrustStateToFile();
-            Console.WriteLine($"[dialog-bridge] pinned trusted bridge sender to attached object {attachedObjectId} owner={client.Self.AgentID}");
+            QueueBridgeAgentsPromptProbe(attachedObjectId, "setup attachment");
+            Console.WriteLine($"[dialog-bridge] pinned trusted bridge sender to attached setup object {attachedObjectId} owner={client.Self.AgentID}");
         }
 
         var installMessage = attachedObjectId != UUID.Zero
-            ? $"Bridge ready from Cube Bot IAR: item={attachmentItem.UUID}, objectLocalId={attachedLocalId}, objectId={attachedObjectId}."
-            : $"Bridge ready from Cube Bot IAR: item={attachmentItem.UUID}. Attachment is worn; object pin is pending simulator cache visibility.";
+            ? $"Bridge ready from provisioning folder '{importedFolder.Name}': item={pinnedAttachmentItem?.UUID}, objectLocalId={attachedLocalId}, objectId={attachedObjectId}."
+            : $"Bridge ready from provisioning folder '{importedFolder.Name}'. Provisioning attachment is worn; object pin is pending simulator cache visibility.";
 
         return DialogBridgeInstallResult.OkResult(
             attachedLocalId,
             attachedObjectId == UUID.Zero ? null : attachedObjectId.ToString(),
             client.Self.AgentID.ToString(),
-            attachmentItem.UUID.ToString(),
-            attachmentItem.AssetUUID == UUID.Zero ? null : attachmentItem.AssetUUID.ToString(),
+            pinnedAttachmentItem?.UUID.ToString(),
+            pinnedAttachmentItem == null || pinnedAttachmentItem.AssetUUID == UUID.Zero ? null : pinnedAttachmentItem.AssetUUID.ToString(),
             installMessage);
     }
 
@@ -3091,13 +3050,13 @@ internal sealed partial class BotSession
         {
             if (!IsHandlerRestricted())
             {
-                Console.WriteLine("[prompt] ignored AGENTS.md notecard offer because handler-only mode is enabled but no handler is configured.");
+                Console.WriteLine("[prompt] ignored AGENTS.md notecard offer because handler-only mode is enabled but no handler/parent controller is configured.");
                 return;
             }
 
             if (!IsHandlerAvatar(fromName))
             {
-                Console.WriteLine($"[prompt] ignored AGENTS.md notecard offer from '{fromName}' because handler-only install mode is enabled.");
+                Console.WriteLine($"[prompt] ignored AGENTS.md notecard offer from '{fromName}' because handler/parent-only install mode is enabled.");
                 return;
             }
         }
@@ -3553,43 +3512,66 @@ internal sealed partial class BotSession
                     $"Inventory item {resolved.UUID} ('{resolved.Name}') is not a wearable (assetType={resolved.AssetType}, inventoryType={resolved.InventoryType}).");
             }
 
-            // Use COF operations so the wearable is persisted in Current Outfit links and
-            // does not get dropped by subsequent outfit synchronization.
-            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
-            await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
-            await cof.AddToOutfitAsync(wearable, replace: replaceExistingSlot, cancellationToken: token).ConfigureAwait(false);
+            // Apply directly through AppearanceManager to avoid COF/CAPS fetch instability
+            // being on the critical path for actually wearing the item.
+            client.Appearance.AddToOutfit(wearable, replaceExistingSlot);
+            await client.Appearance.RequestSetAppearance(forceRebake: true).ConfigureAwait(false);
+
+            // Best effort COF persistence so subsequent sessions still discover the link.
+            try
+            {
+                using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+                await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+                await cof.AddToOutfitAsync(wearable, replace: replaceExistingSlot, cancellationToken: token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[appearance] COF sync for wearable '{wearable.Name}' failed after apply: {ex.Message}");
+            }
+
             return BotToolResult.OkResult(
-                $"Wear request sent for wearable '{wearable.Name}' ({wearable.UUID}), type={wearable.WearableType}, replace={replaceExistingSlot} via COF.");
+                $"Wear request sent for wearable '{wearable.Name}' ({wearable.UUID}), type={wearable.WearableType}, replace={replaceExistingSlot}.");
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<(bool Ok, InventoryFolder? Folder, InventoryItem? AttachmentItem, InventoryItem? AlphaItem, string? Error)> ResolveCubeBotIarItemsAsync(
+    private static async Task<(
+        bool Ok,
+        InventoryFolder? SetupFolder,
+        InventoryFolder? ImportedFolder,
+        IReadOnlyList<InventoryItem> WearableItems,
+        IReadOnlyList<InventoryItem> AttachmentItems,
+        string? Error)> ResolveSetupProvisioningItemsAsync(
         GridClient client,
+        string? setupFolderName,
         CancellationToken cancellationToken)
     {
-        const string folderName = "Cube Bot IAR";
-        const string attachmentName = "The Cube Bot";
-        const string alphaName = "Full Body Alpha";
+        var effectiveSetupFolderName = string.IsNullOrWhiteSpace(setupFolderName)
+            ? "Setup"
+            : setupFolderName.Trim();
 
         var rootFolder = client.Inventory.Store?.RootFolder;
         if (rootFolder == null)
         {
-            return (false, null, null, null, "Inventory root folder is not initialized.");
+            return (false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(), "Inventory root folder is not initialized.");
         }
 
         var folders = new List<InventoryFolder>();
         var items = new List<InventoryItem>();
         await client.Inventory.GetInventoryRecursiveAsync(rootFolder.UUID, client.Self.AgentID, folders, items, cancellationToken).ConfigureAwait(false);
 
-        var cubeFolder = folders.FirstOrDefault(f => string.Equals(f.Name?.Trim(), folderName, StringComparison.OrdinalIgnoreCase));
-        if (cubeFolder == null)
+        var setupFolder = folders.FirstOrDefault(f => f.ParentUUID == rootFolder.UUID
+            && string.Equals(f.Name?.Trim(), effectiveSetupFolderName, StringComparison.OrdinalIgnoreCase));
+        if (setupFolder == null)
         {
-            return (false, null, null, null, $"Required inventory folder '{folderName}' was not found. Import Cube-Bot-IAR.iar first.");
+            return (false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(),
+                $"Required root inventory folder '{effectiveSetupFolderName}' was not found.");
         }
 
-        var descendantFolderIds = new HashSet<UUID> { cubeFolder.UUID };
+        var provisioningFolder = setupFolder;
+
+        var descendantFolderIds = new HashSet<UUID> { provisioningFolder.UUID };
         var pending = new Queue<UUID>();
-        pending.Enqueue(cubeFolder.UUID);
+        pending.Enqueue(provisioningFolder.UUID);
         while (pending.Count > 0)
         {
             var current = pending.Dequeue();
@@ -3602,26 +3584,128 @@ internal sealed partial class BotSession
             }
         }
 
-        var itemsInCubeFolder = items
+        var itemsInSetupImport = items
             .Where(i => descendantFolderIds.Contains(i.ParentUUID))
             .Select(i => ResolveLinkedInventoryItem(client.Inventory.Store, i))
             .ToList();
 
-        var attachmentItem = itemsInCubeFolder
-            .FirstOrDefault(i => string.Equals(i.Name?.Trim(), attachmentName, StringComparison.OrdinalIgnoreCase));
-        if (attachmentItem == null)
+        var wearableItems = itemsInSetupImport
+            .OfType<InventoryWearable>()
+            .Cast<InventoryItem>()
+            .ToList();
+        var attachmentItems = itemsInSetupImport
+            .Where(i => i.AssetType == AssetType.Object)
+            .ToList();
+
+        return (true, setupFolder, provisioningFolder, wearableItems, attachmentItems, null);
+    }
+
+    private static async Task<List<WearableInfo>> CollectWornWearablesAsync(
+        GridClient client,
+        CancellationToken cancellationToken)
+    {
+        var merged = new Dictionary<string, WearableInfo>(StringComparer.OrdinalIgnoreCase);
+
+        void AddWearable(WearableInfo info)
         {
-            return (false, cubeFolder, null, null, $"Attachment '{attachmentName}' was not found in '{folderName}'.");
+            if (string.IsNullOrWhiteSpace(info.ItemId))
+            {
+                return;
+            }
+
+            if (!merged.TryGetValue(info.ItemId, out var existing))
+            {
+                merged[info.ItemId] = info;
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(existing.AssetId) && !string.IsNullOrWhiteSpace(info.AssetId))
+            {
+                merged[info.ItemId] = info;
+            }
         }
 
-        var alphaItem = itemsInCubeFolder
-            .FirstOrDefault(i => string.Equals(i.Name?.Trim(), alphaName, StringComparison.OrdinalIgnoreCase));
-        if (alphaItem == null)
+        foreach (var wearable in client.Appearance.GetWearables())
         {
-            return (false, cubeFolder, attachmentItem, null, $"Wearable '{alphaName}' was not found in '{folderName}'.");
+            AddWearable(new WearableInfo(
+                wearable.ItemID.ToString(),
+                wearable.AssetID.ToString(),
+                wearable.WearableType.ToString(),
+                wearable.AssetType.ToString()));
         }
 
-        return (true, cubeFolder, attachmentItem, alphaItem, null);
+        try
+        {
+            // Merge COF links when available, but do not fail worn-state collection if
+            // FetchInventory2/CAPS is unstable.
+            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var link in links)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var resolved = ResolveLinkedInventoryItem(client.Inventory.Store, link);
+                if (resolved is InventoryWearable wearable)
+                {
+                    AddWearable(new WearableInfo(
+                        wearable.UUID.ToString(),
+                        wearable.AssetUUID.ToString(),
+                        wearable.WearableType.ToString(),
+                        wearable.AssetType.ToString()));
+                    continue;
+                }
+
+                if (link.InventoryType != InventoryType.Wearable || link.ResolvedItemID == UUID.Zero)
+                {
+                    continue;
+                }
+
+                AddWearable(new WearableInfo(
+                    link.ResolvedItemID.ToString(),
+                    string.Empty,
+                    "unknown",
+                    "unknown"));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[appearance] COF wearable inspection failed; using appearance snapshot only: {ex.Message}");
+        }
+
+        return merged.Values
+            .OrderBy(w => w.WearableType, StringComparer.Ordinal)
+            .ThenBy(w => w.ItemId, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static bool IsWearableItemPresent(
+        InventoryItem candidate,
+        IReadOnlySet<string> wornWearableIds)
+    {
+        return wornWearableIds.Contains(candidate.UUID.ToString());
+    }
+
+    private static string GetWearableMatchMode(
+        InventoryItem candidate,
+        IReadOnlySet<string> wornWearableIds)
+    {
+        return wornWearableIds.Contains(candidate.UUID.ToString()) ? "item" : "missing";
+    }
+
+    private static void LogWearableProvisioningMatches(
+        string context,
+        IReadOnlyList<InventoryItem> candidates,
+        IReadOnlySet<string> wornWearableIds)
+    {
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        var details = string.Join(", ",
+            candidates.Select(item =>
+                $"'{item.Name}'={GetWearableMatchMode(item, wornWearableIds)}(item={item.UUID},asset={item.AssetUUID})"));
+        Console.WriteLine($"[dialog-bridge] {context} wearable match status: {details}");
     }
 
     private static InventoryItem ResolveLinkedInventoryItem(Inventory? store, InventoryItem item)
