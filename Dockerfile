@@ -14,5 +14,9 @@ COPY --from=build /out/ /app/
 COPY lsl/ /app/lsl/
 COPY docker/entrypoint.sh /entrypoint.sh
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 8999
 ENTRYPOINT ["/entrypoint.sh"]
