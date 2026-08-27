@@ -86,6 +86,8 @@ internal sealed partial class BotSession
             return;
         }
 
+        await DeedCurrentParcelToControlGroupIfOwnedAsync(client, controlGroupId, reason, timeout.Token).ConfigureAwait(false);
+
         if (!IsHandlerRestricted())
         {
             if (string.Equals(reason, "startup", StringComparison.OrdinalIgnoreCase))
@@ -107,6 +109,62 @@ internal sealed partial class BotSession
         {
             await InviteHandlerToControlGroupIfNeededAsync(client, controlGroupId, handlerId, handlerName, reason, timeout.Token).ConfigureAwait(false);
         }
+    }
+
+    private async Task DeedCurrentParcelToControlGroupIfOwnedAsync(
+        GridClient client,
+        UUID controlGroupId,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        var sim = client.Network.CurrentSim;
+        if (sim == null)
+        {
+            return;
+        }
+
+        await EnsureParcelMapAsync(client, sim, forceRefresh: false, cancellationToken).ConfigureAwait(false);
+
+        var localId = client.Parcels.GetParcelLocalID(sim, client.Self.SimPosition);
+        if (localId <= 0)
+        {
+            Console.WriteLine($"[group-bootstrap] {reason}: unable to resolve current parcel local ID for control-group deeding.");
+            return;
+        }
+
+        var parcel = await GetParcelAsync(client, sim, localId, refreshFromSimulator: true, cancellationToken).ConfigureAwait(false);
+        if (parcel == null)
+        {
+            Console.WriteLine($"[group-bootstrap] {reason}: unable to resolve current parcel {localId} for control-group deeding.");
+            return;
+        }
+
+        var botId = client.Self.AgentID;
+        if (parcel.OwnerID != botId)
+        {
+            return;
+        }
+
+        if (parcel.GroupID == controlGroupId)
+        {
+            return;
+        }
+
+        // Many grids require parcel group assignment before deeding.
+        parcel.GroupID = controlGroupId;
+        parcel.Update(client, sim, wantReply: true);
+        await Task.Delay(TimeSpan.FromMilliseconds(350), cancellationToken).ConfigureAwait(false);
+
+        client.Parcels.DeedToGroup(sim, localId, controlGroupId);
+
+        var refreshed = await GetParcelAsync(client, sim, localId, refreshFromSimulator: true, cancellationToken).ConfigureAwait(false);
+        if (refreshed != null && refreshed.OwnerID != botId)
+        {
+            Console.WriteLine($"[group-bootstrap] {reason}: deeded parcel {localId} to control group {controlGroupId}.");
+            return;
+        }
+
+        Console.WriteLine($"[group-bootstrap] {reason}: submitted parcel {localId} deed to control group {controlGroupId}; ownership has not changed yet.");
     }
 
     private async Task<UUID> EnsureControlGroupExistsAsync(GridClient client, CancellationToken cancellationToken)
