@@ -18,8 +18,8 @@ set -- \
   --mcp-host "${METAVERSE_MCP_HOST:-0.0.0.0}" \
   --mcp-port "${METAVERSE_MCP_PORT:-8999}" \
   --mcp-http-endpoint "${MCP_HTTP_ENDPOINT:-/mcp}" \
-  --first-name "${OPENSIM_BOT_FIRST:-}" \
-  --last-name "${OPENSIM_BOT_LAST:-}" \
+  --first-name "${OPENSIM_BOT_FIRST:-Bot}" \
+  --last-name "${OPENSIM_BOT_LAST:-User}" \
   --password "${OPENSIM_BOT_PASSWORD:-}" \
   --spawner-parent "${OPENSIM_SPAWNER_PARENT:-}" \
   --spawner-level "${OPENSIM_SPAWNER_LEVEL:-}" \
