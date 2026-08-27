@@ -18,12 +18,12 @@ set -- \
   --mcp-host "${METAVERSE_MCP_HOST:-0.0.0.0}" \
   --mcp-port "${METAVERSE_MCP_PORT:-8999}" \
   --mcp-http-endpoint "${MCP_HTTP_ENDPOINT:-/mcp}" \
-  --first-name "${OPENSIM_LOGIN_FIRSTNAME:-}" \
-  --last-name "${OPENSIM_LOGIN_LASTNAME:-}" \
-  --password "${OPENSIM_LOGIN_PASSWORD:-}" \
+  --first-name "${OPENSIM_BOT_FIRST:-}" \
+  --last-name "${OPENSIM_BOT_LAST:-}" \
+  --password "${OPENSIM_BOT_PASSWORD:-}" \
   --spawner-parent "${OPENSIM_SPAWNER_PARENT:-}" \
   --spawner-level "${OPENSIM_SPAWNER_LEVEL:-}" \
-  --spawner-host "${SPAWNER_HOST:-opensim-spawner}" \
+  --spawner-host "${SPAWNER_HOST:-${OPENSIM_NETWORK:-${COMPOSE_PROJECT_NAME:-opensim-ai}}-spawner}" \
   --spawner-port "${SPAWNER_PORT:-8993}" \
   --wear-folder-name "${WEAR_FOLDER_NAME:-}" \
   --login-uri "${OPENSIM_LOGIN_URI:-http://opensim:9000}" \
@@ -33,8 +33,7 @@ set -- \
   --opencode-host "${OPENCODE_HOST:-opensim-opencode}" \
   --opencode-port "${OPENCODE_PORT:-8998}" \
   --opencode-timeout-seconds "${OPENCODE_REQUEST_TIMEOUT_SECONDS:-60}" \
-  --handler-first-name "${OPENSIM_BOT_HANDLER_FIRSTNAME:-}" \
-  --handler-last-name "${OPENSIM_BOT_HANDLER_LASTNAME:-}"
+  --handler-config "${OPENSIM_HANDLER_CONFIG:-/config/handlers.json}"
 
 if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then
   set -- "$@" --opencode-username "${OPENCODE_SERVER_USERNAME}"

@@ -158,11 +158,12 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
     private readonly AsyncLocal<string?> _ambientConversationKey = new();
-    private readonly string? _handlerFullName;
+    private readonly string _handlerConfigPath;
     private readonly string? _parentFullName;
     private readonly object _promptStateLock = new();
     private readonly object _recentImSpeakerLock = new();
     private readonly object _dialogBridgeTrustLock = new();
+    private readonly object _handlerConfigLock = new();
     private readonly object _opencodeSessionStateLock = new();
     private readonly object _typingStateLock = new();
     private readonly object _hoverStateLock = new();
@@ -195,6 +196,10 @@ internal sealed partial class BotSession : IDisposable
     private bool _lslDialogBridgeRequireTrustedSender = true;
     private readonly ConcurrentDictionary<string, byte> _busyOpencodeSessions = new(StringComparer.OrdinalIgnoreCase);
     private string? _restoredOpencodeSessionId;
+    private HashSet<string> _handlerNames = new(StringComparer.OrdinalIgnoreCase);
+    private bool _handlerConfigCacheInitialized;
+    private DateTime _handlerConfigLastWriteUtc = DateTime.MinValue;
+    private string? _handlerConfigLastError;
     private ConversationConfig? _persistedOpencodeDefaultConfig;
     private DateTimeOffset _lastTypingPulseAt = DateTimeOffset.MinValue;
     private CancellationTokenSource? _typingStopCts;
@@ -264,8 +269,9 @@ internal sealed partial class BotSession : IDisposable
         _options = options;
         _controlGroupName = BuildControlGroupName();
         InitializeVoiceSupport();
-        InitializeDialogBridgeTrustFromOptions();
-        _handlerFullName = BuildHandlerFullName(_options.OpencodeHandlerFirstName, _options.OpencodeHandlerLastName);
+        _handlerConfigPath = string.IsNullOrWhiteSpace(_options.HandlerConfig)
+            ? "/config/handlers.json"
+            : _options.HandlerConfig.Trim();
         _parentFullName = NormalizeAvatarName(_options.BotSpawnerParent);
         _opencodeChat = new OpencodeChatClient(_options);
         _opencodeChat.SessionStatusChanged += OnOpencodeSessionStatusChanged;
@@ -276,42 +282,20 @@ internal sealed partial class BotSession : IDisposable
             Console.WriteLine($"[opencode] startup default model configured (runtime-overridable): {startupModel}");
         }
 
-        if (!string.IsNullOrWhiteSpace(_handlerFullName))
+        var configuredHandlers = GetConfiguredHandlerNamesOnStartup();
+        if (configuredHandlers.Count > 0)
         {
-            Console.WriteLine($"[bot] handler restriction enabled: {_handlerFullName}");
+            Console.WriteLine($"[bot] handler restriction enabled from '{_handlerConfigPath}': {string.Join(", ", configuredHandlers.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))}");
+        }
+        else
+        {
+            var exists = File.Exists(_handlerConfigPath);
+            Console.WriteLine($"[handler-config] no handlers loaded from '{_handlerConfigPath}' (exists={exists}). Strict schema expects an array of objects with handlerFirst and handlerLast.");
         }
 
         if (!string.IsNullOrWhiteSpace(_parentFullName))
         {
             Console.WriteLine($"[bot] parent controller enabled: {_parentFullName}");
-        }
-    }
-
-    private void InitializeDialogBridgeTrustFromOptions()
-    {
-        _lslDialogBridgeRequireTrustedSender = _options.LslDialogBridgeRequireTrustedSender;
-
-        if (!string.IsNullOrWhiteSpace(_options.LslDialogBridgeTrustedObjectId)
-            && UUID.TryParse(_options.LslDialogBridgeTrustedObjectId.Trim(), out var objectId)
-            && objectId != UUID.Zero)
-        {
-            _trustedDialogBridgeObjectId = objectId;
-        }
-
-        if (!string.IsNullOrWhiteSpace(_options.LslDialogBridgeTrustedOwnerId)
-            && UUID.TryParse(_options.LslDialogBridgeTrustedOwnerId.Trim(), out var ownerId)
-            && ownerId != UUID.Zero)
-        {
-            _trustedDialogBridgeOwnerId = ownerId;
-        }
-
-        if (_trustedDialogBridgeObjectId != UUID.Zero || _trustedDialogBridgeOwnerId != UUID.Zero)
-        {
-            Console.WriteLine($"[dialog-bridge] trust config loaded: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId} requireTrustedSender={_lslDialogBridgeRequireTrustedSender}");
-        }
-        else
-        {
-            Console.WriteLine($"[dialog-bridge] trust config loaded: no pinned bridge object/owner; requireTrustedSender={_lslDialogBridgeRequireTrustedSender} (first valid bridge sender will be pinned at runtime).");
         }
     }
 
@@ -8566,7 +8550,7 @@ internal sealed partial class BotSession : IDisposable
 
     private bool IsHandlerRestricted()
     {
-        return !string.IsNullOrWhiteSpace(_handlerFullName)
+        return GetConfiguredHandlerNames().Count > 0
             || !string.IsNullOrWhiteSpace(_parentFullName);
     }
 
@@ -8588,7 +8572,20 @@ internal sealed partial class BotSession : IDisposable
             return true;
         }
 
-        return IsHandlerAvatar(avatarName);
+        if (!IsHandlerAvatar(avatarName))
+        {
+            return false;
+        }
+
+        if (agentId != UUID.Zero)
+        {
+            lock (_controlGroupStateLock)
+            {
+                _handlerAgentId = agentId;
+            }
+        }
+
+        return true;
     }
 
     private bool IsControlGroupId(UUID groupId)
@@ -8656,7 +8653,7 @@ internal sealed partial class BotSession : IDisposable
     {
         if (!IsHandlerRestricted())
         {
-            return (false, "Handler/parent identity is not configured; friendship policy enforcement requires OPENCODE_HANDLER_* or OPENSIM_SPAWNER_PARENT.");
+            return (false, "Handler/parent identity is not configured; friendship policy enforcement requires OPENSIM_HANDLER_CONFIG or OPENSIM_SPAWNER_PARENT.");
         }
 
         if (IsHandlerAgent(targetAgentId, targetName))
@@ -8700,14 +8697,14 @@ internal sealed partial class BotSession : IDisposable
 
     private bool IsHandlerAvatar(string? avatarName)
     {
-        if (string.IsNullOrWhiteSpace(_handlerFullName) && string.IsNullOrWhiteSpace(_parentFullName))
+        var handlers = GetConfiguredHandlerNames();
+        if (handlers.Count == 0 && string.IsNullOrWhiteSpace(_parentFullName))
         {
             return false;
         }
 
         var normalized = NormalizeAvatarName(avatarName);
-        if (!string.IsNullOrWhiteSpace(_handlerFullName)
-            && normalized.Equals(_handlerFullName, StringComparison.OrdinalIgnoreCase))
+        if (handlers.Contains(normalized))
         {
             return true;
         }
@@ -8716,14 +8713,149 @@ internal sealed partial class BotSession : IDisposable
             && normalized.Equals(_parentFullName, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string BuildHandlerFullName(string? firstName, string? lastName)
+    private HashSet<string> GetConfiguredHandlerNames()
     {
-        if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
+        DateTime lastWriteUtc;
+        try
         {
-            return string.Empty;
+            lastWriteUtc = File.Exists(_handlerConfigPath)
+                ? File.GetLastWriteTimeUtc(_handlerConfigPath)
+                : DateTime.MinValue;
+        }
+        catch (Exception ex)
+        {
+            lastWriteUtc = DateTime.MinValue;
+            MaybeLogHandlerConfigError($"Unable to stat handler config '{_handlerConfigPath}': {ex.Message}");
         }
 
-        return NormalizeAvatarName($"{firstName} {lastName}");
+        lock (_handlerConfigLock)
+        {
+            // Do not reuse a cached parse/read failure forever when timestamp is unchanged.
+            if (_handlerConfigCacheInitialized
+                && lastWriteUtc == _handlerConfigLastWriteUtc
+                && _handlerConfigLastError == null)
+            {
+                return _handlerNames;
+            }
+        }
+
+        HashSet<string> parsed = new(StringComparer.OrdinalIgnoreCase);
+        string? parseError = null;
+
+        if (lastWriteUtc != DateTime.MinValue)
+        {
+            try
+            {
+                var json = File.ReadAllText(_handlerConfigPath);
+                using var document = JsonDocument.Parse(json);
+                parsed = ParseConfiguredHandlers(document.RootElement);
+            }
+            catch (Exception ex)
+            {
+                parseError = $"Unable to parse handler config '{_handlerConfigPath}': {ex.Message}";
+            }
+        }
+        else
+        {
+            parseError = $"Handler config file not found at '{_handlerConfigPath}'.";
+        }
+
+        lock (_handlerConfigLock)
+        {
+            _handlerConfigCacheInitialized = true;
+            _handlerConfigLastWriteUtc = lastWriteUtc;
+            _handlerNames = parsed;
+            if (parseError == null)
+            {
+                _handlerConfigLastError = null;
+            }
+        }
+
+        if (parseError != null)
+        {
+            MaybeLogHandlerConfigError(parseError);
+        }
+
+        return parsed;
+    }
+
+    private HashSet<string> GetConfiguredHandlerNamesOnStartup()
+    {
+        var handlers = GetConfiguredHandlerNames();
+        if (handlers.Count > 0)
+        {
+            return handlers;
+        }
+
+        // Best-effort warmup for containerized shared volumes where the file can appear
+        // or become readable just after process start.
+        const int attempts = 8;
+        const int delayMs = 250;
+        for (var attempt = 1; attempt < attempts; attempt++)
+        {
+            Thread.Sleep(delayMs);
+            handlers = GetConfiguredHandlerNames();
+            if (handlers.Count > 0)
+            {
+                return handlers;
+            }
+        }
+
+        return handlers;
+    }
+
+    private void MaybeLogHandlerConfigError(string message)
+    {
+        lock (_handlerConfigLock)
+        {
+            if (string.Equals(_handlerConfigLastError, message, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _handlerConfigLastError = message;
+        }
+
+        Console.WriteLine($"[handler-config] {message}");
+    }
+
+    private static HashSet<string> ParseConfiguredHandlers(JsonElement root)
+    {
+        var handlers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (root.ValueKind != JsonValueKind.Array)
+        {
+            return handlers;
+        }
+
+        foreach (var entry in root.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var first = ReadJsonString(entry, "handlerFirst");
+            var last = ReadJsonString(entry, "handlerLast");
+            if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+            {
+                continue;
+            }
+
+            handlers.Add(NormalizeAvatarName($"{first} {last}"));
+        }
+
+        return handlers;
+    }
+
+    private static string? ReadJsonString(JsonElement obj, string propertyName)
+    {
+        if (!obj.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     }
 
     private static string NormalizeAvatarName(string? avatarName)

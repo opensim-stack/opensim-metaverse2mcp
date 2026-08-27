@@ -117,12 +117,12 @@ internal sealed partial class BotSession
 
     private string? ResolveDialogBridgeTrustStateFilePath()
     {
-        if (string.IsNullOrWhiteSpace(_options.LslDialogBridgeTrustStateFile))
+        if (string.IsNullOrWhiteSpace(_options.BridgeTrustStateFile))
         {
             return null;
         }
 
-        var template = _options.LslDialogBridgeTrustStateFile.Trim();
+        var template = _options.BridgeTrustStateFile.Trim();
         var botUuid = ResolveCurrentBotUuid();
         if (botUuid != null)
         {

@@ -35,9 +35,9 @@ dotnet build ./src/opensim-metaverse2mcp.csproj -c Release
 Set required bot credentials and run:
 
 ```bash
-export OPENSIM_LOGIN_FIRSTNAME="Bot"
-export OPENSIM_LOGIN_LASTNAME="User"
-export OPENSIM_LOGIN_PASSWORD="botpassword"
+export OPENSIM_BOT_FIRST="Bot"
+export OPENSIM_BOT_LAST="User"
+export OPENSIM_BOT_PASSWORD="botpassword"
 export OPENSIM_LOGIN_URI="http://localhost:9000"
 
 export METAVERSE_MCP_TRANSPORT="http"
@@ -48,9 +48,7 @@ export METAVERSE_MCP_HTTP_ENDPOINT="/mcp"
 export OPENCODE_SCHEME="http"
 export OPENCODE_HOST="localhost"
 export OPENCODE_PORT="8998"
-export OPENSIM_BOT_HANDLER_FIRSTNAME="Bot"
-export OPENSIM_BOT_HANDLER_LASTNAME="Handler"
-export SPAWNER_HOST="opensim-spawner"
+export SPAWNER_HOST="opensim-ai-spawner"
 export SPAWNER_PORT="8993"
 # optional bearer token if OPENSIM_SPAWNER_TOKEN is set on opensim-spawner:
 # export SPAWNER_TOKEN=""
@@ -58,7 +56,7 @@ export SPAWNER_PORT="8993"
 export VOICE_ROUTING_ENABLED="true"
 export VOICE_BACKEND="webrtc"
 export PIPER_SCHEME="http"
-export PIPER_HOST="localhost"
+export PIPER_HOST="opensim-ai-piper-1"
 export PIPER_PORT="8995"
 export PIPER_DEFAULT_VOICE="en_US-lessac-medium"
 # optional Basic auth:
@@ -85,9 +83,9 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 
 ### Bot login (required)
 
-- `OPENSIM_LOGIN_FIRSTNAME`
-- `OPENSIM_LOGIN_LASTNAME`
-- `OPENSIM_LOGIN_PASSWORD`
+- `OPENSIM_BOT_FIRST`
+- `OPENSIM_BOT_LAST`
+- `OPENSIM_BOT_PASSWORD`
 
 ### Bot login (optional)
 
@@ -97,7 +95,7 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 
 ### Spawner API integration
 
-- `SPAWNER_HOST` (default: `opensim-spawner`)
+- `SPAWNER_HOST` (default: `opensim-ai-spawner`)
 - `SPAWNER_PORT` (default: `8993`)
 - `SPAWNER_TOKEN` (optional bearer token for spawner auth)
 - Bot-management API path is fixed to `/api/bot` (for example `GET /api/bot`, `POST /api/bot/{first}/{last}`).
@@ -122,15 +120,13 @@ dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release -- \
 - `OPENCODE_SERVER_USERNAME` (optional Basic auth username)
 - `OPENCODE_SERVER_PASSWORD` (optional Basic auth password)
 - `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `1800`)
-- `OPENSIM_BOT_HANDLER_FIRSTNAME` (optional; when set with last name, only this avatar can instruct the bot)
-- `OPENSIM_BOT_HANDLER_LASTNAME` (optional; when set with first name, only this avatar can instruct the bot)
 
 ### Voice routing (Piper + grid voice)
 
 - `VOICE_ROUTING_ENABLED` (`true`/`false`, default: `false`)
 - `VOICE_BACKEND` (`webrtc`, default: `webrtc`)
 - `PIPER_SCHEME` (`http` or `https`, default: `http`)
-- `PIPER_HOST` (default: `opensim-piper`)
+- `PIPER_HOST` (default: `opensim-ai-piper-1`)
 - `PIPER_PORT` (default: `8995`)
 - `PIPER_TTS_PATH` (default: `/tts`)
 - `PIPER_VOICES_PATH` (default: `/voices`)
@@ -258,9 +254,9 @@ The server publishes tools including:
 
 Chat notes:
 - In this stage, only avatar-to-bot IM is routed to Opencode.
-- Optional handler mode: when `OPENSIM_BOT_HANDLER_FIRSTNAME` + `OPENSIM_BOT_HANDLER_LASTNAME` are set, only that avatar may control the bot; others get a friendly deny reply.
+- Optional handler mode: when `OPENSIM_HANDLER_CONFIG` points to a handler JSON file (default `/config/handlers.json`), only listed handler avatars may control the bot; others get a friendly deny reply.
 - Prompt layering is enabled by default with this precedence (low -> high): built-in bridge prompt, project `AGENTS.md`, then in-world `AGENTS.md` notecard.
-- In-world prompt install is strict and handler-gated by default: only notecards named `AGENTS.md` are eligible, and when `PROMPT_NOTECARD_REQUIRE_HANDLER=true`, only the configured handler avatar can install/replace it.
+- In-world prompt install is strict and handler-gated by default: only notecards named `AGENTS.md` are eligible, and when `PROMPT_NOTECARD_REQUIRE_HANDLER=true`, only avatars listed in the handler JSON (or the configured parent controller) can install/replace it.
 - IM supports "star commands" (prefixed with `*`) for live AI configuration per avatar conversation:
   - `*help` (summary of unique commands)
   - `*help <command>` (detailed variants for one command)
@@ -314,7 +310,7 @@ Chat notes:
 - OAuth behavior: `*auth <provider> oauth-complete` now reports pending (instead of hard failing) when callback is accepted but provider activation has not propagated yet; complete browser approval and retry.
 - Delete confirmation behavior: run `*session delete <id>` first to get a safety prompt, then rerun with `--force`.
 - Bulk delete confirmation behavior: run `*session delete --all` first to get a safety prompt, then rerun with `--force`.
-- Inventory offers from the configured handler are always accepted (policy rules are bypassed for handler offers).
+- Inventory offers from configured handler avatars are always accepted (policy rules are bypassed for handler offers).
 - TODO: add local chat and group chat routing.
 - Voice routing note: `VOICE_BACKEND=webrtc` is the supported backend for Piper WAV injection in this service.
 - TODO: add a security policy to control which users the AI may respond to.
@@ -671,9 +667,9 @@ Run:
 
 ```bash
 docker run --rm \
-  -e OPENSIM_LOGIN_FIRSTNAME=Governor \
-  -e OPENSIM_LOGIN_LASTNAME=Bot \
-  -e OPENSIM_LOGIN_PASSWORD=botpassword \
+  -e OPENSIM_BOT_FIRST=Governor \
+  -e OPENSIM_BOT_LAST=Bot \
+  -e OPENSIM_BOT_PASSWORD=botpassword \
   -e OPENSIM_LOGIN_URI=http://host.docker.internal:9000 \
   -e MCP_TRANSPORT=http \
   -e MCP_HOST=0.0.0.0 \

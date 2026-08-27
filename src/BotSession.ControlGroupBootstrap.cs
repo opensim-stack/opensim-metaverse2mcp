@@ -11,6 +11,7 @@ internal sealed partial class BotSession
     private string _controlGroupName = string.Empty;
     private UUID _controlGroupId = UUID.Zero;
     private UUID _handlerAgentId = UUID.Zero;
+    private readonly Dictionary<string, UUID> _handlerAgentIdByName = new(StringComparer.OrdinalIgnoreCase);
     private int _controlGroupInviteLoopStarted;
 
     private string BuildControlGroupName()
@@ -95,14 +96,17 @@ internal sealed partial class BotSession
             return;
         }
 
-        var handlerId = await ResolveHandlerAgentIdAsync(client, timeout.Token).ConfigureAwait(false);
-        if (handlerId == UUID.Zero)
+        var handlers = await ResolveHandlerAgentsAsync(client, timeout.Token).ConfigureAwait(false);
+        if (handlers.Count == 0)
         {
-            Console.WriteLine($"[group-bootstrap] {reason}: unable to resolve handler '{_handlerFullName}' for control-group invite.");
+            Console.WriteLine($"[group-bootstrap] {reason}: no resolvable handlers found in '{_handlerConfigPath}' for control-group invite.");
             return;
         }
 
-        await InviteHandlerToControlGroupIfNeededAsync(client, controlGroupId, handlerId, reason, timeout.Token).ConfigureAwait(false);
+        foreach (var (handlerName, handlerId) in handlers)
+        {
+            await InviteHandlerToControlGroupIfNeededAsync(client, controlGroupId, handlerId, handlerName, reason, timeout.Token).ConfigureAwait(false);
+        }
     }
 
     private async Task<UUID> EnsureControlGroupExistsAsync(GridClient client, CancellationToken cancellationToken)
@@ -177,51 +181,65 @@ internal sealed partial class BotSession
         return UUID.Zero;
     }
 
-    private async Task<UUID> ResolveHandlerAgentIdAsync(GridClient client, CancellationToken cancellationToken)
+    private async Task<List<(string HandlerName, UUID HandlerId)>> ResolveHandlerAgentsAsync(GridClient client, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_handlerFullName))
+        var configuredHandlers = GetConfiguredHandlerNames();
+        if (configuredHandlers.Count == 0)
         {
-            return UUID.Zero;
+            return new List<(string HandlerName, UUID HandlerId)>();
         }
 
-        lock (_controlGroupStateLock)
+        var resolved = new List<(string HandlerName, UUID HandlerId)>();
+        foreach (var handlerName in configuredHandlers.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
         {
-            if (_handlerAgentId != UUID.Zero)
+            UUID cached;
+            lock (_controlGroupStateLock)
             {
-                return _handlerAgentId;
+                _handlerAgentIdByName.TryGetValue(handlerName, out cached);
             }
+
+            if (cached != UUID.Zero)
+            {
+                resolved.Add((handlerName, cached));
+                continue;
+            }
+
+            var reply = await RequestDirPeopleReplyAsync(client, handlerName, cancellationToken).ConfigureAwait(false);
+            if (reply == null)
+            {
+                Console.WriteLine($"[group-bootstrap] directory search timed out while resolving handler '{handlerName}'.");
+                continue;
+            }
+
+            var match = reply.MatchedPeople.FirstOrDefault(person =>
+            {
+                var fullName = NormalizeAvatarName($"{person.FirstName} {person.LastName}");
+                return fullName.Equals(handlerName, StringComparison.OrdinalIgnoreCase);
+            });
+
+            if (match.AgentID == UUID.Zero)
+            {
+                Console.WriteLine($"[group-bootstrap] no directory match found for configured handler '{handlerName}'.");
+                continue;
+            }
+
+            lock (_controlGroupStateLock)
+            {
+                _handlerAgentIdByName[handlerName] = match.AgentID;
+                _handlerAgentId = match.AgentID;
+            }
+
+            resolved.Add((handlerName, match.AgentID));
         }
 
-        var reply = await RequestDirPeopleReplyAsync(client, _handlerFullName, cancellationToken).ConfigureAwait(false);
-        if (reply == null)
-        {
-            Console.WriteLine($"[group-bootstrap] directory search timed out while resolving handler '{_handlerFullName}'.");
-            return UUID.Zero;
-        }
-
-        var match = reply.MatchedPeople.FirstOrDefault(person =>
-        {
-            var fullName = NormalizeAvatarName($"{person.FirstName} {person.LastName}");
-            return fullName.Equals(_handlerFullName, StringComparison.OrdinalIgnoreCase);
-        });
-
-        if (match.AgentID == UUID.Zero)
-        {
-            return UUID.Zero;
-        }
-
-        lock (_controlGroupStateLock)
-        {
-            _handlerAgentId = match.AgentID;
-        }
-
-        return match.AgentID;
+        return resolved;
     }
 
     private async Task InviteHandlerToControlGroupIfNeededAsync(
         GridClient client,
         UUID controlGroupId,
         UUID handlerId,
+        string handlerName,
         string reason,
         CancellationToken cancellationToken)
     {
@@ -259,7 +277,7 @@ internal sealed partial class BotSession
         }
 
         client.Groups.Invite(controlGroupId, new List<UUID> { inviteRoleId }, handlerId);
-        Console.WriteLine($"[group-bootstrap] {reason}: invited handler {handlerId} to control group {controlGroupId} (role={inviteRoleId}).");
+        Console.WriteLine($"[group-bootstrap] {reason}: invited handler '{handlerName}' ({handlerId}) to control group {controlGroupId} (role={inviteRoleId}).");
     }
 
     private static async Task<DirPeopleReplyEventArgs?> RequestDirPeopleReplyAsync(

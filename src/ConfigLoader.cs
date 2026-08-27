@@ -14,12 +14,12 @@ internal static class ConfigLoader
             McpHttpDisallowDelete = ParseBool(Env("METAVERSE_MCP_HTTP_DISALLOW_DELETE"), false),
             InventoryOfferPolicyFile = FirstDefined("INVENTORY_OFFER_POLICY_FILE", "OPENSIM_INVENTORY_OFFER_POLICY_FILE"),
             InventoryOfferPolicyAutoSave = ParseBool(FirstDefined("INVENTORY_OFFER_POLICY_AUTOSAVE", "OPENSIM_INVENTORY_OFFER_POLICY_AUTOSAVE"), true),
-            BotFirstName = FirstDefined("OPENSIM_LOGIN_FIRSTNAME", "BOT_FIRSTNAME"),
-            BotLastName = FirstDefined("OPENSIM_LOGIN_LASTNAME", "BOT_LASTNAME"),
-            BotPassword = FirstDefined("OPENSIM_LOGIN_PASSWORD", "BOT_PASSWORD"),
+            BotFirstName = FirstDefined("OPENSIM_BOT_FIRST", "BOT_FIRSTNAME"),
+            BotLastName = FirstDefined("OPENSIM_BOT_LAST", "BOT_LASTNAME"),
+            BotPassword = FirstDefined("OPENSIM_BOT_PASSWORD", "BOT_PASSWORD"),
             BotSpawnerParent = Env("OPENSIM_SPAWNER_PARENT"),
             BotSpawnerLevel = Env("OPENSIM_SPAWNER_LEVEL"),
-            SpawnerHost = Env("SPAWNER_HOST") ?? "opensim-spawner",
+            SpawnerHost = Env("SPAWNER_HOST") ?? "opensim-ai-spawner",
             SpawnerPort = ParseInt(Env("SPAWNER_PORT"), 8993),
             SpawnerToken = Env("SPAWNER_TOKEN"),
             BotLoginUri = FirstDefined("OPENSIM_LOGIN_URI", "BOT_LOGIN_URI") ?? "http://opensim:9000",
@@ -35,21 +35,17 @@ internal static class ConfigLoader
             OpencodeInitialModel = Env("OPENCODE_INITIAL_MODEL"),
             OpencodeEventDebug = ParseBool(Env("OPENCODE_EVENT_DEBUG"), false),
             OpencodeRequestTimeoutSeconds = ParseInt(Env("OPENCODE_REQUEST_TIMEOUT_SECONDS"), 1800),
-            OpencodeHandlerFirstName = Env("OPENSIM_BOT_HANDLER_FIRSTNAME"),
-            OpencodeHandlerLastName = Env("OPENSIM_BOT_HANDLER_LASTNAME"),
+            HandlerConfig = FirstDefined("OPENSIM_HANDLER_CONFIG") ?? "/config/handlers.json",
             VoiceRoutingEnabled = ParseBool(Env("VOICE_ROUTING_ENABLED"), false),
             VoiceBackend = Env("VOICE_BACKEND") ?? "webrtc",
             PiperScheme = Env("PIPER_SCHEME") ?? "http",
-            PiperHost = Env("PIPER_HOST") ?? "opensim-piper",
+            PiperHost = Env("PIPER_HOST") ?? "opensim-ai-piper",
             PiperPort = ParseInt(Env("PIPER_PORT"), 8995),
             PiperTtsPath = Env("PIPER_TTS_PATH") ?? "/tts",
             PiperVoicesPath = Env("PIPER_VOICES_PATH") ?? "/voices",
             PiperRequestTimeoutSeconds = ParseInt(Env("PIPER_TIMEOUT_SECONDS"), 60),
             PiperDefaultVoice = Env("PIPER_DEFAULT_VOICE") ?? "en_US-lessac-medium",
-            LslDialogBridgeTrustedObjectId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID"),
-            LslDialogBridgeTrustedOwnerId = FirstDefined("LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID", "OPENCODE_LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID"),
-            LslDialogBridgeRequireTrustedSender = ParseBool(FirstDefined("LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER", "OPENCODE_LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER"), true),
-            LslDialogBridgeTrustStateFile = FirstDefined("LSL_DIALOG_BRIDGE_TRUST_STATE_FILE", "OPENCODE_LSL_DIALOG_BRIDGE_TRUST_STATE_FILE") ?? "/workspace/state/dialog-bridge-trust.json",
+            BridgeTrustStateFile = FirstDefined("METAVERSE_BRIDGE_TRUST_STATE_FILE") ?? "/workspace/bridges/{bot_uuid}.json",
             DialogBridgeAutoProvisionOnRegionEnter = ParseBool(Env("DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER"), true),
             DialogBridgePromptResponseTimeoutSeconds = ParseInt(Env("DIALOG_BRIDGE_PROMPT_RESPONSE_TIMEOUT_SECONDS"), 120),
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
@@ -85,9 +81,9 @@ internal static class ConfigLoader
             "  opensim-metaverse2mcp [options]",
             string.Empty,
             "Bot login options (required):",
-            "  --first-name <value>           Bot first name (env: OPENSIM_LOGIN_FIRSTNAME)",
-            "  --last-name <value>            Bot last name  (env: OPENSIM_LOGIN_LASTNAME)",
-            "  --password <value>             Bot password   (env: OPENSIM_LOGIN_PASSWORD)",
+            "  --first-name <value>           Bot first name (env: OPENSIM_BOT_FIRST)",
+            "  --last-name <value>            Bot last name  (env: OPENSIM_BOT_LAST)",
+            "  --password <value>             Bot password   (env: OPENSIM_BOT_PASSWORD)",
             string.Empty,
             "Bot login options (optional):",
             "  --login-uri <url>              Login URI (env: OPENSIM_LOGIN_URI, default: http://opensim:9000)",
@@ -96,7 +92,7 @@ internal static class ConfigLoader
             "  --login-timeout-seconds <int>  Login timeout (env: OPENSIM_LOGIN_TIMEOUT_SECONDS, default: 30)",
             "  --spawner-parent <name>        Parent bot full name (env: OPENSIM_SPAWNER_PARENT)",
             "  --spawner-level <value>        Spawner-assigned level hint (env: OPENSIM_SPAWNER_LEVEL)",
-            "  --spawner-host <host>          Spawner API host (env: SPAWNER_HOST, default: opensim-spawner)",
+            "  --spawner-host <host>          Spawner API host (env: SPAWNER_HOST, default: opensim-ai-spawner)",
             "  --spawner-port <port>          Spawner API port (env: SPAWNER_PORT, default: 8993)",
             "  --spawner-token <token>        Optional Spawner API bearer token (env: SPAWNER_TOKEN)",
             string.Empty,
@@ -117,14 +113,13 @@ internal static class ConfigLoader
             "                                (env: OPENCODE_EVENT_DEBUG, default: false)",
             "  --opencode-timeout-seconds <int>",
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
-            "  --handler-first-name <value>   Optional handler first name (env: OPENSIM_BOT_HANDLER_FIRSTNAME)",
-            "  --handler-last-name <value>    Optional handler last name (env: OPENSIM_BOT_HANDLER_LASTNAME)",
+            "  --handler-config <path>        Handler authorization config file (env: OPENSIM_HANDLER_CONFIG, default: /config/handlers.json)",
             string.Empty,
             "Voice routing (Piper + grid voice backend):",
             "  --voice-enabled <bool>         Enable voice routing for Say tool (env: VOICE_ROUTING_ENABLED, default: false)",
             "  --voice-backend <webrtc>       Voice backend for WAV playback to nearby avatars (env: VOICE_BACKEND, default: webrtc)",
             "  --piper-scheme <http|https>    Piper URL scheme (env: PIPER_SCHEME, default: http)",
-            "  --piper-host <host>            Piper host (env: PIPER_HOST, default: opensim-piper)",
+            "  --piper-host <host>            Piper host (env: PIPER_HOST, default: opensim-ai-piper)",
             "  --piper-port <port>            Piper port (env: PIPER_PORT, default: 8995)",
             "  --piper-tts-path <path>        Piper synthesis path (env: PIPER_TTS_PATH, default: /tts)",
             "  --piper-voices-path <path>     Piper voices list path (env: PIPER_VOICES_PATH, default: /voices)",
@@ -264,11 +259,8 @@ internal static class ConfigLoader
                 case "--opencode-timeout-seconds":
                     options.OpencodeRequestTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.OpencodeRequestTimeoutSeconds);
                     break;
-                case "--handler-first-name":
-                    options.OpencodeHandlerFirstName = RequireValue(args, ref i, arg);
-                    break;
-                case "--handler-last-name":
-                    options.OpencodeHandlerLastName = RequireValue(args, ref i, arg);
+                case "--handler-config":
+                    options.HandlerConfig = RequireValue(args, ref i, arg);
                     break;
                 case "--voice-enabled":
                     options.VoiceRoutingEnabled = ParseBool(RequireValue(args, ref i, arg), options.VoiceRoutingEnabled);
@@ -297,17 +289,8 @@ internal static class ConfigLoader
                 case "--piper-default-voice":
                     options.PiperDefaultVoice = RequireValue(args, ref i, arg);
                     break;
-                case "--lsl-dialog-bridge-trusted-object-id":
-                    options.LslDialogBridgeTrustedObjectId = RequireValue(args, ref i, arg);
-                    break;
-                case "--lsl-dialog-bridge-trusted-owner-id":
-                    options.LslDialogBridgeTrustedOwnerId = RequireValue(args, ref i, arg);
-                    break;
-                case "--lsl-dialog-bridge-require-trusted-sender":
-                    options.LslDialogBridgeRequireTrustedSender = ParseBool(RequireValue(args, ref i, arg), options.LslDialogBridgeRequireTrustedSender);
-                    break;
-                case "--lsl-dialog-bridge-trust-state-file":
-                    options.LslDialogBridgeTrustStateFile = RequireValue(args, ref i, arg);
+                case "--bridge-trust-state-file":
+                    options.BridgeTrustStateFile = RequireValue(args, ref i, arg);
                     break;
                 case "--dialog-bridge-auto-provision-on-region-enter":
                     options.DialogBridgeAutoProvisionOnRegionEnter = ParseBool(RequireValue(args, ref i, arg), options.DialogBridgeAutoProvisionOnRegionEnter);

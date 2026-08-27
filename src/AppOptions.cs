@@ -37,8 +37,7 @@ internal sealed class AppOptions
     public string? OpencodeInitialModel { get; set; }
     public bool OpencodeEventDebug { get; set; }
     public int OpencodeRequestTimeoutSeconds { get; set; } = 60;
-    public string? OpencodeHandlerFirstName { get; set; }
-    public string? OpencodeHandlerLastName { get; set; }
+    public string HandlerConfig { get; set; } = "/config/handlers.json";
     public bool VoiceRoutingEnabled { get; set; }
     public string VoiceBackend { get; set; } = "webrtc";
     public string PiperScheme { get; set; } = "http";
@@ -48,10 +47,7 @@ internal sealed class AppOptions
     public string PiperVoicesPath { get; set; } = "/voices";
     public int PiperRequestTimeoutSeconds { get; set; } = 60;
     public string PiperDefaultVoice { get; set; } = "en_US-lessac-medium";
-    public string? LslDialogBridgeTrustedObjectId { get; set; }
-    public string? LslDialogBridgeTrustedOwnerId { get; set; }
-    public bool LslDialogBridgeRequireTrustedSender { get; set; } = true;
-    public string? LslDialogBridgeTrustStateFile { get; set; } = "/workspace/state/dialog-bridge-trust.json";
+    public string? BridgeTrustStateFile { get; set; } = "/workspace/state/dialog-bridge-trust.json";
 
     // When true, the bot will check for a present dialog bridge when it first
     // enters a new region and attempt to auto-install the bridge if missing.
@@ -178,30 +174,27 @@ internal sealed class AppOptions
             errors.Add("Dialog bridge prompt response timeout must be at least 5 seconds.");
         }
 
-        var hasHandlerFirst = !string.IsNullOrWhiteSpace(OpencodeHandlerFirstName);
-        var hasHandlerLast = !string.IsNullOrWhiteSpace(OpencodeHandlerLastName);
-        if (hasHandlerFirst != hasHandlerLast)
+        if (string.IsNullOrWhiteSpace(HandlerConfig))
         {
-            errors.Add("Handler name must include both first and last names (OPENSIM_BOT_HANDLER_FIRSTNAME and OPENSIM_BOT_HANDLER_LASTNAME). ");
+            errors.Add("Handler config file path is required (--handler-config or OPENSIM_HANDLER_CONFIG).");
         }
-
-        if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedObjectId)
-            && !Guid.TryParse(LslDialogBridgeTrustedObjectId, out _))
-        {
-            errors.Add("LSL dialog bridge trusted object id must be a valid UUID.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustedOwnerId)
-            && !Guid.TryParse(LslDialogBridgeTrustedOwnerId, out _))
-        {
-            errors.Add("LSL dialog bridge trusted owner id must be a valid UUID.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(LslDialogBridgeTrustStateFile))
+        else
         {
             try
             {
-                _ = Path.GetFullPath(LslDialogBridgeTrustStateFile);
+                _ = Path.GetFullPath(HandlerConfig);
+            }
+            catch
+            {
+                errors.Add("Handler config file path is invalid.");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(BridgeTrustStateFile))
+        {
+            try
+            {
+                _ = Path.GetFullPath(BridgeTrustStateFile);
             }
             catch
             {
@@ -263,17 +256,17 @@ internal sealed class AppOptions
 
         if (string.IsNullOrWhiteSpace(BotFirstName))
         {
-            errors.Add("Bot first name is required (--first-name or OPENSIM_LOGIN_FIRSTNAME).");
+            errors.Add("Bot first name is required (--first-name or OPENSIM_BOT_FIRST).");
         }
 
         if (string.IsNullOrWhiteSpace(BotLastName))
         {
-            errors.Add("Bot last name is required (--last-name or OPENSIM_LOGIN_LASTNAME).");
+            errors.Add("Bot last name is required (--last-name or OPENSIM_BOT_LAST).");
         }
 
         if (string.IsNullOrWhiteSpace(BotPassword))
         {
-            errors.Add("Bot password is required (--password or OPENSIM_LOGIN_PASSWORD).");
+            errors.Add("Bot password is required (--password or OPENSIM_BOT_PASSWORD).");
         }
 
         return errors;
