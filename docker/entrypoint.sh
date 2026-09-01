@@ -32,7 +32,7 @@ set -- \
   --opencode-scheme "${OPENCODE_SCHEME:-http}" \
   --opencode-host "${OPENCODE_HOST:-opensim-opencode}" \
   --opencode-port "${OPENCODE_PORT:-8998}" \
-  --opencode-timeout-seconds "${OPENCODE_REQUEST_TIMEOUT_SECONDS:-60}" \
+  --opencode-timeout-seconds "${OPENCODE_REQUEST_TIMEOUT_SECONDS:-1800}" \
   --handler-config "${OPENSIM_HANDLER_CONFIG:-/config/handlers.json}"
 
 if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then
