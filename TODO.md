@@ -52,8 +52,6 @@ Scope notes:
 - [ ] **[P0] MCP event/notification stream**
   - Expose event subscriptions for login/disconnect, object updates, IM/chat, inventory offers, teleport status.
   - Include backpressure and bounded buffers.
-- [ ] **[P1] Local chat and group chat AI routing**
-  - Local and group routing are explicitly TODO in code; currently IM-focused.
 - [ ] **[P1] Event filtering tools**
   - Subscribe by radius, object UUID/local ID, chat source, event type.
 - [ ] **[P2] Historical event replay window**
