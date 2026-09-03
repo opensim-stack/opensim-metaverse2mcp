@@ -2012,6 +2012,73 @@ internal sealed class BotMcpTools
         return _bot.InventoryOfferHistoryList(maxResults);
     }
 
+    [McpServerTool, Description("Create an MCP runtime event subscription for filtered channels/types.")]
+    public EventStreamSubscriptionResult EventStreamSubscribe(
+        [Description("Optional channels list: general, object, teleport, all. Delimit with comma/space/pipe.")] string? channels,
+        [Description("Optional event-type filter list. Delimit with comma/space/pipe.")] string? eventTypes,
+        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters,
+        [Description("Optional object UUID filter list (comma/pipe/semicolon delimited).") ] string? objectIds,
+        [Description("Optional object local ID filter list (comma/pipe/semicolon delimited).") ] string? objectLocalIds,
+        [Description("Optional chat source filter list (name or UUID; comma/pipe/semicolon delimited).") ] string? chatSources)
+    {
+        return _bot.EventStreamSubscribe(channels, eventTypes, radiusMeters, objectIds, objectLocalIds, chatSources);
+    }
+
+    [McpServerTool, Description("Remove an existing MCP runtime event subscription.")]
+    public BotToolResult EventStreamUnsubscribe(
+        [Description("Subscription ID returned by EventStreamSubscribe.")] string subscriptionId)
+    {
+        return _bot.EventStreamUnsubscribe(subscriptionId);
+    }
+
+    [McpServerTool, Description("Poll MCP runtime events with cursoring; supports long-poll wait for reactive workflows.")]
+    public Task<EventStreamPollResult> EventStreamPoll(
+        [Description("Optional subscription ID. If provided, defaults to that subscription's channels/types/cursor.")] string? subscriptionId,
+        [Description("Optional cursor returned by prior poll. Omit to use subscription cursor (or 0).") ] string? cursor,
+        [Description("Optional channels override: general, object, teleport, all.")] string? channels,
+        [Description("Optional event-type filter override.")] string? eventTypes,
+        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters,
+        [Description("Optional object UUID filter override list.")] string? objectIds,
+        [Description("Optional object local ID filter override list.")] string? objectLocalIds,
+        [Description("Optional chat source filter override list.")] string? chatSources,
+        [Description("Maximum events to return (1..500).") ] int maxResults,
+        [Description("Long-poll wait timeout in milliseconds (0..30000).") ] int waitMs,
+        CancellationToken cancellationToken)
+    {
+        return _bot.EventStreamPollAsync(
+            subscriptionId,
+            cursor,
+            channels,
+            eventTypes,
+            radiusMeters,
+            objectIds,
+            objectLocalIds,
+            chatSources,
+            maxResults,
+            waitMs,
+            cancellationToken);
+    }
+
+    [McpServerTool, Description("Query a short historical window of retained runtime events for debugging.")]
+    public EventStreamHistoryResult EventStreamHistory(
+        [Description("Window size in seconds (1..1800).") ] int lastSeconds,
+        [Description("Optional channels list: general, object, teleport, all.")] string? channels,
+        [Description("Optional event-type filter list.")] string? eventTypes,
+        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters,
+        [Description("Optional object UUID filter list.")] string? objectIds,
+        [Description("Optional object local ID filter list.")] string? objectLocalIds,
+        [Description("Optional chat source filter list.")] string? chatSources,
+        [Description("Maximum events to return (1..500).") ] int maxResults)
+    {
+        return _bot.EventStreamHistory(channels, eventTypes, radiusMeters, objectIds, objectLocalIds, chatSources, lastSeconds, maxResults);
+    }
+
+    [McpServerTool, Description("Inspect runtime event buffer sizes and trim counters.")]
+    public EventStreamStatsResult EventStreamStats()
+    {
+        return _bot.EventStreamStats();
+    }
+
     [McpServerTool, Description("Persist inventory-offer policy rules to JSON file.")]
     public Task<InventoryOfferPolicyResult> InventoryOfferPolicyRulesSave(
         [Description("Optional target JSON file path; defaults to configured policy file.")] string? filePath,

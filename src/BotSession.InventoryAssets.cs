@@ -3026,6 +3026,25 @@ internal sealed partial class BotSession
 
         var reason = acceptedByHandlerOverride ? "handler" : "policy";
         Console.WriteLine($"[inventory-offer] from '{fromName}' ({fromAgentId}) type={e.AssetType} fromTask={e.FromTask} decision={decision} reason={reason}");
+        EmitRuntimeEvent(
+            "general",
+            "inventory.offer.decision",
+            "opensim",
+            $"Inventory offer from {fromName} was {decision}.",
+            new Dictionary<string, string?>
+            {
+                ["fromAgentId"] = fromAgentId,
+                ["fromName"] = fromName,
+                ["assetType"] = e.AssetType.ToString(),
+                ["fromTask"] = e.FromTask.ToString(),
+                ["decision"] = decision,
+                ["reason"] = reason,
+                ["matchedRuleId"] = matchedRule?.Id.ToString(CultureInfo.InvariantCulture),
+                ["matchedRuleName"] = matchedRule?.Name,
+                ["destinationFolderId"] = destinationFolder.ToString(),
+                ["objectId"] = e.ObjectID.ToString(),
+                ["message"] = offerMessage
+            });
 
         if (e.Accept
             && _options.PromptHandlingEnabled

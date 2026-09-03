@@ -47,17 +47,7 @@ Scope notes:
 - [ ] **[P0] Add channel randomization + nonce challenge**
   - Randomize dialog bridge channel and validate per-request nonce to reduce replay/spoof risk.
 
-## 2) Eventing and Reactive Workflows
-
-- [ ] **[P0] MCP event/notification stream**
-  - Expose event subscriptions for login/disconnect, object updates, IM/chat, inventory offers, teleport status.
-  - Include backpressure and bounded buffers.
-- [ ] **[P1] Event filtering tools**
-  - Subscribe by radius, object UUID/local ID, chat source, event type.
-- [ ] **[P2] Historical event replay window**
-  - Optional short-term event history query for debugging agents.
-
-## 3) Connection and Avatar Control
+## 2) Connection and Avatar Control
 
 - [ ] **[P1] Connection lifecycle controls**
   - Add explicit MCP tools for logout/reconnect and connection diagnostics.
@@ -65,12 +55,12 @@ Scope notes:
 - [ ] **[P2] Gestures and typing state controls**
   - Trigger gestures, explicit typing indicators, AFK/away style signals.
   
-## 4) Level Of Control
+## 3) Level Of Control
 
 - [ ] **[P1] Limited Capability Bots **
   - Need "Handler Not Online" policy for Governor.
 
-## 5) Inventory and Asset Management
+## 4) Inventory and Asset Management
 
 - [ ] **[P1] Asset type coverage expansion**
   - Explicit helpers for landmarks, calling cards, bodyparts, clothing, gestures.
@@ -79,7 +69,7 @@ Scope notes:
 - [ ] **[P2] Bulk transfer workflows**
   - Batch give/take with result breakdown and retry support.
 
-## 6) Scripts and Task Inventory
+## 5) Scripts and Task Inventory
 
 - [ ] **[P1] Script lifecycle coverage**
   - Add script reset and script event queue stats where supported.
@@ -89,7 +79,7 @@ Scope notes:
 - [ ] **[P2] Script source provenance**
   - Optional hash/signature metadata for uploaded script source.
 
-## 7) Environment, Land, and Region Features
+## 6) Environment, Land, and Region Features
 
 - [ ] **[P1] Parcel management tools (`ParcelManager`)**
   - full ACL write/edit/remove primitives (library gap in current surfaced API path).
@@ -98,12 +88,12 @@ Scope notes:
 - [ ] **[P1] EEP/Windlight usability layer**
   - High-level presets and patch operations instead of raw LLSD only.
 
-## 8) Communications Beyond IM
+## 7) Communications Beyond IM
 
 - [ ] **[P2] Conferencing/voice signaling integration hooks**
   - Text-side signaling for out-of-band media bridges.
 
-## 9) Voice / WebRTC
+## 8) Voice / WebRTC
 
 *Some work has been done on this. Janus and Piper are part of the stack, but neither spatial or P2P calls are working yet.*
 
@@ -114,7 +104,7 @@ Scope notes:
   - Auto-mute/auto-join policies and permission checks.
 
 
-## 10) OSD/LLSD and Data Utilities
+## 9) OSD/LLSD and Data Utilities
 
 - [ ] **[P1] Generic OSD conversion tools**
   - JSON/XML/Binary LLSD conversion and validation tools for agent workflows.
@@ -123,7 +113,7 @@ Scope notes:
 - [ ] **[P2] Object/asset serialization helpers**
   - Export/import structured snapshots for reproducible scene edits.
 
-## 11) MCP UX and Contract Quality
+## 10) MCP UX and Contract Quality
 
 - [ ] **[P0] Tool contract consistency**
   - Normalize result schemas (status/error codes, transient/permanent flags, correlation IDs).
@@ -134,7 +124,7 @@ Scope notes:
 - [ ] **[P1] Safer defaults for destructive tools**
   - Confirm/delete guardrails similar to session delete flow.
 
-## 12) Testing and Validation Gaps
+## 11) Testing and Validation Gaps
 
 - [ ] **[P0] Capability-level integration tests**
   - End-to-end tests for movement, prim edit, inventory transfer, script upload, policy decisions.
@@ -145,7 +135,7 @@ Scope notes:
 - [ ] **[P1] Regression tests for IM command parser**
   - Commands, aliases, chunking, prompt/permission/question flows.
 
-## 13) Navigation / Pathfinding (DotRecast Plan)
+## 12) Navigation / Pathfinding (DotRecast Plan)
 
 Goal: replace heuristic-only movement with a full walk-first navigation stack that reliably handles walls/corners/doors, and only falls back to teleport when policies allow.
 
@@ -198,7 +188,6 @@ Goal: replace heuristic-only movement with a full walk-first navigation stack th
 ### Phase 1 (P0 hardening)
 
 - Access policy enforcement
-- Event stream foundation
 - Tool schema normalization
 - Integration/failure-path tests
 

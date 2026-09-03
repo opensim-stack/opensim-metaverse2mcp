@@ -339,6 +339,7 @@ internal sealed partial class BotSession : IDisposable
             client.Self.ChatFromSimulator += OnChatFromSimulator;
             client.Self.ScriptDialog += OnScriptDialog;
             client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
+            client.Objects.ObjectUpdate += OnWorldObjectUpdateForEventStream;
 
             // Assign the field-backed client early so event handlers that run during
             // the login process (for example SimChanged) can reference a non-null
@@ -363,6 +364,16 @@ internal sealed partial class BotSession : IDisposable
 
             if (!success)
             {
+                EmitRuntimeEvent(
+                    "general",
+                    "login.failed",
+                    "opensim",
+                    string.IsNullOrWhiteSpace(_lastLoginMessage) ? "Login failed." : _lastLoginMessage,
+                    new Dictionary<string, string?>
+                    {
+                        ["firstName"] = _options.BotFirstName,
+                        ["lastName"] = _options.BotLastName
+                    });
                 CleanupClient(client, logout: true);
                 // Clear the shared client field since login failed.
                 _client = null;
@@ -371,6 +382,18 @@ internal sealed partial class BotSession : IDisposable
 
             // client already assigned to _client above; mark connected.
             _connected = true;
+            EmitRuntimeEvent(
+                "general",
+                "login.connected",
+                "opensim",
+                "Bot login successful.",
+                new Dictionary<string, string?>
+                {
+                    ["agentId"] = client.Self.AgentID.ToString(),
+                    ["simulator"] = client.Network.CurrentSim?.Name,
+                    ["firstName"] = _options.BotFirstName,
+                    ["lastName"] = _options.BotLastName
+                });
             await EnsureVoiceBackendOnLoginAsync(client, cancellationToken).ConfigureAwait(false);
 
             // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
@@ -2194,10 +2217,30 @@ internal sealed partial class BotSession : IDisposable
                 var message = string.IsNullOrWhiteSpace(client.Self.TeleportMessage)
                     ? "Teleport failed."
                     : client.Self.TeleportMessage;
+                EmitRuntimeEvent(
+                    "teleport",
+                    "teleport.failed",
+                    "opensim",
+                    message,
+                    new Dictionary<string, string?>
+                    {
+                        ["targetRegion"] = destinationLabel,
+                        ["targetPosition"] = FormatVector(target)
+                    });
                 return BotToolResult.Fail(message);
             }
 
             var at = client.Self.SimPosition;
+            EmitRuntimeEvent(
+                "teleport",
+                "teleport.succeeded",
+                "opensim",
+                $"Teleported to {destinationLabel} at {FormatVector(at)}.",
+                new Dictionary<string, string?>
+                {
+                    ["targetRegion"] = destinationLabel,
+                    ["position"] = FormatVector(at)
+                });
             return BotToolResult.OkResult($"Teleported to {destinationLabel} at {FormatVector(at)}.");
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -2223,9 +2266,29 @@ internal sealed partial class BotSession : IDisposable
                 var message = string.IsNullOrWhiteSpace(client.Self.TeleportMessage)
                     ? "Teleport failed."
                     : client.Self.TeleportMessage;
+                EmitRuntimeEvent(
+                    "teleport",
+                    "teleport.failed",
+                    "opensim",
+                    message,
+                    new Dictionary<string, string?>
+                    {
+                        ["targetRegionHandle"] = handle.ToString(),
+                        ["targetPosition"] = FormatVector(target)
+                    });
                 return BotToolResult.Fail(message);
             }
 
+            EmitRuntimeEvent(
+                "teleport",
+                "teleport.succeeded",
+                "opensim",
+                $"Teleported to region handle {handle} at {FormatVector(client.Self.SimPosition)}.",
+                new Dictionary<string, string?>
+                {
+                    ["targetRegionHandle"] = handle.ToString(),
+                    ["position"] = FormatVector(client.Self.SimPosition)
+                });
             return BotToolResult.OkResult($"Teleported to region handle {handle} at {FormatVector(client.Self.SimPosition)}.");
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -5062,10 +5125,30 @@ internal sealed partial class BotSession : IDisposable
         if (e.Status == LoginStatus.Success)
         {
             Console.WriteLine("[bot] login successful");
+            EmitRuntimeEvent(
+                "general",
+                "login.success",
+                "opensim",
+                "Login progress reported success.",
+                new Dictionary<string, string?>
+                {
+                    ["status"] = e.Status.ToString(),
+                    ["message"] = e.Message
+                });
         }
         else if (e.Status == LoginStatus.Failed)
         {
             Console.WriteLine($"[bot] login failed: {e.Message}");
+            EmitRuntimeEvent(
+                "general",
+                "login.failed",
+                "opensim",
+                string.IsNullOrWhiteSpace(e.Message) ? "Login progress reported failure." : e.Message,
+                new Dictionary<string, string?>
+                {
+                    ["status"] = e.Status.ToString(),
+                    ["message"] = e.Message
+                });
         }
     }
 
@@ -5307,6 +5390,16 @@ internal sealed partial class BotSession : IDisposable
         HandleVoiceDisconnected();
         StopFollowInternal();
         CancelMovementAutoStop();
+        EmitRuntimeEvent(
+            "general",
+            "network.disconnected",
+            "opensim",
+            $"Disconnected: {e.Reason} - {e.Message}",
+            new Dictionary<string, string?>
+            {
+                ["reason"] = e.Reason.ToString(),
+                ["message"] = e.Message
+            });
         Console.WriteLine($"[bot] disconnected: {e.Reason} - {e.Message}");
         EnsureReconnectLoop("network-disconnect");
     }
@@ -5396,6 +5489,7 @@ internal sealed partial class BotSession : IDisposable
         try { client.Self.ChatFromSimulator -= OnChatFromSimulator; } catch { }
         try { client.Self.ScriptDialog -= OnScriptDialog; } catch { }
         try { client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered; } catch { }
+        try { client.Objects.ObjectUpdate -= OnWorldObjectUpdateForEventStream; } catch { }
         try { client.Network.Disconnected -= OnDisconnected; } catch { }
         try { client.Network.SimChanged -= OnNetworkSimChanged; } catch { }
         try { client.Network.LoginProgress -= OnLoginProgress; } catch { }

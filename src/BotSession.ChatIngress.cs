@@ -28,6 +28,20 @@ internal sealed partial class BotSession
         }
 
         Console.WriteLine($"[im] ({e.IM.Dialog}, group={e.IM.GroupIM}, session={e.IM.IMSessionID}, to={e.IM.ToAgentID}) {from}: {SanitizeImLogText(text)}");
+        EmitRuntimeEvent(
+            "general",
+            "chat.im.received",
+            "opensim",
+            $"IM received from {from}.",
+            new Dictionary<string, string?>
+            {
+                ["fromAgentId"] = e.IM.FromAgentID.ToString(),
+                ["fromName"] = from,
+                ["dialog"] = e.IM.Dialog.ToString(),
+                ["isGroup"] = e.IM.GroupIM.ToString(),
+                ["sessionId"] = e.IM.IMSessionID.ToString(),
+                ["text"] = SanitizeImLogText(text)
+            });
 
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -656,6 +670,19 @@ internal sealed partial class BotSession
         }
 
         Console.WriteLine($"[local] ({e.SourceType}/{e.Type}) {from}: {SanitizeImLogText(text)}");
+        EmitRuntimeEvent(
+            "general",
+            "chat.local.received",
+            "opensim",
+            $"Local chat received from {from}.",
+            new Dictionary<string, string?>
+            {
+                ["fromAgentId"] = e.SourceID.ToString(),
+                ["fromName"] = from,
+                ["chatType"] = e.Type.ToString(),
+                ["sourceType"] = e.SourceType.ToString(),
+                ["text"] = SanitizeImLogText(text)
+            });
         _ = Task.Run(() => HandleIncomingConversationMessageAsync(
             client,
             e.SourceID,

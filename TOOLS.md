@@ -80,6 +80,11 @@ The server publishes tools including:
 - `InventoryOfferPolicyRulesList`
 - `InventoryOfferPolicyRulesClear`
 - `InventoryOfferHistoryList`
+- `EventStreamSubscribe`
+- `EventStreamUnsubscribe`
+- `EventStreamPoll`
+- `EventStreamHistory`
+- `EventStreamStats`
 - `InventoryOfferPolicyRulesSave`
 - `InventoryOfferPolicyRulesLoad`
 - `AppearanceListWorn`
@@ -205,6 +210,15 @@ Inventory and asset notes:
 - `TaskInventoryTake` requests transfer from object (task) inventory into avatar inventory; server permissions determine copy-vs-move behavior.
 - Cross-avatar "take/copy" is offer-based: you can receive what another avatar offers, but cannot arbitrarily pull from another avatar inventory.
 - `InventoryOfferPolicyRulesSave`/`InventoryOfferPolicyRulesLoad` persist policy rules as JSON; startup auto-load occurs when `INVENTORY_OFFER_POLICY_FILE` exists.
+
+Event stream notes:
+- Hybrid default: use `EventStreamSubscribe` once, then `EventStreamPoll` with a cursor and non-zero `waitMs` for reactive long-poll behavior.
+- Channels are split as `general`, `object`, and `teleport` (`all` is accepted as shorthand).
+- Event filtering supports `eventTypes`, `radiusMeters`, `objectIds`, `objectLocalIds`, and `chatSources` on subscribe and poll.
+- Buffers are bounded per channel; when full, oldest events are trimmed.
+- `EventStreamPoll` includes trim diagnostics (`CursorTrimmed`, `Trimmed*`) so clients can detect loss and recover.
+- `EventStreamHistory` returns a short retained window (`lastSeconds`) for debugging/replay without changing subscription cursors.
+- `EventStreamStats` reports current buffer occupancy and cumulative trim counters.
 
 Appearance and script notes:
 - `AppearanceWearFolder` expects a folder containing wearable/attachment items (or links to them) and delegates to `Appearance.WearOutfitAsync`.
