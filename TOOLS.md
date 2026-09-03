@@ -21,6 +21,8 @@ The server publishes tools including:
 - `AnimationsList`
 - `ActiveAnimations`
 - `Chat`
+- `ChatWhisper`
+- `ChatShout`
 - `SendInstantMessage`
 - `Voice`
 - `QueryVoice`
@@ -104,6 +106,12 @@ The server publishes tools including:
 - `EnvResetLegacy`
 
 Chat notes:
+- `Chat` accepts optional `chatType` (case-insensitive) and defaults to `Normal`.
+- Supported `chatType` values are `Whisper`, `Normal`, `Shout`, `StartTyping`, `StopTyping`, `Debug`, `OwnerSay`, `RegionSayTo`, `RegionSay`.
+- `ChatWhisper` and `ChatShout` are thin wrappers that set `chatType` to `Whisper`/`Shout` respectively.
+- Receive-side local/group chat filtering is env-only via `LOCAL_CHAT_ALLOWED_TYPES` (comma/pipe/space-separated `ChatType` names, default `Normal`).
+- Incoming local chat modalities not in `LOCAL_CHAT_ALLOWED_TYPES` are logged and ignored before AI routing.
+- Incoming group chat (`SessionSend`) is filtered using the same allow-list and treated as `Normal` modality.
 - In this stage, only avatar-to-bot IM is routed to Opencode.
 - Optional handler mode: when `OPENSIM_HANDLER_CONFIG` points to a handler JSON file (default `/config/handlers.json`), only listed handler avatars may control the bot; others get a friendly deny reply.
 - Prompt layering is enabled by default with this precedence (low -> high): built-in bridge prompt, project `AGENTS.md`, then in-world `AGENTS.md` notecard.

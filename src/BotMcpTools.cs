@@ -284,9 +284,28 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> Chat(
         [Description("Message to send.")] string message,
         [Description("Chat channel number.")] int channel,
+        [Description("Optional chat modality (for example: Whisper, Normal, Shout). Defaults to Normal.")] string? chatType,
         CancellationToken cancellationToken)
     {
-        return _bot.SayChatAsync(message, channel, cancellationToken);
+        return _bot.SayChatAsync(message, channel, chatType, cancellationToken);
+    }
+
+    [McpServerTool, Description("Send a local whisper chat message.")]
+    public Task<BotToolResult> ChatWhisper(
+        [Description("Message to send.")] string message,
+        [Description("Chat channel number.")] int channel,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SayChatAsync(message, channel, "Whisper", cancellationToken);
+    }
+
+    [McpServerTool, Description("Send a local shout chat message.")]
+    public Task<BotToolResult> ChatShout(
+        [Description("Message to send.")] string message,
+        [Description("Chat channel number.")] int channel,
+        CancellationToken cancellationToken)
+    {
+        return _bot.SayChatAsync(message, channel, "Shout", cancellationToken);
     }
 
     [McpServerTool, Description("Enable or disable voice routing for synthesized speech output.")]
@@ -310,7 +329,7 @@ internal sealed class BotMcpTools
     }
 
     [McpServerTool, Description("Synthesize text with Piper and play it through the configured voice backend.")]
-    public Task<BotToolResult> Say(
+    public Task<BotToolResult> Speak(
         [Description("Text to synthesize and speak.")] string text,
         [Description("Optional Piper voice name; defaults to configured PIPER_DEFAULT_VOICE.")] string? voice,
         [Description("Optional Piper speaker id.")] int? speaker,

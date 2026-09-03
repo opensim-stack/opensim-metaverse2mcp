@@ -56,7 +56,8 @@ internal static class ConfigLoader
             PromptNotecardEnabled = ParseBool(Env("PROMPT_NOTECARD_ENABLED"), true),
             PromptNotecardRequireHandler = ParseBool(Env("PROMPT_NOTECARD_REQUIRE_HANDLER"), true),
             PromptMaxChars = ParseInt(Env("PROMPT_MAX_CHARS"), 16000),
-            RequesterContextDebugLogging = ParseBool(Env("REQUESTER_CONTEXT_DEBUG_LOGGING"), false)
+            RequesterContextDebugLogging = ParseBool(Env("REQUESTER_CONTEXT_DEBUG_LOGGING"), false),
+            ReceiveChatAllowedTypes = Env("LOCAL_CHAT_ALLOWED_TYPES") ?? "Normal,Whisper,Shout,StartTyping,StopTyping,Debug,OwnerSay,RegionSayTo,RegionSay"
         };
 
         options.McpPort = ParseInt(Env("METAVERSE_MCP_PORT"), 8999);
@@ -114,6 +115,8 @@ internal static class ConfigLoader
             "  --opencode-timeout-seconds <int>",
             "                                Opencode request timeout in seconds (env: OPENCODE_REQUEST_TIMEOUT_SECONDS, default: 60)",
             "  --handler-config <path>        Handler authorization config file (env: OPENSIM_HANDLER_CONFIG, default: /config/handlers.json)",
+            "  LOCAL_CHAT_ALLOWED_TYPES        Env-only allow-list for incoming local/group chat modalities",
+            "                                Comma/pipe/space-separated ChatType names (default: Normal)",
             string.Empty,
             "Voice routing (Piper + grid voice backend):",
             "  --voice-enabled <bool>         Enable voice routing for Say tool (env: VOICE_ROUTING_ENABLED, default: false)",

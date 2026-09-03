@@ -70,13 +70,6 @@ Scope notes:
 ## 4) Level Of Control
 
 - [ ] **[P1] Limited Capability Bots **
-  - Introduce 3 levels of Bots. Governor, Builder and Actor. Each has their own AGENTS.md.
-  - Governor gets access to all MCP functions, only Governor can create Builders and Actors.
-  - Builders get access to metaverse2mcp only (full API), i.e. can perform anything an ordinary player can do, subject to server permissions. A builder cannot create new builders or actors, but they can ask the Governor to do so, who may require permission from their handler or other policy checks.
-  - Actors get access to metaverse2mcp only (limited API, movement, communication). An actor may create other actors, but only by asking a governor to do so.
-  - Separate Opencode config for each bot is likely needed.
-  - Different providers / models per bot.
-  - Spin-up new containers for bots?  
   - Need "Handler Not Online" policy for Governor.
 
 ## 5) Inventory and Asset Management
@@ -109,10 +102,6 @@ Scope notes:
 
 ## 8) Communications Beyond IM
 
-- [ ] **[P1] Chat modalities**
-  - Add explicit whisper/shout tools and receive-side filters.
-- [ ] **[P1] Group chat and conference session control**
-  - Start/join/leave group chat sessions; route safely to AI session model.
 - [ ] **[P2] Conferencing/voice signaling integration hooks**
   - Text-side signaling for out-of-band media bridges.
 
@@ -217,7 +206,6 @@ Goal: replace heuristic-only movement with a full walk-first navigation stack th
 
 ### Phase 2 (P1 capability expansion)
 
-- Local/group chat routing and controls
 - Voice baseline controls
 
 ### Phase 3 (P2 ergonomics)

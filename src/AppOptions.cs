@@ -63,6 +63,7 @@ internal sealed class AppOptions
     public bool PromptNotecardRequireHandler { get; set; } = true;
     public int PromptMaxChars { get; set; } = 16000;
     public bool RequesterContextDebugLogging { get; set; }
+    public string ReceiveChatAllowedTypes { get; set; } = "Normal";
 
     public bool ShowHelp { get; set; }
 

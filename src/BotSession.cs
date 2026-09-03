@@ -170,6 +170,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly object _dialogBridgeAutoProvisionLock = new();
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private readonly CancellationTokenSource _lifecycleCts = new();
+    private readonly HashSet<ChatType> _receiveChatAllowedTypes;
 
     private string? _projectAgentsPromptCache;
     private DateTime _projectAgentsPromptCacheLastWriteUtc;
@@ -267,6 +268,7 @@ internal sealed partial class BotSession : IDisposable
     public BotSession(AppOptions options)
     {
         _options = options;
+        _receiveChatAllowedTypes = ParseLocalChatAllowedTypes(_options.ReceiveChatAllowedTypes, out var invalidLocalChatTypeNames);
         _controlGroupName = BuildControlGroupName();
         InitializeVoiceSupport();
         _handlerConfigPath = string.IsNullOrWhiteSpace(_options.HandlerConfig)
@@ -297,6 +299,13 @@ internal sealed partial class BotSession : IDisposable
         {
             Console.WriteLine($"[bot] parent controller enabled: {_parentFullName}");
         }
+
+        if (invalidLocalChatTypeNames.Count > 0)
+        {
+            Console.WriteLine($"[chat] ignoring invalid LOCAL_CHAT_ALLOWED_TYPES entries: {string.Join(", ", invalidLocalChatTypeNames)}");
+        }
+
+        Console.WriteLine($"[chat] receive chat-type filter (local/group): {string.Join(", ", _receiveChatAllowedTypes.OrderBy(value => value.ToString(), StringComparer.OrdinalIgnoreCase))}");
     }
 
     public string LastLoginMessage => _lastLoginMessage;
@@ -546,16 +555,70 @@ internal sealed partial class BotSession : IDisposable
         return false;
     }
 
-    public async Task<BotToolResult> SayChatAsync(string message, int channel, CancellationToken cancellationToken)
+    private static bool TryResolveChatType(string? input, out ChatType chatType, out string error)
+    {
+        error = string.Empty;
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            chatType = ChatType.Normal;
+            return true;
+        }
+
+        var trimmed = input.Trim();
+        if (!Enum.TryParse(trimmed, ignoreCase: true, out chatType) || !Enum.IsDefined(chatType))
+        {
+            error = $"chatType '{trimmed}' is invalid. Allowed values: {string.Join(", ", Enum.GetNames<ChatType>())}.";
+            chatType = ChatType.Normal;
+            return false;
+        }
+
+        return true;
+    }
+
+    private static HashSet<ChatType> ParseLocalChatAllowedTypes(string? raw, out List<string> invalidNames)
+    {
+        invalidNames = new List<string>();
+        var allowed = new HashSet<ChatType>();
+
+        var input = string.IsNullOrWhiteSpace(raw) ? "Normal" : raw;
+        var tokens = input
+            .Split(new[] { ',', '|', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        foreach (var token in tokens)
+        {
+            if (Enum.TryParse(token, ignoreCase: true, out ChatType chatType) && Enum.IsDefined(chatType))
+            {
+                allowed.Add(chatType);
+            }
+            else
+            {
+                invalidNames.Add(token);
+            }
+        }
+
+        if (allowed.Count == 0)
+        {
+            allowed.Add(ChatType.Normal);
+        }
+
+        return allowed;
+    }
+
+    public async Task<BotToolResult> SayChatAsync(string message, int channel, string? chatType, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(message))
         {
             return BotToolResult.Fail("message is required.");
         }
 
+        if (!TryResolveChatType(chatType, out var resolvedChatType, out var chatTypeError))
+        {
+            return BotToolResult.Fail(chatTypeError);
+        }
+
         return await RunActionAsync(
-            $"Sent chat message on channel {channel}.",
-            c => c.Self.Chat(message, channel, ChatType.Normal),
+            $"Sent {resolvedChatType} chat message on channel {channel}.",
+            c => c.Self.Chat(message, channel, resolvedChatType),
             cancellationToken);
     }
 
@@ -3720,6 +3783,12 @@ internal sealed partial class BotSession : IDisposable
         }
 
         var isGroupIm = IsGroupSessionMessage(e.IM);
+        if (isGroupIm && !_receiveChatAllowedTypes.Contains(ChatType.Normal))
+        {
+            Console.WriteLine($"[group] ignored ({e.IM.Dialog}, group={e.IM.GroupIM}) {from}: modality filtered by LOCAL_CHAT_ALLOWED_TYPES (mapped as Normal)");
+            return;
+        }
+
         var groupSessionId = ResolveGroupSessionId(e.IM);
         var conversationKey = isGroupIm
             ? BuildGroupConversationKey(groupSessionId)
@@ -9165,6 +9234,12 @@ internal sealed partial class BotSession : IDisposable
             || e.SourceType != ChatSourceType.Agent
             || e.SourceID == UUID.Zero)
         {
+            return;
+        }
+
+        if (!_receiveChatAllowedTypes.Contains(e.Type))
+        {
+            Console.WriteLine($"[local] ignored ({e.SourceType}/{e.Type}) {e.FromName}: modality filtered by LOCAL_CHAT_ALLOWED_TYPES");
             return;
         }
 
