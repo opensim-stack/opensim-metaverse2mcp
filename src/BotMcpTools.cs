@@ -18,7 +18,7 @@ internal sealed class BotMcpTools
         _options = options;
     }
 
-    [McpServerTool, Description("Get bot connection and location status.")]
+    [McpServerTool, Description("Get bot's own connection and location status.")]
     public BotStatus GetStatus()
     {
         return _bot.GetStatus();
@@ -738,7 +738,7 @@ internal sealed class BotMcpTools
         return _bot.FriendMapLocateAsync(friendAgentId, waitForReplySeconds, cancellationToken);
     }
 
-    [McpServerTool, Description("Locate an agent by first/last name via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
+    [McpServerTool, Description("Locate an agent (avatar, player, user, bot) by first/last name via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
     public Task<DataToolResult> AgentFind(
         [Description("Agent first name.")] string first,
         [Description("Agent last name.")] string last,
@@ -747,7 +747,7 @@ internal sealed class BotMcpTools
         return _spawnerClient.FindAgentAsync(first, last, cancellationToken);
     }
 
-    [McpServerTool, Description("Locate an agent by UUID via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
+    [McpServerTool, Description("Locate an agent (avatar, player, user, bot) by UUID via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
     public Task<DataToolResult> AgentFindByUuid(
         [Description("Agent UUID.")] string uuid,
         CancellationToken cancellationToken)
