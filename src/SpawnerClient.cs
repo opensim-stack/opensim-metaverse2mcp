@@ -6,6 +6,7 @@ namespace Opensim.Metaverse2Mcp;
 internal sealed class SpawnerClient : IDisposable
 {
     private const string BotApiBasePath = "/api/bot";
+    private const string AgentApiBasePath = "/api/agent";
 
     private readonly HttpClient _http;
     private readonly string? _token;
@@ -147,6 +148,41 @@ internal sealed class SpawnerClient : IDisposable
         return SendAsync(request, $"Sent '{normalizedAction}' action for bot {first.Trim()} {last.Trim()} via spawner.", cancellationToken);
     }
 
+    public Task<DataToolResult> FindAgentAsync(string first, string last, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+        {
+            return Task.FromResult(DataToolResult.FailResult("first and last are required."));
+        }
+
+        var escapedFirst = Uri.EscapeDataString(first.Trim());
+        var escapedLast = Uri.EscapeDataString(last.Trim());
+
+        var path = $"{AgentApiBasePath}/agent/{escapedFirst}/{escapedLast}";
+        var request = CreateRequest(HttpMethod.Get, path);
+        return SendAsync(
+            request,
+            $"Located agent {first.Trim()} {last.Trim()} via spawner.",
+            cancellationToken);
+    }
+
+    public Task<DataToolResult> FindAgentByUuidAsync(string uuid, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(uuid))
+        {
+            return Task.FromResult(DataToolResult.FailResult("uuid is required."));
+        }
+
+        var escapedUuid = Uri.EscapeDataString(uuid.Trim());
+
+        var path = $"{AgentApiBasePath}/agent-by-uuid/{escapedUuid}";
+        var request = CreateRequest(HttpMethod.Get, path);
+        return SendAsync(
+            request,
+            $"Located agent {uuid.Trim()} via spawner.",
+            cancellationToken);
+    }
+
     public void Dispose()
     {
         _http.Dispose();
@@ -202,4 +238,5 @@ internal sealed class SpawnerClient : IDisposable
 
         return string.Concat(value.AsSpan(0, maxChars), "...");
     }
+
 }

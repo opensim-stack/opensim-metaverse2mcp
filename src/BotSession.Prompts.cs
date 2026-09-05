@@ -114,6 +114,7 @@ internal sealed partial class BotSession
 
     private string? BuildRequesterContextPrompt(UUID requesterAgentId, string? requesterName, string conversationKey)
     {
+        var diagnosticsEnabled = IsFollowDiagnosticsEnabled();
         var trimmedName = (requesterName ?? string.Empty).Trim();
         if (requesterAgentId == UUID.Zero && trimmedName.Length == 0)
         {
@@ -147,6 +148,25 @@ internal sealed partial class BotSession
                     {
                         var distance = Vector3.Distance(client.Self.SimPosition, requesterAvatar.Position);
                         lines.Add($"requester_distance_to_bot_m: {distance:F1}");
+                    }
+
+                    if (diagnosticsEnabled)
+                    {
+                        Console.WriteLine(
+                            $"[requester][diag] resolved_in_current_sim conversation={conversationKey} requesterUuid={requesterAgentId} sim={DescribeSimulator(sim)} localId={requesterAvatar.LocalID} pos={FormatPosition(requesterAvatar.Position)}");
+                    }
+                }
+                else if (diagnosticsEnabled && client != null)
+                {
+                    if (TryFindAvatarByIdAcrossSims(client, requesterAgentId, out var seenSim, out var seenAvatar))
+                    {
+                        Console.WriteLine(
+                            $"[requester][diag] missing_from_current_sim conversation={conversationKey} requesterUuid={requesterAgentId} currentSim={DescribeSimulator(sim)} seenSim={DescribeSimulator(seenSim)} seenLocalId={seenAvatar!.LocalID} seenPos={FormatPosition(seenAvatar.Position)} botPos={FormatPosition(client.Self.SimPosition)}");
+                    }
+                    else
+                    {
+                        Console.WriteLine(
+                            $"[requester][diag] not_visible_any_sim conversation={conversationKey} requesterUuid={requesterAgentId} currentSim={DescribeSimulator(sim)} knownSims={client.Network.Simulators.Count}");
                     }
                 }
             }

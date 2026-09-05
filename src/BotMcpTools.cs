@@ -738,6 +738,23 @@ internal sealed class BotMcpTools
         return _bot.FriendMapLocateAsync(friendAgentId, waitForReplySeconds, cancellationToken);
     }
 
+    [McpServerTool, Description("Locate an agent by first/last name via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
+    public Task<DataToolResult> AgentFind(
+        [Description("Agent first name.")] string first,
+        [Description("Agent last name.")] string last,
+        CancellationToken cancellationToken)
+    {
+        return _spawnerClient.FindAgentAsync(first, last, cancellationToken);
+    }
+
+    [McpServerTool, Description("Locate an agent by UUID via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
+    public Task<DataToolResult> AgentFindByUuid(
+        [Description("Agent UUID.")] string uuid,
+        CancellationToken cancellationToken)
+    {
+        return _spawnerClient.FindAgentByUuidAsync(uuid, cancellationToken);
+    }
+
     [McpServerTool, Description("Send a teleport offer (lure) to an avatar UUID.")]
     public Task<BotToolResult> TeleportOfferSend(
         [Description("Target avatar UUID.")] string targetAgentId,
@@ -1166,7 +1183,7 @@ internal sealed class BotMcpTools
         return _bot.GetCameraStateAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("Follow a target avatar or object in the current region using autopilot.")]
+    [McpServerTool, Description("Follow a target avatar or object using autopilot. For avatar location checks, the follow loop prefers opensim-spawner local-grid agent lookup before map/cache fallbacks.")]
     public Task<BotToolResult> Follow(
         [Description("Target type: avatar or object.")] string targetType,
         [Description("Avatar full name or UUID, or object name, local ID, or UUID.")] string target,
