@@ -41,6 +41,17 @@ Scope notes:
   - Duplicate request guards for object edits and inventory/script operations.
 - [ ] **[P1] Failure classification and retry policy**
   - Distinguish transient simulator/caps/network errors from permanent validation errors.
+  
+  
+Make bot locating user use a more predictable and preferably single path.
+
+```
+1. AgentFind → Get user's current region + coordinates
+2. get_status → Verify bot's position (for context)
+3. If AgentFind region ≠ get_status region → investigate cache staleness
+4. teleport_to → Use AgentFind's regionName for teleport
+5. follow → Use AgentFind's UUID for target
+```
 
 ### Dialog Bridge Hardening Status
 

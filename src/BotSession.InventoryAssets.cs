@@ -98,21 +98,85 @@ internal sealed partial class BotSession
 
             var store = client.Inventory.Store;
             var resolved = new List<InventoryBase>(entries.Count);
+            var resolvedItemsByParent = new List<(InventoryItem Item, UUID ParentFolderId)>(entries.Count);
             foreach (var entry in entries)
             {
                 if (entry is InventoryItem item && item.IsLink() && store != null && store.TryGetValue(item.ResolvedItemID, out var linked))
                 {
                     resolved.Add(linked);
+                    if (linked is InventoryItem linkedItem)
+                    {
+                        resolvedItemsByParent.Add((linkedItem, item.ParentUUID));
+                    }
                 }
                 else
                 {
                     resolved.Add(entry);
+                    if (entry is InventoryItem directItem)
+                    {
+                        resolvedItemsByParent.Add((directItem, directItem.ParentUUID));
+                    }
                 }
             }
 
-            var resolvedItems = resolved.OfType<InventoryItem>().ToList();
+            var companionNotecardsByFolderAndName = resolvedItemsByParent
+                .Where(pair => IsNotecardInventoryItem(pair.Item))
+                .GroupBy(pair => (pair.ParentFolderId, NormalizeCompanionIniLookupKey(pair.Item.Name)))
+                .ToDictionary(group => group.Key, group => group.First().Item);
+
+            var wearTargets = new List<InventoryBase>(resolved.Count);
+            var pendingAttachmentTransforms = new List<(InventoryItem Item, WearAttachmentIniConfig Config)>();
+            foreach (var resolvedEntry in resolvedItemsByParent)
+            {
+                token.ThrowIfCancellationRequested();
+
+                var item = resolvedEntry.Item;
+                if (IsNotecardInventoryItem(item))
+                {
+                    // Never attempt to wear notecards from outfit folders.
+                    continue;
+                }
+
+                if (item is not InventoryWearable && item is not InventoryObject)
+                {
+                    continue;
+                }
+
+                if (item is InventoryObject attachment)
+                {
+                    var config = await TryResolveWearAttachmentIniConfigAsync(
+                            client,
+                            item,
+                            resolvedEntry.ParentFolderId,
+                            companionNotecardsByFolderAndName,
+                            token)
+                        .ConfigureAwait(false);
+                    if (config != null)
+                    {
+                        if (config.AttachPoint.HasValue)
+                        {
+                            attachment.AttachPoint = config.AttachPoint.Value;
+                        }
+
+                        if (config.HasTransformValues)
+                        {
+                            pendingAttachmentTransforms.Add((item, config));
+                        }
+                    }
+                }
+
+                wearTargets.Add(item);
+            }
+
+            var resolvedItems = wearTargets.OfType<InventoryItem>().ToList();
             var categoryResolutions = await BuildOutfitCategoryResolutionsAsync(client, resolvedItems, replaceItems, token).ConfigureAwait(false);
-            await client.Appearance.WearOutfitAsync(resolved, replaceItems).ConfigureAwait(false);
+            await client.Appearance.WearOutfitAsync(wearTargets, replaceItems).ConfigureAwait(false);
+
+            foreach (var pending in pendingAttachmentTransforms)
+            {
+                token.ThrowIfCancellationRequested();
+                await TryApplyWearAttachmentIniTransformAsync(client, pending.Item, pending.Config, token).ConfigureAwait(false);
+            }
 
             var overlapCount = categoryResolutions.Count(r => r.CurrentlyWornCount > 0);
             var mode = replaceItems ? "replace" : "add";
@@ -123,6 +187,246 @@ internal sealed partial class BotSession
                 categoryResolutions,
                 $"Requested {mode} outfit from folder {folderUuid}: sourceEntries={entries.Count}, wearableCandidates={resolvedItems.Count}, overlappingCategories={overlapCount}.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool IsNotecardInventoryItem(InventoryItem item)
+        => item.AssetType == AssetType.Notecard || item.InventoryType == InventoryType.Notecard;
+
+    private static string NormalizeCompanionIniLookupKey(string? itemName)
+        => (itemName ?? string.Empty).Trim().ToLowerInvariant();
+
+    private static string BuildCompanionIniName(string itemName)
+        => $"{itemName}.ini";
+
+    private async Task<WearAttachmentIniConfig?> TryResolveWearAttachmentIniConfigAsync(
+        GridClient client,
+        InventoryItem attachmentItem,
+        UUID parentFolderId,
+        IReadOnlyDictionary<(UUID ParentFolderId, string ItemName), InventoryItem> companionNotecardsByFolderAndName,
+        CancellationToken cancellationToken)
+    {
+        var itemName = attachmentItem.Name?.Trim();
+        if (string.IsNullOrWhiteSpace(itemName))
+        {
+            return null;
+        }
+
+        var iniName = NormalizeCompanionIniLookupKey(BuildCompanionIniName(itemName));
+        if (!companionNotecardsByFolderAndName.TryGetValue((parentFolderId, iniName), out var configNotecard))
+        {
+            return null;
+        }
+
+        try
+        {
+            var notecardAsset = await client.Assets.RequestInventoryAssetAsync(
+                configNotecard.AssetUUID,
+                configNotecard.UUID,
+                UUID.Zero,
+                client.Self.AgentID,
+                AssetType.Notecard,
+                true,
+                UUID.Random(),
+                cancellationToken).ConfigureAwait(false);
+
+            if (notecardAsset?.AssetData == null || notecardAsset.AssetData.Length == 0)
+            {
+                Console.WriteLine($"[appearance] companion ini notecard '{configNotecard.Name}' for '{attachmentItem.Name}' has no asset data.");
+                return null;
+            }
+
+            var notecard = new AssetNotecard(configNotecard.AssetUUID, notecardAsset.AssetData);
+            if (!notecard.Decode() || string.IsNullOrWhiteSpace(notecard.BodyText))
+            {
+                Console.WriteLine($"[appearance] companion ini notecard '{configNotecard.Name}' for '{attachmentItem.Name}' could not be decoded.");
+                return null;
+            }
+
+            if (!TryParseWearAttachmentIniConfig(notecard.BodyText, out var parsedConfig, out var parseWarnings))
+            {
+                Console.WriteLine($"[appearance] companion ini notecard '{configNotecard.Name}' for '{attachmentItem.Name}' has no usable settings.");
+                return null;
+            }
+
+            if (parseWarnings.Count > 0)
+            {
+                Console.WriteLine($"[appearance] companion ini warnings for '{attachmentItem.Name}': {string.Join(" | ", parseWarnings)}");
+            }
+
+            return parsedConfig;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[appearance] failed to load companion ini for '{attachmentItem.Name}': {ex.Message}");
+            return null;
+        }
+    }
+
+    private static bool TryParseWearAttachmentIniConfig(
+        string bodyText,
+        out WearAttachmentIniConfig config,
+        out List<string> warnings)
+    {
+        var attachPoint = default(AttachmentPoint?);
+        float? offsetX = null;
+        float? offsetY = null;
+        float? offsetZ = null;
+        float? rotateX = null;
+        float? rotateY = null;
+        float? rotateZ = null;
+        float? scaleX = null;
+        float? scaleY = null;
+        float? scaleZ = null;
+        warnings = new List<string>();
+
+        var lines = bodyText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal) || line.StartsWith("//", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            var key = line[..separator].Trim();
+            var value = line[(separator + 1)..].Trim();
+            if (key.Length == 0)
+            {
+                continue;
+            }
+
+            switch (key.ToLowerInvariant())
+            {
+                case "attach":
+                    if (Enum.TryParse<AttachmentPoint>(value, true, out var parsedPoint))
+                    {
+                        attachPoint = parsedPoint;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        warnings.Add($"attach='{value}' is not a valid AttachmentPoint.");
+                    }
+                    break;
+                case "offsetx":
+                    TryParseIniSingle("offsetX", value, ref offsetX, warnings);
+                    break;
+                case "offsety":
+                    TryParseIniSingle("offsetY", value, ref offsetY, warnings);
+                    break;
+                case "offsetz":
+                    TryParseIniSingle("offsetZ", value, ref offsetZ, warnings);
+                    break;
+                case "rotatex":
+                    TryParseIniSingle("rotateX", value, ref rotateX, warnings);
+                    break;
+                case "rotatey":
+                    TryParseIniSingle("rotateY", value, ref rotateY, warnings);
+                    break;
+                case "rotatez":
+                    TryParseIniSingle("rotateZ", value, ref rotateZ, warnings);
+                    break;
+                case "scalex":
+                    TryParseIniSingle("scaleX", value, ref scaleX, warnings);
+                    break;
+                case "scaley":
+                    TryParseIniSingle("scaleY", value, ref scaleY, warnings);
+                    break;
+                case "scalez":
+                    TryParseIniSingle("scaleZ", value, ref scaleZ, warnings);
+                    break;
+            }
+        }
+
+        config = new WearAttachmentIniConfig(attachPoint, offsetX, offsetY, offsetZ, rotateX, rotateY, rotateZ, scaleX, scaleY, scaleZ);
+        return config.AttachPoint.HasValue || config.HasTransformValues;
+    }
+
+    private static void TryParseIniSingle(string key, string rawValue, ref float? target, ICollection<string> warnings)
+    {
+        if (float.TryParse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+        {
+            target = parsed;
+            return;
+        }
+
+        warnings.Add($"{key}='{rawValue}' is not a valid number.");
+    }
+
+    private async Task TryApplyWearAttachmentIniTransformAsync(
+        GridClient client,
+        InventoryItem attachmentItem,
+        WearAttachmentIniConfig config,
+        CancellationToken cancellationToken)
+    {
+        if (!config.HasTransformValues)
+        {
+            return;
+        }
+
+        var sim = client.Network.CurrentSim;
+        if (sim == null)
+        {
+            return;
+        }
+
+        UUID objectId = UUID.Zero;
+        uint localId = 0;
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out objectId, out localId))
+            {
+                break;
+            }
+
+            await Task.Delay(350, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (localId == 0 || !sim.ObjectsPrimitives.TryGetValue(localId, out var prim))
+        {
+            Console.WriteLine($"[appearance] companion ini transform for '{attachmentItem.Name}' deferred: attached object not visible yet.");
+            return;
+        }
+
+        if (config.OffsetX.HasValue || config.OffsetY.HasValue || config.OffsetZ.HasValue)
+        {
+            var targetPosition = new Vector3(
+                config.OffsetX ?? prim.Position.X,
+                config.OffsetY ?? prim.Position.Y,
+                config.OffsetZ ?? prim.Position.Z);
+            targetPosition = ClampLocalPosition(targetPosition);
+            client.Objects.SetPosition(sim, localId, targetPosition, childOnly: false);
+        }
+
+        if (config.ScaleX.HasValue || config.ScaleY.HasValue || config.ScaleZ.HasValue)
+        {
+            var targetScale = new Vector3(
+                config.ScaleX ?? prim.Scale.X,
+                config.ScaleY ?? prim.Scale.Y,
+                config.ScaleZ ?? prim.Scale.Z);
+            targetScale = ClampScale(targetScale);
+            client.Objects.SetScale(sim, localId, targetScale, false, false);
+        }
+
+        if (config.RotateX.HasValue || config.RotateY.HasValue || config.RotateZ.HasValue)
+        {
+            prim.Rotation.GetEulerAngles(out var currentRoll, out var currentPitch, out var currentYaw);
+            var targetRoll = (config.RotateX ?? (currentRoll * Utils.RAD_TO_DEG)) * Utils.DEG_TO_RAD;
+            var targetPitch = (config.RotateY ?? (currentPitch * Utils.RAD_TO_DEG)) * Utils.DEG_TO_RAD;
+            var targetYaw = (config.RotateZ ?? (currentYaw * Utils.RAD_TO_DEG)) * Utils.DEG_TO_RAD;
+            var targetRotation = Quaternion.CreateFromEulers(targetRoll, targetPitch, targetYaw);
+            client.Objects.SetRotation(sim, localId, targetRotation, childOnly: false);
+        }
     }
 
     public async Task<OutfitSaveResult> AppearanceSaveCurrentOutfitAsync(
@@ -4293,6 +4597,24 @@ internal sealed record InventoryOfferHistoryResult(bool Ok, string Message, IRea
 internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType);
 
 internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint, string? ObjectId, uint? ObjectLocalId);
+
+internal sealed record WearAttachmentIniConfig(
+    AttachmentPoint? AttachPoint,
+    float? OffsetX,
+    float? OffsetY,
+    float? OffsetZ,
+    float? RotateX,
+    float? RotateY,
+    float? RotateZ,
+    float? ScaleX,
+    float? ScaleY,
+    float? ScaleZ)
+{
+    public bool HasTransformValues =>
+        OffsetX.HasValue || OffsetY.HasValue || OffsetZ.HasValue
+        || RotateX.HasValue || RotateY.HasValue || RotateZ.HasValue
+        || ScaleX.HasValue || ScaleY.HasValue || ScaleZ.HasValue;
+}
 
 internal sealed record OutfitCategoryResolutionInfo(
     string Category,
