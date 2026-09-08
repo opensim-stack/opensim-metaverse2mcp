@@ -50,7 +50,7 @@ internal sealed partial class BotSession
         return BuildCanonicalModelId(matched.Id, matched.Provider, effectiveProviderFilter);
     }
 
-    private static bool ModelIdMatchesRequested(OpencodeModelSummary model, string requestedModel, string? providerHint)
+    private static bool ModelIdMatchesRequested(HarnessModelSummary model, string requestedModel, string? providerHint)
     {
         var canonical = BuildCanonicalModelId(model.Id, model.Provider, providerHint);
         if (canonical.Equals(requestedModel, StringComparison.OrdinalIgnoreCase)
@@ -118,7 +118,7 @@ internal sealed partial class BotSession
         return startupModelId[..slash];
     }
 
-    private static OpencodeProviderSummary? FindProviderByNameOrId(IReadOnlyList<OpencodeProviderSummary> providers, string query)
+    private static HarnessProviderSummary? FindProviderByNameOrId(IReadOnlyList<HarnessProviderSummary> providers, string query)
     {
         var q = query.Trim();
         var exact = providers.FirstOrDefault(p =>

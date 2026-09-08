@@ -1315,7 +1315,7 @@ internal sealed partial class BotSession
         return await spawnerClient.PatchBotAsync(first, last, "restart", cancellationToken).ConfigureAwait(false);
     }
 
-    private void ApplyAuthenticatedProviderAsConversationDefault(string conversationKey, OpencodeProviderSummary provider)
+    private void ApplyAuthenticatedProviderAsConversationDefault(string conversationKey, HarnessProviderSummary provider)
     {
         if (string.IsNullOrWhiteSpace(conversationKey)
             || string.IsNullOrWhiteSpace(provider.Id))
@@ -1347,7 +1347,7 @@ internal sealed partial class BotSession
         var providers = await _opencodeChat.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
         var providerNameById = providers.ToDictionary(p => p.Id, p => p.Name, StringComparer.OrdinalIgnoreCase);
 
-        IEnumerable<KeyValuePair<string, IReadOnlyList<OpencodeProviderAuthMethod>>> selected = methodsByProvider;
+        IEnumerable<KeyValuePair<string, IReadOnlyList<HarnessProviderAuthMethod>>> selected = methodsByProvider;
         if (!string.IsNullOrWhiteSpace(providerFilter))
         {
             var resolved = await ResolveProviderForAuthAsync(providerFilter).ConfigureAwait(false);
@@ -1363,7 +1363,7 @@ internal sealed partial class BotSession
                 return;
             }
 
-            selected = new[] { new KeyValuePair<string, IReadOnlyList<OpencodeProviderAuthMethod>>(resolved.Id, resolvedMethods) };
+            selected = new[] { new KeyValuePair<string, IReadOnlyList<HarnessProviderAuthMethod>>(resolved.Id, resolvedMethods) };
         }
 
         var lines = new List<string> { "Provider auth methods:" };
@@ -1776,7 +1776,7 @@ internal sealed partial class BotSession
         return normalized;
     }
 
-    private async Task<OpencodeProviderSummary?> ResolveProviderForAuthAsync(string query)
+    private async Task<HarnessProviderSummary?> ResolveProviderForAuthAsync(string query)
     {
         var available = await _opencodeChat!.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
         return FindProviderByNameOrId(available, query);

@@ -4,7 +4,7 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
-    private bool TryOfferQuestionViaLslDialogBridge(GridClient client, string conversationKey, OpencodePendingQuestion question)
+    private bool TryOfferQuestionViaLslDialogBridge(GridClient client, string conversationKey, HarnessPendingQuestion question)
     {
         if (question.Options.Count == 0)
         {
@@ -54,7 +54,7 @@ internal sealed partial class BotSession
         return true;
     }
 
-    private bool TryOfferQuestionTextInputViaLslDialogBridge(GridClient client, string conversationKey, OpencodePendingQuestion question)
+    private bool TryOfferQuestionTextInputViaLslDialogBridge(GridClient client, string conversationKey, HarnessPendingQuestion question)
     {
         if (!_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
             || targetAgentId == UUID.Zero)
@@ -85,7 +85,7 @@ internal sealed partial class BotSession
         return true;
     }
 
-    private bool TryOfferPermissionViaLslDialogBridge(GridClient client, string conversationKey, OpencodePendingPermission permission)
+    private bool TryOfferPermissionViaLslDialogBridge(GridClient client, string conversationKey, HarnessPendingPermission permission)
     {
         var permissionId = permission.Id?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(permissionId))
@@ -542,7 +542,7 @@ internal sealed partial class BotSession
         Console.WriteLine($"[dialog-bridge] sent ping: nonce={nonce} channel={LslDialogBridgeRequestChannel}");
     }
 
-    private static string BuildPermissionDialogHeader(OpencodePendingPermission permission)
+    private static string BuildPermissionDialogHeader(HarnessPendingPermission permission)
     {
         var title = permission.Title?.Trim() ?? string.Empty;
         var hasHumanTitle = !string.IsNullOrWhiteSpace(title)
@@ -551,7 +551,7 @@ internal sealed partial class BotSession
         return hasHumanTitle ? title : "Approval required";
     }
 
-    private static string BuildPermissionDialogPrompt(OpencodePendingPermission permission)
+    private static string BuildPermissionDialogPrompt(HarnessPendingPermission permission)
     {
         var primary = GetPermissionPrimaryText(permission, out _);
         if (!string.IsNullOrWhiteSpace(primary))
@@ -562,7 +562,7 @@ internal sealed partial class BotSession
         return "Choose whether to allow this action.";
     }
 
-    private static string BuildCompactQuestionDialogPrompt(OpencodePendingQuestion question)
+    private static string BuildCompactQuestionDialogPrompt(HarnessPendingQuestion question)
     {
         var prompt = question.Question?.Trim();
         if (string.IsNullOrWhiteSpace(prompt))
@@ -651,7 +651,7 @@ internal sealed partial class BotSession
         return candidate[..Math.Max(1, maxLength - 3)] + "...";
     }
 
-    private static string BuildCompactPermissionDialogPrompt(OpencodePendingPermission permission)
+    private static string BuildCompactPermissionDialogPrompt(HarnessPendingPermission permission)
     {
         var description = permission.Description?.Trim();
         if (string.IsNullOrWhiteSpace(description))
@@ -777,7 +777,7 @@ internal sealed partial class BotSession
     private static string DecodeDialogToken(string value)
         => Uri.UnescapeDataString(value ?? string.Empty);
 
-    private static bool TryResolveQuestionAnswer(OpencodePendingQuestion question, string text, out string answer)
+    private static bool TryResolveQuestionAnswer(HarnessPendingQuestion question, string text, out string answer)
     {
         answer = string.Empty;
         if (string.IsNullOrWhiteSpace(text))

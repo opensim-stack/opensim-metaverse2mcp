@@ -30,7 +30,7 @@ internal sealed partial class BotSession : IDisposable
         UUID SpeakerAgentId,
         string SpeakerName);
 
-    private async Task NotifyUserOfRetryLimitAsync(OpencodeSessionStatusEvent statusEvent)
+    private async Task NotifyUserOfRetryLimitAsync(HarnessSessionStatusEvent statusEvent)
     {
         if (!statusEvent.NextRetryAt.HasValue)
         {
@@ -122,8 +122,8 @@ internal sealed partial class BotSession : IDisposable
         string RequestId,
         UUID AgentId,
         string From,
-        OpencodePendingPermission? Permission,
-        OpencodePendingQuestion? Question,
+        HarnessPendingPermission? Permission,
+        HarnessPendingQuestion? Question,
         CancellationTokenSource TimeoutCts);
 
     private sealed record PendingTextPromptReply(
@@ -132,21 +132,21 @@ internal sealed partial class BotSession : IDisposable
         string RequestId,
         UUID AgentId,
         string From,
-        OpencodePendingPermission? Permission,
-        OpencodePendingQuestion? Question,
+        HarnessPendingPermission? Permission,
+        HarnessPendingQuestion? Question,
         DateTimeOffset ActivatedAt);
 
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
     private readonly SemaphoreSlim _globalConversationGate = new(1, 1);
-    private readonly IOpencodeChatClient? _opencodeChat;
+    private readonly IHarnessClient? _opencodeChat;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentImEvents = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<UUID, DateTimeOffset> _primPropertiesRefreshedAtByObjectId = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _conversationLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConversationConfig> _conversationConfigs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConversationRoute> _conversationRouteByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<UUID, string> _conversationKeyBySpeakerAgent = new();
-    private readonly ConcurrentDictionary<string, OpencodeUsageSummary> _latestUsageByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, HarnessUsageSummary> _latestUsageByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingPermissionByConversation = new(StringComparer.Ordinal);
@@ -2879,7 +2879,7 @@ internal sealed partial class BotSession : IDisposable
         return true;
     }
 
-    private void OnOpencodeSessionStatusChanged(OpencodeSessionStatusEvent statusEvent)
+    private void OnOpencodeSessionStatusChanged(HarnessSessionStatusEvent statusEvent)
     {
         if (statusEvent == null || string.IsNullOrWhiteSpace(statusEvent.SessionId))
         {
@@ -2908,7 +2908,7 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private void OnOpencodeMessagePartUpdated(OpencodeMessagePartUpdatedEvent partEvent)
+    private void OnOpencodeMessagePartUpdated(HarnessMessagePartUpdatedEvent partEvent)
     {
         if (partEvent == null || string.IsNullOrWhiteSpace(partEvent.SessionId))
         {
@@ -3193,7 +3193,7 @@ internal sealed partial class BotSession : IDisposable
             || message.Contains("timeout", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string BuildFriendlyPermissionListLine(OpencodePendingPermission permission)
+    private static string BuildFriendlyPermissionListLine(HarnessPendingPermission permission)
     {
         var requestId = permission.Id?.Trim() ?? string.Empty;
         var summary = BuildCompactPermissionDialogPrompt(permission);
@@ -3210,7 +3210,7 @@ internal sealed partial class BotSession : IDisposable
         return $"[{requestId}] {summary}";
     }
 
-    private static string GetPermissionPrimaryText(OpencodePendingPermission permission, out bool titleLooksLikeId)
+    private static string GetPermissionPrimaryText(HarnessPendingPermission permission, out bool titleLooksLikeId)
     {
         var requestId = permission.Id?.Trim() ?? string.Empty;
         var title = permission.Title?.Trim() ?? string.Empty;
@@ -3237,20 +3237,20 @@ internal sealed partial class BotSession : IDisposable
         => !string.IsNullOrWhiteSpace(permissionId)
             && permissionId.Trim().StartsWith("per", StringComparison.OrdinalIgnoreCase);
 
-    private async Task<IReadOnlyList<OpencodePendingPermission>> GetPendingPermissionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<HarnessPendingPermission>> GetPendingPermissionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
     {
         if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
         {
-            return Array.Empty<OpencodePendingPermission>();
+            return Array.Empty<HarnessPendingPermission>();
         }
 
         var sessionFamily = await GetSessionFamilyIdsAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (sessionFamily.Count == 0)
         {
-            return Array.Empty<OpencodePendingPermission>();
+            return Array.Empty<HarnessPendingPermission>();
         }
 
-        var fromEventFamily = new List<OpencodePendingPermission>();
+        var fromEventFamily = new List<HarnessPendingPermission>();
         foreach (var familySessionId in sessionFamily)
         {
             if (_opencodeChat.TryGetPendingPermissionsFromEvents(familySessionId, out var fromEvents)
@@ -3269,7 +3269,7 @@ internal sealed partial class BotSession : IDisposable
                 .ToList();
         }
 
-        var fromApiFamily = new List<OpencodePendingPermission>();
+        var fromApiFamily = new List<HarnessPendingPermission>();
         foreach (var familySessionId in sessionFamily)
         {
             var fromApi = await _opencodeChat.ListPendingPermissionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
@@ -3281,7 +3281,7 @@ internal sealed partial class BotSession : IDisposable
 
         if (fromApiFamily.Count == 0)
         {
-            return Array.Empty<OpencodePendingPermission>();
+            return Array.Empty<HarnessPendingPermission>();
         }
 
         return fromApiFamily
@@ -3291,20 +3291,20 @@ internal sealed partial class BotSession : IDisposable
             .ToList();
     }
 
-    private async Task<IReadOnlyList<OpencodePendingQuestion>> GetPendingQuestionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<HarnessPendingQuestion>> GetPendingQuestionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
     {
         if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
         {
-            return Array.Empty<OpencodePendingQuestion>();
+            return Array.Empty<HarnessPendingQuestion>();
         }
 
         var sessionFamily = await GetSessionFamilyIdsAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (sessionFamily.Count == 0)
         {
-            return Array.Empty<OpencodePendingQuestion>();
+            return Array.Empty<HarnessPendingQuestion>();
         }
 
-        var fromEventFamily = new List<OpencodePendingQuestion>();
+        var fromEventFamily = new List<HarnessPendingQuestion>();
         foreach (var familySessionId in sessionFamily)
         {
             if (_opencodeChat.TryGetPendingQuestionsFromEvents(familySessionId, out var fromEvents)
@@ -3323,7 +3323,7 @@ internal sealed partial class BotSession : IDisposable
                 .ToList();
         }
 
-        var fromApiFamily = new List<OpencodePendingQuestion>();
+        var fromApiFamily = new List<HarnessPendingQuestion>();
         foreach (var familySessionId in sessionFamily)
         {
             var fromApi = await _opencodeChat.ListPendingQuestionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
@@ -3335,7 +3335,7 @@ internal sealed partial class BotSession : IDisposable
 
         if (fromApiFamily.Count == 0)
         {
-            return Array.Empty<OpencodePendingQuestion>();
+            return Array.Empty<HarnessPendingQuestion>();
         }
 
         return fromApiFamily
@@ -3363,7 +3363,7 @@ internal sealed partial class BotSession : IDisposable
         while (queue.Count > 0)
         {
             var current = queue.Dequeue();
-            IReadOnlyList<OpencodeSessionSummary> children;
+            IReadOnlyList<HarnessSessionSummary> children;
             try
             {
                 children = await _opencodeChat.GetSessionChildrenAsync(current, cancellationToken).ConfigureAwait(false);
@@ -3412,7 +3412,7 @@ internal sealed partial class BotSession : IDisposable
                 return;
             }
 
-            IReadOnlyList<OpencodePendingPermission> pendingPermissions;
+            IReadOnlyList<HarnessPendingPermission> pendingPermissions;
             try
             {
                 pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
@@ -3436,7 +3436,7 @@ internal sealed partial class BotSession : IDisposable
                 }
             }
 
-            IReadOnlyList<OpencodePendingQuestion> pending;
+            IReadOnlyList<HarnessPendingQuestion> pending;
             try
             {
                 pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
@@ -3494,7 +3494,7 @@ internal sealed partial class BotSession : IDisposable
                 continue;
             }
 
-            IReadOnlyList<OpencodePendingPermission> pendingPermissions;
+            IReadOnlyList<HarnessPendingPermission> pendingPermissions;
             try
             {
                 pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
@@ -3518,7 +3518,7 @@ internal sealed partial class BotSession : IDisposable
                 }
             }
 
-            IReadOnlyList<OpencodePendingQuestion> pendingQuestions;
+            IReadOnlyList<HarnessPendingQuestion> pendingQuestions;
             try
             {
                 pendingQuestions = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
@@ -3560,7 +3560,7 @@ internal sealed partial class BotSession : IDisposable
         string from,
         string conversationKey,
         string sessionId,
-        OpencodePendingPermission permission)
+        HarnessPendingPermission permission)
     {
         if (string.IsNullOrWhiteSpace(permission.Id))
         {
@@ -3593,7 +3593,7 @@ internal sealed partial class BotSession : IDisposable
         string from,
         string conversationKey,
         string sessionId,
-        OpencodePendingQuestion question)
+        HarnessPendingQuestion question)
     {
         if (string.IsNullOrWhiteSpace(question.Id))
         {
@@ -3628,8 +3628,8 @@ internal sealed partial class BotSession : IDisposable
         PendingPromptKind kind,
         string sessionId,
         string requestId,
-        OpencodePendingPermission? permission = null,
-        OpencodePendingQuestion? question = null)
+        HarnessPendingPermission? permission = null,
+        HarnessPendingQuestion? question = null)
     {
         ClearPendingPromptWait(conversationKey);
         _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
@@ -3695,8 +3695,8 @@ internal sealed partial class BotSession : IDisposable
         PendingPromptKind kind,
         string sessionId,
         string requestId,
-        OpencodePendingPermission? permission = null,
-        OpencodePendingQuestion? question = null)
+        HarnessPendingPermission? permission = null,
+        HarnessPendingQuestion? question = null)
     {
         ClearPendingPromptWait(conversationKey);
         _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
@@ -3723,8 +3723,8 @@ internal sealed partial class BotSession : IDisposable
         _pendingTextPromptReplyByConversation[conversationKey] = state;
 
         var promptText = kind == PendingPromptKind.Permission
-            ? BuildTextFallbackPermissionPrompt(permission ?? new OpencodePendingPermission(requestId, sessionId, string.Empty, null))
-            : BuildTextFallbackQuestionPrompt(question ?? new OpencodePendingQuestion(requestId, sessionId, "Question", "Please answer.", Array.Empty<string>(), null, true));
+            ? BuildTextFallbackPermissionPrompt(permission ?? new HarnessPendingPermission(requestId, sessionId, string.Empty, null))
+            : BuildTextFallbackQuestionPrompt(question ?? new HarnessPendingQuestion(requestId, sessionId, "Question", "Please answer.", Array.Empty<string>(), null, true));
         SendImText(client, agentId, from, promptText);
     }
 
@@ -3812,8 +3812,8 @@ internal sealed partial class BotSession : IDisposable
         PendingPromptKind kind,
         string sessionId,
         string requestId,
-        OpencodePendingPermission? permission,
-        OpencodePendingQuestion? question,
+        HarnessPendingPermission? permission,
+        HarnessPendingQuestion? question,
         string conversationKey)
     {
         if (_opencodeChat == null || string.IsNullOrWhiteSpace(requestId))
@@ -3860,7 +3860,7 @@ internal sealed partial class BotSession : IDisposable
         return true;
     }
 
-    private static string BuildTextFallbackPermissionPrompt(OpencodePendingPermission permission)
+    private static string BuildTextFallbackPermissionPrompt(HarnessPendingPermission permission)
     {
         var summary = BuildCompactPermissionDialogPrompt(permission);
         if (string.IsNullOrWhiteSpace(summary))
@@ -3878,7 +3878,7 @@ internal sealed partial class BotSession : IDisposable
         return string.Join("\n", lines);
     }
 
-    private static string BuildTextFallbackQuestionPrompt(OpencodePendingQuestion question)
+    private static string BuildTextFallbackQuestionPrompt(HarnessPendingQuestion question)
     {
         var lines = new List<string>
         {

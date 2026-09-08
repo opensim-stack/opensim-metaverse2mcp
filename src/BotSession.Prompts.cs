@@ -5,7 +5,7 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
-    private OpencodeSendOptions? BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
+    private HarnessSendOptions? BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
     {
         _conversationConfigs.TryGetValue(conversationKey, out var cfg);
         cfg ??= GetPersistedDefaultConversationConfigSnapshot();
@@ -21,7 +21,7 @@ internal sealed partial class BotSession
             return null;
         }
 
-        return new OpencodeSendOptions(modelId, thinkingLevel, systemPrompt);
+        return new HarnessSendOptions(modelId, thinkingLevel, systemPrompt);
     }
 
     private string BuildPromptStatusText()

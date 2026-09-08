@@ -7,69 +7,10 @@ using System.Text.Json.Serialization;
 
 namespace Opensim.Metaverse2Mcp;
 
-internal interface IOpencodeChatClient
+internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 {
-    Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken);
-    void ResetConversation(string conversationKey);
-    void SetConversationSessionId(string conversationKey, string? sessionId);
-    string? GetConversationSessionId(string conversationKey);
-    Task<IReadOnlyList<OpencodeProviderSummary>> ListProvidersAsync(CancellationToken cancellationToken);
-    Task<IReadOnlyList<OpencodeProviderSummary>> ListAvailableProvidersAsync(CancellationToken cancellationToken);
-    Task<IReadOnlyDictionary<string, IReadOnlyList<OpencodeProviderAuthMethod>>> ListProviderAuthMethodsAsync(CancellationToken cancellationToken);
-    Task SetProviderApiKeyAsync(string providerId, string apiKey, CancellationToken cancellationToken);
-    Task<OpencodeOAuthStartResult> StartProviderOAuthAsync(string providerId, int methodIndex, IReadOnlyDictionary<string, string>? inputs, CancellationToken cancellationToken);
-    Task<OpencodeOAuthCompleteResult> CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken);
-    Task<IReadOnlyList<OpencodeModelSummary>> ListModelsAsync(string? providerId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<OpencodeSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken);
-    Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, string? configuredModelId, CancellationToken cancellationToken);
-    Task<IReadOnlyDictionary<string, string>> GetSessionStatusAsync(CancellationToken cancellationToken);
-    Task<string> GetSessionDetailsJsonAsync(string sessionId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<OpencodeSessionSummary>> GetSessionChildrenAsync(string sessionId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<OpencodePendingPermission>> ListPendingPermissionsAsync(string sessionId, CancellationToken cancellationToken);
-    bool TryGetPendingPermissionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingPermission> pendingPermissions);
-    Task<bool> RespondToPermissionAsync(string sessionId, string permissionId, string response, bool remember, CancellationToken cancellationToken);
-    Task<IReadOnlyList<OpencodePendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken);
-    bool TryGetPendingQuestionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingQuestion> pendingQuestions);
-    Task<bool> ReplyToQuestionAsync(string sessionId, string questionId, IReadOnlyList<string> answers, CancellationToken cancellationToken);
-    Task<bool> RejectQuestionAsync(string sessionId, string questionId, CancellationToken cancellationToken);
-    Task<OpencodeSessionSummary> UpdateSessionTitleAsync(string sessionId, string title, CancellationToken cancellationToken);
-    Task<bool> DeleteSessionAsync(string sessionId, CancellationToken cancellationToken);
-    Task<bool> SummarizeSessionAsync(string sessionId, string? providerId, string? modelId, CancellationToken cancellationToken);
-    Task<bool> AbortSessionAsync(string sessionId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<OpencodeProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken);
-    Task<OpencodeProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken);
-    event Action<OpencodeSessionStatusEvent>? SessionStatusChanged;
-    event Action<OpencodeMessagePartUpdatedEvent>? MessagePartUpdated;
-}
-
-internal sealed record OpencodeChatReply(
-    string Text,
-    bool IsConfirmationPrompt,
-    IReadOnlyList<OpencodePendingPermission>? PendingPermissions = null,
-    IReadOnlyList<OpencodePendingQuestion>? PendingQuestions = null,
-    OpencodeUsageSummary? Usage = null);
-internal sealed record OpencodeSendOptions(string? ModelId, string? ThinkingLevel, string? SystemPrompt);
-internal sealed record OpencodeProviderSummary(string Id, string Name, bool? Connected);
-internal sealed record OpencodeModelSummary(string Id, string Name, string? Provider);
-internal sealed record OpencodeSessionSummary(string Id, string Title, string? Status, string? ProjectId);
-internal sealed record OpencodeProjectSummary(string Id, string Name, string? Path, bool? Current);
-internal sealed record OpencodePendingPermission(string Id, string SessionId, string Title, string? Description);
-internal sealed record OpencodePendingQuestion(string Id, string SessionId, string Header, string Question, IReadOnlyList<string> Options, bool? AllowsMultiple, bool? AllowsCustom);
-internal sealed record OpencodeProviderAuthMethod(int MethodIndex, string Type, string Label);
-internal sealed record OpencodeOAuthStartResult(string Url, string? Method, string? Instructions);
-internal sealed record OpencodeOAuthCompleteResult(bool CallbackAccepted, bool ProviderConfigured, string Message);
-internal sealed record OpencodeSessionStatusEvent(
-    string SessionId,
-    string StatusType,
-    string? StatusMessage = null,
-    DateTimeOffset? NextRetryAt = null,
-    int? Attempt = null);
-internal sealed record OpencodeMessagePartUpdatedEvent(string SessionId, string PartType);
-
-internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
-{
-    public event Action<OpencodeSessionStatusEvent>? SessionStatusChanged;
-    public event Action<OpencodeMessagePartUpdatedEvent>? MessagePartUpdated;
+    public event Action<HarnessSessionStatusEvent>? SessionStatusChanged;
+    public event Action<HarnessMessagePartUpdatedEvent>? MessagePartUpdated;
 
     private readonly HttpClient _http;
     private readonly HttpClient? _eventHttp;
@@ -77,12 +18,12 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
     private readonly Task? _eventLoopTask;
     private readonly ConcurrentDictionary<string, string> _sessionIds = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OpencodeOAuthPendingState> _oauthPendingStates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _pendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _pendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingPermission>> _eventPendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, IReadOnlyList<OpencodePendingQuestion>> _eventPendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingPermission>> _pendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingQuestion>> _pendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingPermission>> _eventPendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingQuestion>> _eventPendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _requestedModelBySession = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, OpencodeSessionStatusEvent> _lastSessionStatusBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, HarnessSessionStatusEvent> _lastSessionStatusBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _opencodeEventDebug;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -379,7 +320,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return true;
     }
 
-    private static bool TryParseSessionStatusEvent(JsonElement root, string eventType, string? hintedSessionId, out OpencodeSessionStatusEvent? statusEvent)
+    private static bool TryParseSessionStatusEvent(JsonElement root, string eventType, string? hintedSessionId, out HarnessSessionStatusEvent? statusEvent)
     {
         statusEvent = null;
         if (!eventType.Equals("session.status", StringComparison.OrdinalIgnoreCase)
@@ -440,7 +381,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             attempt = TryExtractRetryAttempt(source) ?? TryExtractRetryAttempt(root);
         }
 
-        statusEvent = new OpencodeSessionStatusEvent(sessionId, statusType, statusMessage, nextRetryAt, attempt);
+        statusEvent = new HarnessSessionStatusEvent(sessionId, statusType, statusMessage, nextRetryAt, attempt);
         return true;
     }
 
@@ -555,7 +496,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return null;
     }
 
-    private static bool TryParseMessagePartUpdatedEvent(JsonElement root, string eventType, string? hintedSessionId, out OpencodeMessagePartUpdatedEvent? partUpdatedEvent)
+    private static bool TryParseMessagePartUpdatedEvent(JsonElement root, string eventType, string? hintedSessionId, out HarnessMessagePartUpdatedEvent? partUpdatedEvent)
     {
         partUpdatedEvent = null;
         if (!eventType.Equals("message.part.updated", StringComparison.OrdinalIgnoreCase)
@@ -602,7 +543,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             return false;
         }
 
-        partUpdatedEvent = new OpencodeMessagePartUpdatedEvent(sessionId, partType);
+        partUpdatedEvent = new HarnessMessagePartUpdatedEvent(sessionId, partType);
         return true;
     }
 
@@ -611,7 +552,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         var normalizedType = (eventType ?? string.Empty).Trim().ToLowerInvariant();
         var derivedPermissions = ParsePendingPermissions(root)
             .Select(p => string.IsNullOrWhiteSpace(p.SessionId) && !string.IsNullOrWhiteSpace(hintedSessionId)
-                ? new OpencodePendingPermission(p.Id, hintedSessionId!, p.Title, p.Description)
+                ? new HarnessPendingPermission(p.Id, hintedSessionId!, p.Title, p.Description)
                 : p)
             .Where(p => !string.IsNullOrWhiteSpace(p.SessionId))
             .ToList();
@@ -635,7 +576,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         var derivedQuestions = ParsePendingQuestions(root)
             .Select(q => string.IsNullOrWhiteSpace(q.SessionId) && !string.IsNullOrWhiteSpace(hintedSessionId)
-                ? new OpencodePendingQuestion(q.Id, hintedSessionId!, q.Header, q.Question, q.Options, q.AllowsMultiple, q.AllowsCustom)
+                ? new HarnessPendingQuestion(q.Id, hintedSessionId!, q.Header, q.Question, q.Options, q.AllowsMultiple, q.AllowsCustom)
                 : q)
             .Where(q => !string.IsNullOrWhiteSpace(q.SessionId))
             .ToList();
@@ -767,7 +708,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    public async Task<OpencodeChatReply> SendMessageAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
+    public async Task<HarnessChatReply> SendMessageAsync(string conversationKey, string title, string message, HarnessSendOptions? options, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(conversationKey))
         {
@@ -779,7 +720,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return await SendMessageCoreAsync(conversationKey, title, message, options, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<OpencodeChatReply> SendMessageCoreAsync(string conversationKey, string title, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
+    private async Task<HarnessChatReply> SendMessageCoreAsync(string conversationKey, string title, string message, HarnessSendOptions? options, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(conversationKey))
         {
@@ -858,7 +799,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         _sessionIds[conversationKey] = sessionId.Trim();
     }
 
-    public async Task<IReadOnlyList<OpencodeProviderSummary>> ListProvidersAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessProviderSummary>> ListProvidersAsync(CancellationToken cancellationToken)
     {
         var available = await ListAvailableProvidersAsync(cancellationToken).ConfigureAwait(false);
         var connected = available
@@ -875,23 +816,23 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         var all = response?.Providers ?? new List<OpencodeProviderEntry>();
         return all
             .Where(p => !string.IsNullOrWhiteSpace(p.Id))
-            .Select(p => new OpencodeProviderSummary(p.Id!, string.IsNullOrWhiteSpace(p.Name) ? p.Id! : p.Name!, true))
+            .Select(p => new HarnessProviderSummary(p.Id!, string.IsNullOrWhiteSpace(p.Name) ? p.Id! : p.Name!, true))
             .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    public async Task<IReadOnlyList<OpencodeProviderSummary>> ListAvailableProvidersAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessProviderSummary>> ListAvailableProvidersAsync(CancellationToken cancellationToken)
     {
         var response = await GetJsonAsync<OpencodeAllProvidersResponse>("/provider", cancellationToken).ConfigureAwait(false);
         var all = response?.All ?? new List<OpencodeProviderEntry>();
         return all
             .Where(p => !string.IsNullOrWhiteSpace(p.Id))
-            .Select(p => new OpencodeProviderSummary(p.Id!, string.IsNullOrWhiteSpace(p.Name) ? p.Id! : p.Name!, p.Connected))
+            .Select(p => new HarnessProviderSummary(p.Id!, string.IsNullOrWhiteSpace(p.Name) ? p.Id! : p.Name!, p.Connected))
             .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    public async Task<IReadOnlyDictionary<string, IReadOnlyList<OpencodeProviderAuthMethod>>> ListProviderAuthMethodsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<HarnessProviderAuthMethod>>> ListProviderAuthMethodsAsync(CancellationToken cancellationToken)
     {
         using var response = await _http.GetAsync("/provider/auth", cancellationToken).ConfigureAwait(false);
         var raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -900,7 +841,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             throw new OpencodeHttpException(response.StatusCode, "/provider/auth", raw);
         }
 
-        var result = new Dictionary<string, IReadOnlyList<OpencodeProviderAuthMethod>>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, IReadOnlyList<HarnessProviderAuthMethod>>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(raw))
         {
             return result;
@@ -919,7 +860,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 continue;
             }
 
-            var methods = new List<OpencodeProviderAuthMethod>();
+            var methods = new List<HarnessProviderAuthMethod>();
             var index = 0;
             foreach (var entry in providerProperty.Value.EnumerateArray())
             {
@@ -929,7 +870,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 var label = TryGetStringProperty(entry, "label", out var parsedLabel) && !string.IsNullOrWhiteSpace(parsedLabel)
                     ? parsedLabel!
                     : type;
-                methods.Add(new OpencodeProviderAuthMethod(index, type, label));
+                methods.Add(new HarnessProviderAuthMethod(index, type, label));
                 index++;
             }
 
@@ -960,7 +901,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         _ = await PutJsonRawAsync($"/auth/{Uri.EscapeDataString(providerId)}", body, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<OpencodeOAuthStartResult> StartProviderOAuthAsync(string providerId, int methodIndex, IReadOnlyDictionary<string, string>? inputs, CancellationToken cancellationToken)
+    public async Task<HarnessOAuthStartResult> StartProviderOAuthAsync(string providerId, int methodIndex, IReadOnlyDictionary<string, string>? inputs, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(providerId))
         {
@@ -992,10 +933,10 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         _oauthPendingStates[BuildOAuthStateKey(providerId, methodIndex)] = ParseOAuthPendingState(providerId, methodIndex, raw, parsed);
 
-        return new OpencodeOAuthStartResult(parsed.Url!, parsed.Method, parsed.Instructions);
+        return new HarnessOAuthStartResult(parsed.Url!, parsed.Method, parsed.Instructions);
     }
 
-    public async Task<OpencodeOAuthCompleteResult> CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken)
+    public async Task<HarnessOAuthCompleteResult> CompleteProviderOAuthAsync(string providerId, int methodIndex, string? code, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(providerId))
         {
@@ -1041,14 +982,14 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 $"OAuth callback was accepted, but provider '{providerId}' is still not configured. " +
                 "If this is a device flow, finish/confirm approval in your browser and retry *auth ... oauth-complete.";
             Console.WriteLine($"[opencode] oauth pending for provider {providerId}: callback accepted but provider not configured yet.");
-            return new OpencodeOAuthCompleteResult(true, false, pendingMessage);
+            return new HarnessOAuthCompleteResult(true, false, pendingMessage);
         }
 
         _oauthPendingStates.TryRemove(stateKey, out _);
-        return new OpencodeOAuthCompleteResult(true, true, $"OAuth completed for provider '{providerId}'.");
+        return new HarnessOAuthCompleteResult(true, true, $"OAuth completed for provider '{providerId}'.");
     }
 
-    public async Task<IReadOnlyList<OpencodeModelSummary>> ListModelsAsync(string? providerId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessModelSummary>> ListModelsAsync(string? providerId, CancellationToken cancellationToken)
     {
         var normalizedProviderId = NormalizeProviderQuery(providerId);
 
@@ -1064,7 +1005,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
 
         var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var models = new List<OpencodeModelSummary>();
+        var models = new List<HarnessModelSummary>();
         foreach (var provider in providers)
         {
             var providerKey = provider.Id?.Trim();
@@ -1089,7 +1030,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 }
 
                 var name = string.IsNullOrWhiteSpace(model.Name) ? canonicalId : model.Name.Trim();
-                models.Add(new OpencodeModelSummary(canonicalId, name, providerKey));
+                models.Add(new HarnessModelSummary(canonicalId, name, providerKey));
             }
 
             foreach (var defaultModel in EnumerateProviderDefaultModelIds(provider))
@@ -1103,7 +1044,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     continue;
                 }
 
-                models.Add(new OpencodeModelSummary(canonicalId, canonicalId, providerKey));
+                models.Add(new HarnessModelSummary(canonicalId, canonicalId, providerKey));
             }
         }
 
@@ -1112,13 +1053,13 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             .ToList();
     }
 
-    public async Task<IReadOnlyList<OpencodeSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken)
     {
         var root = await GetJsonAsync<JsonElement>("/session", cancellationToken).ConfigureAwait(false);
         return ParseSessionList(root);
     }
 
-    public async Task<OpencodeSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, string? configuredModelId, CancellationToken cancellationToken)
+    public async Task<HarnessSessionSummary> CreateSessionAsync(string? title, string? parentSessionId, string? configuredModelId, CancellationToken cancellationToken)
     {
         var body = BuildSessionCreateBody(title, configuredModelId, parentSessionId);
         Console.WriteLine($"[opencode] POST /session payload: {JsonSerializer.Serialize(body, _jsonOptions)}");
@@ -1182,7 +1123,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return JsonSerializer.Serialize(details, new JsonSerializerOptions { WriteIndented = true });
     }
 
-    public async Task<IReadOnlyList<OpencodePendingPermission>> ListPendingPermissionsAsync(string sessionId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessPendingPermission>> ListPendingPermissionsAsync(string sessionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -1205,12 +1146,12 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         _pendingPermissionsBySession.TryRemove(normalizedSessionId, out _);
         _eventPendingPermissionsBySession.TryRemove(normalizedSessionId, out _);
 
-        return Array.Empty<OpencodePendingPermission>();
+        return Array.Empty<HarnessPendingPermission>();
     }
 
-    public bool TryGetPendingPermissionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingPermission> pendingPermissions)
+    public bool TryGetPendingPermissionsFromEvents(string sessionId, out IReadOnlyList<HarnessPendingPermission> pendingPermissions)
     {
-        pendingPermissions = Array.Empty<OpencodePendingPermission>();
+        pendingPermissions = Array.Empty<HarnessPendingPermission>();
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             return false;
@@ -1289,7 +1230,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         throw lastClientError ?? new InvalidOperationException("Permission response request failed.");
     }
 
-    public async Task<IReadOnlyList<OpencodePendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessPendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -1312,12 +1253,12 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             return cached;
         }
 
-        return Array.Empty<OpencodePendingQuestion>();
+        return Array.Empty<HarnessPendingQuestion>();
     }
 
-    public bool TryGetPendingQuestionsFromEvents(string sessionId, out IReadOnlyList<OpencodePendingQuestion> pendingQuestions)
+    public bool TryGetPendingQuestionsFromEvents(string sessionId, out IReadOnlyList<HarnessPendingQuestion> pendingQuestions)
     {
-        pendingQuestions = Array.Empty<OpencodePendingQuestion>();
+        pendingQuestions = Array.Empty<HarnessPendingQuestion>();
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             return false;
@@ -1438,7 +1379,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return ok;
     }
 
-    public async Task<IReadOnlyList<OpencodeSessionSummary>> GetSessionChildrenAsync(string sessionId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessSessionSummary>> GetSessionChildrenAsync(string sessionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -1450,7 +1391,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return ParseSessionList(root);
     }
 
-    public async Task<OpencodeSessionSummary> UpdateSessionTitleAsync(string sessionId, string title, CancellationToken cancellationToken)
+    public async Task<HarnessSessionSummary> UpdateSessionTitleAsync(string sessionId, string title, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -1529,13 +1470,13 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return TryInterpretBooleanResponse(raw, true);
     }
 
-    public async Task<IReadOnlyList<OpencodeProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HarnessProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken)
     {
         var root = await GetJsonAsync<JsonElement>("/project", cancellationToken).ConfigureAwait(false);
         return ParseProjectList(root);
     }
 
-    public async Task<OpencodeProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken)
+    public async Task<HarnessProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken)
     {
         var root = await GetJsonAsync<JsonElement>("/project/current", cancellationToken).ConfigureAwait(false);
         return TryBuildProjectSummary(root, null, out var project) ? project : null;
@@ -1560,9 +1501,9 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    private static IReadOnlyList<OpencodeSessionSummary> ParseSessionList(JsonElement root)
+    private static IReadOnlyList<HarnessSessionSummary> ParseSessionList(JsonElement root)
     {
-        var list = new List<OpencodeSessionSummary>();
+        var list = new List<HarnessSessionSummary>();
         if (root.ValueKind == JsonValueKind.Undefined || root.ValueKind == JsonValueKind.Null)
         {
             return list;
@@ -1608,7 +1549,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             .ToList();
     }
 
-    private static bool TryBuildSessionSummary(JsonElement element, string? fallbackId, out OpencodeSessionSummary? summary)
+    private static bool TryBuildSessionSummary(JsonElement element, string? fallbackId, out HarnessSessionSummary? summary)
     {
         summary = null;
         if (element.ValueKind == JsonValueKind.Undefined || element.ValueKind == JsonValueKind.Null)
@@ -1624,7 +1565,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 return false;
             }
 
-            summary = new OpencodeSessionSummary(rawId.Trim(), rawId.Trim(), null, null);
+            summary = new HarnessSessionSummary(rawId.Trim(), rawId.Trim(), null, null);
             return true;
         }
 
@@ -1651,13 +1592,13 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             ? parsedProjectId!.Trim()
             : null;
 
-        summary = new OpencodeSessionSummary(id, title, status, projectId);
+        summary = new HarnessSessionSummary(id, title, status, projectId);
         return true;
     }
 
-    private static IReadOnlyList<OpencodeProjectSummary> ParseProjectList(JsonElement root)
+    private static IReadOnlyList<HarnessProjectSummary> ParseProjectList(JsonElement root)
     {
-        var list = new List<OpencodeProjectSummary>();
+        var list = new List<HarnessProjectSummary>();
         if (root.ValueKind == JsonValueKind.Undefined || root.ValueKind == JsonValueKind.Null)
         {
             return list;
@@ -1703,7 +1644,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             .ToList();
     }
 
-    private static bool TryBuildProjectSummary(JsonElement element, string? fallbackId, out OpencodeProjectSummary? summary)
+    private static bool TryBuildProjectSummary(JsonElement element, string? fallbackId, out HarnessProjectSummary? summary)
     {
         summary = null;
         if (element.ValueKind == JsonValueKind.Undefined || element.ValueKind == JsonValueKind.Null)
@@ -1719,7 +1660,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                 return false;
             }
 
-            summary = new OpencodeProjectSummary(rawId.Trim(), rawId.Trim(), null, null);
+            summary = new HarnessProjectSummary(rawId.Trim(), rawId.Trim(), null, null);
             return true;
         }
 
@@ -1748,11 +1689,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             current = parsedCurrent;
         }
 
-        summary = new OpencodeProjectSummary(id, name, path, current);
+        summary = new HarnessProjectSummary(id, name, path, current);
         return true;
     }
 
-    private async Task<IReadOnlyList<OpencodeModelSummary>> TryListModelsFromEndpointAsync(string path, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<HarnessModelSummary>> TryListModelsFromEndpointAsync(string path, CancellationToken cancellationToken)
     {
         try
         {
@@ -1775,7 +1716,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             }
 
             using var doc = JsonDocument.Parse(raw);
-            var found = new List<OpencodeModelSummary>();
+            var found = new List<HarnessModelSummary>();
             CollectModelsFromElement(doc.RootElement, null, found);
             return found;
         }
@@ -1790,7 +1731,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    private static void CollectModelsFromElement(JsonElement element, string? inheritedProvider, List<OpencodeModelSummary> models)
+    private static void CollectModelsFromElement(JsonElement element, string? inheritedProvider, List<HarnessModelSummary> models)
     {
         switch (element.ValueKind)
         {
@@ -1830,7 +1771,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                         var leafModelId = property.Value.GetString();
                         if (!string.IsNullOrWhiteSpace(leafModelId))
                         {
-                            AddModelSummary(models, new OpencodeModelSummary(leafModelId.Trim(), leafModelId.Trim(), nextProvider));
+                            AddModelSummary(models, new HarnessModelSummary(leafModelId.Trim(), leafModelId.Trim(), nextProvider));
                         }
 
                         continue;
@@ -1847,7 +1788,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
                     var leafModelId = element.GetString();
                     if (!string.IsNullOrWhiteSpace(leafModelId))
                     {
-                        AddModelSummary(models, new OpencodeModelSummary(leafModelId.Trim(), leafModelId.Trim(), inheritedProvider));
+                        AddModelSummary(models, new HarnessModelSummary(leafModelId.Trim(), leafModelId.Trim(), inheritedProvider));
                     }
                 }
 
@@ -1858,7 +1799,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    private static bool TryBuildModelSummary(JsonElement element, string? inheritedProvider, out OpencodeModelSummary? summary)
+    private static bool TryBuildModelSummary(JsonElement element, string? inheritedProvider, out HarnessModelSummary? summary)
     {
         summary = null;
         if (!TryGetStringProperty(element, "id", out var id) || string.IsNullOrWhiteSpace(id))
@@ -1890,11 +1831,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             }
         }
 
-        summary = new OpencodeModelSummary(idValue, name, provider);
+        summary = new HarnessModelSummary(idValue, name, provider);
         return true;
     }
 
-    private static void AddModelSummary(List<OpencodeModelSummary> models, OpencodeModelSummary candidate)
+    private static void AddModelSummary(List<HarnessModelSummary> models, HarnessModelSummary candidate)
     {
         var id = candidate.Id.Trim();
         if (string.IsNullOrWhiteSpace(id))
@@ -1913,7 +1854,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             return;
         }
 
-        models.Add(new OpencodeModelSummary(canonicalId, name, provider));
+        models.Add(new HarnessModelSummary(canonicalId, name, provider));
     }
 
     private static bool IsLikelyProviderPropertyName(string propertyName)
@@ -1935,7 +1876,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             && !key.Equals("name", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<string> EnsureSessionAsync(string conversationKey, string title, OpencodeSendOptions? options, CancellationToken cancellationToken)
+    private async Task<string> EnsureSessionAsync(string conversationKey, string title, HarnessSendOptions? options, CancellationToken cancellationToken)
     {
         if (_sessionIds.TryGetValue(conversationKey, out var existing))
         {
@@ -1956,7 +1897,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return sessionId;
     }
 
-    private async Task<OpencodeChatReply> SendToSessionAsync(string sessionId, string message, OpencodeSendOptions? options, CancellationToken cancellationToken)
+    private async Task<HarnessChatReply> SendToSessionAsync(string sessionId, string message, HarnessSendOptions? options, CancellationToken cancellationToken)
     {
         var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel, options?.SystemPrompt);
         var body = new Dictionary<string, object?>
@@ -2003,7 +1944,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         var isConfirmationPrompt = IsLikelyConfirmationPrompt(text);
         var pendingPermissions = TryGetPendingPermissionsFromEvents(sessionId, out var fromEventPermissions)
             ? fromEventPermissions
-            : Array.Empty<OpencodePendingPermission>();
+            : Array.Empty<HarnessPendingPermission>();
         if (pendingPermissions.Count > 0)
         {
             _pendingPermissionsBySession[sessionId] = pendingPermissions;
@@ -2015,7 +1956,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         var pendingQuestions = TryGetPendingQuestionsFromEvents(sessionId, out var fromEventQuestions)
             ? fromEventQuestions
-            : Array.Empty<OpencodePendingQuestion>();
+            : Array.Empty<HarnessPendingQuestion>();
         if (pendingQuestions.Count > 0)
         {
             _pendingQuestionsBySession[sessionId] = pendingQuestions;
@@ -2025,7 +1966,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             _pendingQuestionsBySession.TryRemove(sessionId, out _);
         }
 
-        return new OpencodeChatReply(text, isConfirmationPrompt, pendingPermissions, pendingQuestions, usage);
+        return new HarnessChatReply(text, isConfirmationPrompt, pendingPermissions, pendingQuestions, usage);
     }
 
     private static Dictionary<string, object?> BuildSessionCreateBody(string? title, string? configuredModelId, string? parentSessionId)
@@ -2170,7 +2111,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return reply;
     }
 
-    private static OpencodeUsageSummary? ExtractUsage(OpencodeChatResponse? reply)
+    private static HarnessUsageSummary? ExtractUsage(OpencodeChatResponse? reply)
     {
         var info = reply?.Info;
         var tokens = info?.Tokens;
@@ -2179,7 +2120,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             return null;
         }
 
-        var usage = new OpencodeUsageSummary(
+        var usage = new HarnessUsageSummary(
             info?.Cost,
             tokens?.Input,
             tokens?.Output,
@@ -2255,11 +2196,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    private static IReadOnlyList<OpencodePendingPermission> ParsePendingPermissions(string? raw)
+    private static IReadOnlyList<HarnessPendingPermission> ParsePendingPermissions(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
-            return Array.Empty<OpencodePendingPermission>();
+            return Array.Empty<HarnessPendingPermission>();
         }
 
         try
@@ -2269,13 +2210,13 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
         catch (JsonException)
         {
-            return Array.Empty<OpencodePendingPermission>();
+            return Array.Empty<HarnessPendingPermission>();
         }
     }
 
-    private static IReadOnlyList<OpencodePendingPermission> ParsePendingPermissions(JsonElement root)
+    private static IReadOnlyList<HarnessPendingPermission> ParsePendingPermissions(JsonElement root)
     {
-        var found = new List<OpencodePendingPermission>();
+        var found = new List<HarnessPendingPermission>();
         CollectPendingPermissions(root, BuildInitialPermissionParseContext(root), found);
         return found
             .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
@@ -2301,7 +2242,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return null;
     }
 
-    private static void CollectPendingPermissions(JsonElement element, string? context, List<OpencodePendingPermission> output)
+    private static void CollectPendingPermissions(JsonElement element, string? context, List<HarnessPendingPermission> output)
     {
         switch (element.ValueKind)
         {
@@ -2374,7 +2315,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             && parentContext.Contains("permission", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool TryBuildPendingPermission(JsonElement element, string? context, out OpencodePendingPermission? permission)
+    private static bool TryBuildPendingPermission(JsonElement element, string? context, out HarnessPendingPermission? permission)
     {
         permission = null;
         if (element.ValueKind != JsonValueKind.Object)
@@ -2470,7 +2411,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
 
         var description = BuildPermissionDescription(element);
 
-        permission = new OpencodePendingPermission(id, sessionId, title, description);
+        permission = new HarnessPendingPermission(id, sessionId, title, description);
         return true;
     }
 
@@ -2586,11 +2527,11 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    private static IReadOnlyList<OpencodePendingQuestion> ParsePendingQuestions(string? raw)
+    private static IReadOnlyList<HarnessPendingQuestion> ParsePendingQuestions(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
-            return Array.Empty<OpencodePendingQuestion>();
+            return Array.Empty<HarnessPendingQuestion>();
         }
 
         try
@@ -2600,13 +2541,13 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
         catch (JsonException)
         {
-            return Array.Empty<OpencodePendingQuestion>();
+            return Array.Empty<HarnessPendingQuestion>();
         }
     }
 
-    private static IReadOnlyList<OpencodePendingQuestion> ParsePendingQuestions(JsonElement root)
+    private static IReadOnlyList<HarnessPendingQuestion> ParsePendingQuestions(JsonElement root)
     {
-        var found = new List<OpencodePendingQuestion>();
+        var found = new List<HarnessPendingQuestion>();
         CollectPendingQuestions(root, found);
         return found
             .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
@@ -2615,7 +2556,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             .ToList();
     }
 
-    private static void CollectPendingQuestions(JsonElement element, List<OpencodePendingQuestion> output)
+    private static void CollectPendingQuestions(JsonElement element, List<HarnessPendingQuestion> output)
     {
         switch (element.ValueKind)
         {
@@ -2645,7 +2586,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         }
     }
 
-    private static bool TryBuildPendingQuestion(JsonElement element, out OpencodePendingQuestion? question)
+    private static bool TryBuildPendingQuestion(JsonElement element, out HarnessPendingQuestion? question)
     {
         question = null;
         if (element.ValueKind != JsonValueKind.Object)
@@ -2724,7 +2665,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
             prompt = header;
         }
 
-        question = new OpencodePendingQuestion(id, sessionId, header, prompt, options, multiple, custom);
+        question = new HarnessPendingQuestion(id, sessionId, header, prompt, options, multiple, custom);
         return true;
     }
 
@@ -3021,7 +2962,7 @@ internal sealed class OpencodeChatClient : IOpencodeChatClient, IDisposable
         return element.GetRawText();
     }
 
-    private void TrackSessionStatusEvent(OpencodeSessionStatusEvent statusEvent)
+    private void TrackSessionStatusEvent(HarnessSessionStatusEvent statusEvent)
     {
         if (string.IsNullOrWhiteSpace(statusEvent.SessionId))
         {
@@ -3418,7 +3359,7 @@ internal sealed class OpencodeChatPart
     public string? ToolName { get; set; }
 }
 
-internal sealed record OpencodeUsageSummary(
+internal sealed record HarnessUsageSummary(
     double? Cost,
     int? InputTokens,
     int? OutputTokens,
