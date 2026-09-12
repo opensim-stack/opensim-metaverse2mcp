@@ -23,7 +23,7 @@ set -- \
   --password "${OPENSIM_BOT_PASSWORD:-}" \
   --spawner-parent "${OPENSIM_SPAWNER_PARENT:-}" \
   --spawner-level "${OPENSIM_SPAWNER_LEVEL:-}" \
-  --spawner-host "${SPAWNER_HOST:-${OPENSIM_NETWORK:-${COMPOSE_PROJECT_NAME:-opensim-ai}}-spawner}" \
+  --spawner-host "${SPAWNER_HOST:-${OPENSIM_NETWORK:-${OPENSIM_PROJECT_NAME:-opensim-ai}}-spawner}" \
   --spawner-port "${SPAWNER_PORT:-8993}" \
   --wear-folder-name "${WEAR_FOLDER_NAME:-}" \
   --login-uri "${OPENSIM_LOGIN_URI:-http://opensim:9000}" \
