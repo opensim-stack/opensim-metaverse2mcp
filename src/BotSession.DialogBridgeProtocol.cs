@@ -1,9 +1,231 @@
 using LibreMetaverse;
+using System.Text.Json;
 
 namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
+    private const string LslDialogBridgeRequestPrefix = "dlgreq";
+    private const string LslDialogBridgeTextRequestPrefix = "txtreq";
+    private const string LslDialogBridgeAckPrefix = "dlgack";
+    private const string LslDialogBridgePingPrefix = "brping";
+    private const string LslDialogBridgePongPrefix = "brpong";
+    private const string LslDialogBridgeReplyPrefix = "dlgrep";
+    private const string LslDialogBridgePermissionRequestPrefix = "perm:";
+    private const string LslDialogBridgeMoodRequestPrefix = "moodreq";
+    // OpenSimulator tolerates larger chat payloads than strict SL-era assumptions.
+    // Keep this conservative enough to avoid most truncation while preserving prompt fidelity.
+    private const int LslDialogBridgeMaxPayloadLength = 900;
+    private const string LslDialogBridgeHoverRequestPrefix = "hovreq";
+    
+    private readonly object _hoverStateLock = new();
+    private const int HoverBusyUpdateMinimumIntervalMs = 600;
+    private const int LslDialogBridgeRequestChannel = -919191;
+    
+    public async Task<BotToolResult> SetBotMoodAsync(string emotion, CancellationToken cancellationToken)
+    {
+        var normalizedEmotion = NormalizeMoodName(emotion);
+        if (string.IsNullOrWhiteSpace(normalizedEmotion))
+        {
+            return BotToolResult.Fail("emotion is required and must contain letters, numbers, '-' or '_'.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            UUID targetBridgeObjectId;
+            lock (_dialogBridgeTrustLock)
+            {
+                targetBridgeObjectId = _trustedDialogBridgeObjectId;
+            }
+
+            if (targetBridgeObjectId == UUID.Zero)
+            {
+                return Task.FromResult(BotToolResult.Fail("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply)."));
+            }
+
+            // Leave target object token empty so the currently running bridge script
+            // in the attachment processes the mood request even if persisted UUID pins are stale.
+            var payload = string.Join("|", new[]
+            {
+                LslDialogBridgeMoodRequestPrefix,
+                EncodeDialogToken(string.Empty),
+                EncodeDialogToken(normalizedEmotion)
+            });
+
+            client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
+            Console.WriteLine($"[dialog-bridge] sent mood request: object={targetBridgeObjectId} emotion={normalizedEmotion}");
+            return Task.FromResult(BotToolResult.OkResult($"Requested bot mood '{normalizedEmotion}' via dialog bridge request channel {LslDialogBridgeRequestChannel}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<DataToolResult> BotMoodListAsync(bool includeUtilityTextures, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            UUID targetBridgeObjectId;
+            lock (_dialogBridgeTrustLock)
+            {
+                targetBridgeObjectId = _trustedDialogBridgeObjectId;
+            }
+
+            if (targetBridgeObjectId == UUID.Zero)
+            {
+                return DataToolResult.FailResult("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply).");
+            }
+
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return DataToolResult.FailResult("No current simulator available.");
+            }
+
+            Primitive? bridgePrim = null;
+            foreach (var prim in sim.ObjectsPrimitives.Values)
+            {
+                if (prim.ID == targetBridgeObjectId)
+                {
+                    bridgePrim = prim;
+                    break;
+                }
+            }
+
+            if (bridgePrim == null)
+            {
+                return DataToolResult.FailResult($"Pinned dialog bridge object {targetBridgeObjectId} is not present in current simulator cache.");
+            }
+
+            var entries = await client.Inventory
+                .GetTaskInventoryAsync(targetBridgeObjectId, bridgePrim.LocalID, sim, token)
+                .ConfigureAwait(false);
+
+            var textureNames = entries
+                .OfType<InventoryItem>()
+                .Where(item => item.AssetType == AssetType.Texture)
+                .Select(item => item.Name?.Trim() ?? string.Empty)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (textureNames.Count == 0)
+            {
+                return DataToolResult.FailResult($"No texture assets were found in bridge object {targetBridgeObjectId} task inventory.");
+            }
+
+            var utilityNames = new[] { "base", "cross" };
+            var utilitySet = new HashSet<string>(utilityNames, StringComparer.OrdinalIgnoreCase);
+            var moodNames = textureNames
+                .Where(name => includeUtilityTextures || !utilitySet.Contains(name))
+                .ToList();
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                bridgeObjectId = targetBridgeObjectId.ToString(),
+                includeUtilityTextures,
+                textureCount = textureNames.Count,
+                moodCount = moodNames.Count,
+                utilityTextures = utilityNames,
+                moodNames,
+                allTextureNames = textureNames
+            });
+
+            return DataToolResult.OkResult($"Found {moodNames.Count} mood texture name(s) on bridge object {targetBridgeObjectId}.", payload);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string NormalizeMoodName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var chars = value.Trim()
+            .Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_')
+            .ToArray();
+        if (chars.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var normalized = new string(chars).ToLowerInvariant();
+        return normalized.Length <= 48 ? normalized : normalized[..48];
+    }
+
+    private void UpdateBusyHoverText(bool incrementDots)
+    {
+        var now = DateTimeOffset.UtcNow;
+        string hoverText;
+        lock (_hoverStateLock)
+        {
+            if (incrementDots && (now - _lastHoverBusyUpdateAt).TotalMilliseconds < HoverBusyUpdateMinimumIntervalMs)
+            {
+                return;
+            }
+
+            if (incrementDots)
+            {
+                _busyHoverDots++;
+                if (_busyHoverDots > 4)
+                {
+                    _busyHoverDots = 1;
+                }
+            }
+            else if (_busyHoverDots <= 0)
+            {
+                _busyHoverDots = 1;
+            }
+
+            _lastHoverBusyUpdateAt = now;
+            hoverText = "Thinking " + new string('.', _busyHoverDots);
+        }
+
+        SendHoverBridgeCommand("set", hoverText);
+    }
+
+    private void ClearBusyHoverText()
+    {
+        lock (_hoverStateLock)
+        {
+            _busyHoverDots = 0;
+            _lastHoverBusyUpdateAt = DateTimeOffset.MinValue;
+        }
+
+        SendHoverBridgeCommand("clear", string.Empty);
+    }
+
+    private void SendHoverBridgeCommand(string mode, string text)
+    {
+        var client = _client;
+        if (!_connected || client == null)
+        {
+            return;
+        }
+
+        UUID pinnedObjectId;
+        lock (_dialogBridgeTrustLock)
+        {
+            pinnedObjectId = _trustedDialogBridgeObjectId;
+        }
+
+        var payload = string.Join("|", new[]
+        {
+            LslDialogBridgeHoverRequestPrefix,
+            EncodeDialogToken(pinnedObjectId == UUID.Zero ? string.Empty : pinnedObjectId.ToString()),
+            EncodeDialogToken(mode ?? string.Empty),
+            EncodeDialogToken(text ?? string.Empty)
+        });
+
+        try
+        {
+            client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dialog-bridge] hover command failed: {ex.Message}");
+        }
+    }
+    
     private bool TryOfferQuestionViaLslDialogBridge(GridClient client, string conversationKey, HarnessPendingQuestion question)
     {
         if (question.Options.Count == 0)
@@ -176,13 +398,13 @@ internal sealed partial class BotSession
 
         Console.WriteLine($"[dialog-bridge] received reply payload: conversation={conversationKey} request={requestId} answer={answer}");
 
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
         {
             Console.WriteLine("[dialog-bridge] dropped reply: opencode chat unavailable or payload missing conversation/request id.");
             return false;
         }
 
-        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             Console.WriteLine($"[dialog-bridge] dropped reply: no active opencode session for conversation {conversationKey}.");
@@ -197,7 +419,7 @@ internal sealed partial class BotSession
         }
 
         var resolvedAnswer = await ResolveLslDialogBridgeAnswerAsync(sessionId, requestId, answer).ConfigureAwait(false);
-        var ok = await _opencodeChat.ReplyToQuestionAsync(sessionId, requestId, new[] { resolvedAnswer }, CancellationToken.None).ConfigureAwait(false);
+        var ok = await _harnessClient.ReplyToQuestionAsync(sessionId, requestId, new[] { resolvedAnswer }, CancellationToken.None).ConfigureAwait(false);
         Console.WriteLine($"[dialog-bridge] forwarded reply to opencode: session={sessionId} question={requestId} success={ok} answer={resolvedAnswer}");
         _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
         _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
@@ -393,7 +615,7 @@ internal sealed partial class BotSession
             return true;
         }
 
-        var ok = await _opencodeChat!.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
+        var ok = await _harnessClient!.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
         Console.WriteLine($"[dialog-bridge] forwarded permission reply to opencode: session={sessionId} permission={permissionId} success={ok} response={response} remember={remember}");
         _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
         _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);

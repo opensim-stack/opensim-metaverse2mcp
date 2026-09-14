@@ -1899,12 +1899,32 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
     private async Task<HarnessChatReply> SendToSessionAsync(string sessionId, string message, HarnessSendOptions? options, CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrWhiteSpace(options?.SystemPrompt))
+        {
+            var trimmedSystemPrompt = options.SystemPrompt.Trim();
+            Console.WriteLine($"[opencode:system] session={sessionId} systemPromptLength={trimmedSystemPrompt.Length} chars");
+            if (trimmedSystemPrompt.Contains("requester_position_local:", StringComparison.Ordinal))
+            {
+                var lines = trimmedSystemPrompt.Split('\n');
+                var posLine = lines.FirstOrDefault(l => l.StartsWith("requester_position_local:", StringComparison.Ordinal));
+                var distLine = lines.FirstOrDefault(l => l.StartsWith("requester_distance_to_bot_m:", StringComparison.Ordinal));
+                if (posLine != null || distLine != null)
+                {
+                    Console.WriteLine($"[opencode:location] {posLine ?? "(no position)"} {distLine ?? "(no distance)"}");
+                }
+            }
+        }
+
         var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel, options?.SystemPrompt);
         var body = new Dictionary<string, object?>
         {
             ["parts"] = new[]
             {
-                new { type = "text", text = outboundMessage }
+                new
+                {
+                    type = "text",
+                    text = outboundMessage
+                }
             }
         };
 
@@ -2030,6 +2050,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         if (!string.IsNullOrWhiteSpace(systemPrompt))
         {
+            // Opencode message parts currently accept text/file/agent/subtask; keep system instructions in text payload.
             pieces.Add("[system instructions]\n" + systemPrompt.Trim());
         }
 

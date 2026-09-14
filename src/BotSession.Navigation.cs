@@ -6,6 +6,22 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
+    private static readonly string[] DoorHintKeywords = new[] { "door", "gate", "entry", "entrance", "open", "lobby" };
+    
+    private const float WalkProgressThresholdMeters = 1.5f;
+    private const float WalkStuckWindowSeconds = 6f;
+    private const int WalkRecoveryMaxAttempts = 5;
+    private const bool EnableWalkTeleportFallback = true;
+    private readonly object _movementLock = new();
+    private CancellationTokenSource? _movementAutoStopCts;
+    private CancellationTokenSource? _followCts;
+    private Task? _followTask;
+    private string? _followTargetDescription;
+    private UUID _followTrackedAvatarId = UUID.Zero;
+    private uint _followTrackedLocalId;
+    private ulong _followAnchorSimHandle;
+    private readonly SpawnerClient _followSpawnerClient;
+    
     public async Task<BotToolResult> SitAsync(CancellationToken cancellationToken)
     {
         return await RunActionAsync("Sitting down...", c => c.Self.SitOnGround(), cancellationToken);
@@ -1619,4 +1635,28 @@ internal sealed partial class BotSession
             from.Y + ((to.Y - from.Y) * ratio),
             from.Z + ((to.Z - from.Z) * ratio));
     }
+}
+
+internal sealed record CameraState(
+    float CameraX,
+    float CameraY,
+    float CameraZ,
+    float AtAxisX,
+    float AtAxisY,
+    float AtAxisZ,
+    float LeftAxisX,
+    float LeftAxisY,
+    float LeftAxisZ,
+    float UpAxisX,
+    float UpAxisY,
+    float UpAxisZ,
+    float Far,
+    float AgentX,
+    float AgentY,
+    float AgentZ);
+
+
+internal sealed record CameraStateResult(bool Ok, string Message, CameraState? State)
+{
+    public static CameraStateResult FailResult(string message) => new(false, message, null);
 }

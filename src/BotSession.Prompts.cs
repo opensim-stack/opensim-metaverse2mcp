@@ -5,13 +5,32 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
+    private const string BuiltInBridgePrompt =
+        "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n" +
+        "Environment basics:\n" +
+        "- Make sure you say 'I did ...' instead of 'You did ..' when you as the bot are affected by the action.\n" +
+        "- Avatars, regions, parcels, prim objects, inventory, scripts, and environment settings are stateful and shared.\n" +
+        "- Simulator/cache state may be stale; verify current state before mutating it.\n" +
+        "Tooling basics:\n" +
+        "- Use metaverse MCP tools for avatar/world operations (movement, prims, inventory, scripts, environment).\n" +
+        "- Use console2mcp tools for simulator administration tasks when needed.\n" +
+        "Operating rules:\n" +
+        "- Prefer safe and reversible actions.\n" +
+        "- Confirm destructive or high-impact actions first (delete, bulk changes, ownership/permission changes, restarts).\n" +
+        "- Attachment and wearable controls are different: use attachment tools for attachments/objects and wearable tools for clothing/body layers.\n" +
+        "- If asked to 'detach/remove attachments', use appearance_detach_all_attachments_except (empty keep filters unless exclusions are requested), then re-check with appearance_list_attachment_point_mappings. Avoid item-by-item detach loops unless explicitly requested.\n" +
+        "- If asked to remove everything worn, use appearance_detach_and_remove_all_worn_deterministic, then re-check and report both attachment and wearable sections separately.\n" +
+        "- When requester identity metadata is provided for IM, resolve pronouns like 'me', 'my', and 'here' to that requester unless they explicitly override it.\n" +
+        "- Ask concise clarifying questions when instructions are ambiguous or missing required identifiers.\n" +
+        "- For multi-step tasks, inspect -> plan -> execute -> verify and report results clearly.\n" +
+        "- Respect handler and policy restrictions configured by the bridge.";
+        
     private HarnessSendOptions? BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
     {
         _conversationConfigs.TryGetValue(conversationKey, out var cfg);
         cfg ??= GetPersistedDefaultConversationConfigSnapshot();
 
         var requesterContextLayer = BuildRequesterContextPrompt(requesterAgentId, requesterName, conversationKey);
-        LogRequesterContextAttachment(conversationKey, requesterAgentId, requesterName, requesterContextLayer);
         var systemPrompt = BuildLayeredPromptText(requesterContextLayer);
         var modelId = cfg?.ModelId ?? GetStartupDefaultModelId();
         var thinkingLevel = cfg?.ThinkingLevel;
@@ -133,21 +152,56 @@ internal sealed partial class BotSession
 
         var client = _client;
         var sim = client?.Network.CurrentSim;
+        var hint = TryGetRequesterImLocationHint(conversationKey, requesterAgentId);
+        if (hint.HasValue)
+        {
+            var hintValue = hint.Value;
+            var hintPosition = FormatPosition(hintValue.Position);
+            if (hintValue.Position != Vector3.Zero)
+            {
+                lines.Add($"requester_position_local: {hintPosition}");
+            }
+            if (hintValue.RegionId != UUID.Zero)
+            {
+                lines.Add($"requester_region_uuid: {hintValue.RegionId}");
+            }
+
+            if (client != null)
+            {
+                var hintSim = TryFindSimulatorByRegionId(client, hintValue.RegionId);
+                if (hintSim != null)
+                {
+                    lines.Add($"requester_sim_name: {hintSim.Name}");
+                }
+
+                if (sim != null && hintValue.RegionId != UUID.Zero && hintValue.RegionId == sim.ID)
+                {
+                    var distance = Vector3.Distance(client.Self.SimPosition, hintValue.Position);
+                    lines.Add($"requester_distance_to_bot_m: {distance:F1}");
+                    Console.WriteLine($"[prompt:location] conversation={conversationKey} requester={trimmedName} uuid={requesterAgentId} source=im sim={sim.Name} position={hintPosition} distance_m={distance:F1}");
+                }
+                else
+                {
+                    Console.WriteLine($"[prompt:location] conversation={conversationKey} requester={trimmedName} uuid={requesterAgentId} source=im sim={(sim?.Name ?? "(unknown)")} requester_region_uuid={(hintValue.RegionId == UUID.Zero ? "(unknown)" : hintValue.RegionId.ToString())} position={hintPosition} distance_m=n/a");
+                }
+            }
+        }
+
         if (sim != null)
         {
-            lines.Add($"sim_name: {sim.Name}");
-
-            if (requesterAgentId != UUID.Zero)
+            if (requesterAgentId != UUID.Zero && ( !hint.HasValue || hint.Value.RegionId == UUID.Zero || hint.Value.Position == Vector3.Zero))
             {
                 var requesterAvatar = sim.ObjectsAvatars.Values
                     .FirstOrDefault(avatar => avatar != null && avatar.ID == requesterAgentId);
                 if (requesterAvatar != null)
                 {
-                    lines.Add($"requester_position_local: {FormatPosition(requesterAvatar.Position)}");
+                    var position = FormatPosition(requesterAvatar.Position);
+                    lines.Add($"requester_position_local: {position}");
                     if (client != null)
                     {
                         var distance = Vector3.Distance(client.Self.SimPosition, requesterAvatar.Position);
                         lines.Add($"requester_distance_to_bot_m: {distance:F1}");
+                        Console.WriteLine($"[prompt:location] conversation={conversationKey} requester={trimmedName} uuid={requesterAgentId} sim={sim.Name} position={position} distance_m={distance:F1}");
                     }
 
                     if (diagnosticsEnabled)
@@ -194,42 +248,45 @@ internal sealed partial class BotSession
         return string.Join("\n", lines);
     }
 
-    private void LogRequesterContextAttachment(string conversationKey, UUID requesterAgentId, string? requesterName, string? requesterContextLayer)
+    private RequesterImLocationHint? TryGetRequesterImLocationHint(string conversationKey, UUID requesterAgentId)
     {
-        if (!_options.RequesterContextDebugLogging)
+        if (requesterAgentId == UUID.Zero)
         {
-            return;
+            return null;
         }
 
-        var trimmedName = (requesterName ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(requesterContextLayer))
+        if (!_requesterImLocationHintByConversation.TryGetValue(conversationKey, out var hint))
         {
-            Console.WriteLine(
-                $"[prompt] requester context not attached: conversation={conversationKey} requesterName={(trimmedName.Length == 0 ? "(unknown)" : trimmedName)} requesterUuid={(requesterAgentId == UUID.Zero ? "(unknown)" : requesterAgentId.ToString())}");
-            return;
+            return null;
         }
 
-        var lines = requesterContextLayer.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var requesterUuid = ExtractPromptLineValue(lines, "requester_uuid:") ?? (requesterAgentId == UUID.Zero ? "(unknown)" : requesterAgentId.ToString());
-        var distance = ExtractPromptLineValue(lines, "requester_distance_to_bot_m:") ?? "n/a";
-        var hasPosition = lines.Any(line => line.StartsWith("requester_position_local:", StringComparison.Ordinal));
-        var nearbyCount = lines.Count(line => line.StartsWith("- ", StringComparison.Ordinal));
+        if (hint.RequesterAgentId != requesterAgentId)
+        {
+            return null;
+        }
 
-        Console.WriteLine(
-            $"[prompt] requester context attached: conversation={conversationKey} requesterName={(trimmedName.Length == 0 ? "(unknown)" : trimmedName)} requesterUuid={requesterUuid} distance_m={distance} hasPosition={hasPosition} nearbyCount={nearbyCount}");
+        // Ignore very old hints so stale IM metadata does not outlive long-running sessions.
+        if (DateTimeOffset.UtcNow - hint.ObservedAt > TimeSpan.FromMinutes(10))
+        {
+            return null;
+        }
+
+        return hint;
     }
 
-    private static string? ExtractPromptLineValue(IEnumerable<string> lines, string prefix)
+    private static Simulator? TryFindSimulatorByRegionId(GridClient client, UUID regionId)
     {
-        foreach (var line in lines)
+        if (regionId == UUID.Zero)
         {
-            if (!line.StartsWith(prefix, StringComparison.Ordinal))
-            {
-                continue;
-            }
+            return null;
+        }
 
-            var value = line[prefix.Length..].Trim();
-            return value.Length == 0 ? null : value;
+        foreach (var candidate in client.Network.Simulators)
+        {
+            if (candidate.ID == regionId)
+            {
+                return candidate;
+            }
         }
 
         return null;

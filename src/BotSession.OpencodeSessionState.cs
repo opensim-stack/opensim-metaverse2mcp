@@ -5,6 +5,8 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
+    private readonly object _opencodeSessionStateLock = new();
+    
     private static readonly JsonSerializerOptions OpencodeSessionStateJsonOptions = new()
     {
         WriteIndented = true,
@@ -15,7 +17,7 @@ internal sealed partial class BotSession
 
     private void TryLoadOpencodeSessionStateFromFile()
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             return;
         }
@@ -55,7 +57,7 @@ internal sealed partial class BotSession
 
             lock (_opencodeSessionStateLock)
             {
-                _restoredOpencodeSessionId = loadedSessionId;
+                _restoredHarnessSessionId = loadedSessionId;
                 var loadedConfig = new ConversationConfig
                 {
                     ProviderId = loadedProviderId,
@@ -82,7 +84,7 @@ internal sealed partial class BotSession
 
     private void TrySaveOpencodeSessionStateForConversation(string conversationKey, ConversationConfig? configuredOverride = null)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             return;
         }
@@ -95,7 +97,7 @@ internal sealed partial class BotSession
 
         try
         {
-            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
             ConversationConfig? activeConfig = configuredOverride;
             if (activeConfig == null)
             {
@@ -116,7 +118,7 @@ internal sealed partial class BotSession
                 _persistedOpencodeDefaultConfig = IsConversationConfigEmpty(mergedConfig)
                     ? null
                     : CloneConversationConfig(mergedConfig);
-                _restoredOpencodeSessionId = string.IsNullOrWhiteSpace(currentSessionId) ? null : currentSessionId.Trim();
+                _restoredHarnessSessionId = string.IsNullOrWhiteSpace(currentSessionId) ? null : currentSessionId.Trim();
             }
 
             var model = new OpencodeSessionStateModel(
@@ -156,12 +158,12 @@ internal sealed partial class BotSession
 
     private void TryBindRestoredOpencodeSessionToConversation(string conversationKey)
     {
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(conversationKey))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey))
         {
             return;
         }
 
-        var existingSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        var existingSessionId = _harnessClient.GetConversationSessionId(conversationKey);
         if (!string.IsNullOrWhiteSpace(existingSessionId))
         {
             return;
@@ -170,8 +172,8 @@ internal sealed partial class BotSession
         string? restoredSessionId;
         lock (_opencodeSessionStateLock)
         {
-            restoredSessionId = _restoredOpencodeSessionId;
-            _restoredOpencodeSessionId = null;
+            restoredSessionId = _restoredHarnessSessionId;
+            _restoredHarnessSessionId = null;
         }
 
         if (string.IsNullOrWhiteSpace(restoredSessionId))
@@ -179,7 +181,7 @@ internal sealed partial class BotSession
             return;
         }
 
-        _opencodeChat.SetConversationSessionId(conversationKey, restoredSessionId);
+        _harnessClient.SetConversationSessionId(conversationKey, restoredSessionId);
         Console.WriteLine($"[opencode] restored persisted session mapping for conversation '{conversationKey}' -> {restoredSessionId}");
     }
 

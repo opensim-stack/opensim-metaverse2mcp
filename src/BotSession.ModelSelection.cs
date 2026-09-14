@@ -11,7 +11,7 @@ internal sealed partial class BotSession
             ? providerHint
             : (string.IsNullOrWhiteSpace(preferredProviderId) ? null : NormalizeLooseQuery(preferredProviderId));
 
-        var models = await _opencodeChat!.ListModelsAsync(effectiveProviderFilter, cancellationToken).ConfigureAwait(false);
+        var models = await _harnessClient!.ListModelsAsync(effectiveProviderFilter, cancellationToken).ConfigureAwait(false);
         if (models.Count == 0)
         {
             throw new InvalidOperationException(

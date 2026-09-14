@@ -73,7 +73,7 @@ internal sealed partial class BotSession : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[opencode] failed to notify user of retry delay: {ex.Message}");
+            Console.WriteLine($"[harness] failed to notify user of retry delay: {ex.Message}");
         }
 
         await Task.CompletedTask;
@@ -81,14 +81,14 @@ internal sealed partial class BotSession : IDisposable
 
     private string? FindConversationKeyForSessionId(string sessionId)
     {
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(sessionId))
         {
             return null;
         }
 
         foreach (var pair in _conversationAgentByKey)
         {
-            var mappedSessionId = _opencodeChat.GetConversationSessionId(pair.Key);
+            var mappedSessionId = _harnessClient.GetConversationSessionId(pair.Key);
             if (!string.IsNullOrWhiteSpace(mappedSessionId)
                 && mappedSessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
             {
@@ -102,8 +102,8 @@ internal sealed partial class BotSession : IDisposable
     private void LogRetryStatusEvent(string sessionId, string? statusMessage)
     {
         var message = string.IsNullOrWhiteSpace(statusMessage)
-            ? $"[opencode] session {sessionId} is retrying"
-            : $"[opencode] session {sessionId} is retrying: {statusMessage}";
+            ? $"[harness] session {sessionId} is retrying"
+            : $"[harness] session {sessionId} is retrying: {statusMessage}";
         Console.WriteLine(message);
     }
 
@@ -136,12 +136,17 @@ internal sealed partial class BotSession : IDisposable
         HarnessPendingQuestion? Question,
         DateTimeOffset ActivatedAt);
 
+    private readonly record struct RequesterImLocationHint(
+        UUID RequesterAgentId,
+        UUID RegionId,
+        Vector3 Position,
+        DateTimeOffset ObservedAt);
+
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
     private readonly SemaphoreSlim _globalConversationGate = new(1, 1);
-    private readonly IHarnessClient? _opencodeChat;
+    private readonly IHarnessClient? _harnessClient;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentImEvents = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<UUID, DateTimeOffset> _primPropertiesRefreshedAtByObjectId = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _conversationLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConversationConfig> _conversationConfigs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConversationRoute> _conversationRouteByKey = new(StringComparer.Ordinal);
@@ -158,6 +163,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RequesterImLocationHint> _requesterImLocationHintByConversation = new(StringComparer.Ordinal);
     private readonly AsyncLocal<string?> _ambientConversationKey = new();
     private readonly string _handlerConfigPath;
     private readonly string? _parentFullName;
@@ -165,9 +171,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly object _recentImSpeakerLock = new();
     private readonly object _dialogBridgeTrustLock = new();
     private readonly object _handlerConfigLock = new();
-    private readonly object _opencodeSessionStateLock = new();
     private readonly object _typingStateLock = new();
-    private readonly object _hoverStateLock = new();
     private readonly object _dialogBridgeAutoProvisionLock = new();
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private readonly CancellationTokenSource _lifecycleCts = new();
@@ -196,8 +200,8 @@ internal sealed partial class BotSession : IDisposable
     private UUID _trustedDialogBridgeObjectId = UUID.Zero;
     private UUID _trustedDialogBridgeOwnerId = UUID.Zero;
     private bool _lslDialogBridgeRequireTrustedSender = true;
-    private readonly ConcurrentDictionary<string, byte> _busyOpencodeSessions = new(StringComparer.OrdinalIgnoreCase);
-    private string? _restoredOpencodeSessionId;
+    private readonly ConcurrentDictionary<string, byte> __busyHarnessSessions = new(StringComparer.OrdinalIgnoreCase);
+    private string? _restoredHarnessSessionId;
     private HashSet<string> _handlerNames = new(StringComparer.OrdinalIgnoreCase);
     private bool _handlerConfigCacheInitialized;
     private DateTime _handlerConfigLastWriteUtc = DateTime.MinValue;
@@ -210,65 +214,15 @@ internal sealed partial class BotSession : IDisposable
     private int _busyHoverDots;
     private int _dialogBridgeAutoProvisionInFlight;
     private DateTimeOffset _lastDialogBridgeAutoProvisionAttemptAt = DateTimeOffset.MinValue;
-    private const int LslDialogBridgeRequestChannel = -919191;
     private const string LocalChatConversationKey = "local-chat";
-    private const string LslDialogBridgeRequestPrefix = "dlgreq";
-    private const string LslDialogBridgeTextRequestPrefix = "txtreq";
-    private const string LslDialogBridgeAckPrefix = "dlgack";
-    private const string LslDialogBridgePingPrefix = "brping";
-    private const string LslDialogBridgePongPrefix = "brpong";
-    private const string LslDialogBridgeReplyPrefix = "dlgrep";
-    private const string LslDialogBridgePermissionRequestPrefix = "perm:";
-    private const string LslDialogBridgeMoodRequestPrefix = "moodreq";
-    // OpenSimulator tolerates larger chat payloads than strict SL-era assumptions.
-    // Keep this conservative enough to avoid most truncation while preserving prompt fidelity.
-    private const int LslDialogBridgeMaxPayloadLength = 900;
-    private const string LslDialogBridgeHoverRequestPrefix = "hovreq";
     private const int TypingPulseMinimumIntervalMs = 2000;
     private const int TypingStopDelayMs = 2500;
-    private const int HoverBusyUpdateMinimumIntervalMs = 600;
-    private const float WalkProgressThresholdMeters = 1.5f;
-    private const float WalkStuckWindowSeconds = 6f;
-    private const int WalkRecoveryMaxAttempts = 5;
-    private const bool EnableWalkTeleportFallback = true;
-    private static readonly string[] DoorHintKeywords = new[] { "door", "gate", "entry", "entrance", "open", "lobby" };
     private static readonly IReadOnlyList<string> LslPermissionDialogOptions = new[] { "yes", "no", "yes always", "no always" };
-    private const int LslDialogBridgeEmoterChannel = -919192;
-
-    private const string BuiltInBridgePrompt =
-        "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n" +
-        "Environment basics:\n" +
-        "- Make sure you say 'I did ...' instead of 'You did ..' when you as the bot are affected by the action.\n" +
-        "- Avatars, regions, parcels, prim objects, inventory, scripts, and environment settings are stateful and shared.\n" +
-        "- Simulator/cache state may be stale; verify current state before mutating it.\n" +
-        "Tooling basics:\n" +
-        "- Use metaverse MCP tools for avatar/world operations (movement, prims, inventory, scripts, environment).\n" +
-        "- Use console2mcp tools for simulator administration tasks when needed.\n" +
-        "Operating rules:\n" +
-        "- Prefer safe and reversible actions.\n" +
-        "- Confirm destructive or high-impact actions first (delete, bulk changes, ownership/permission changes, restarts).\n" +
-        "- Attachment and wearable controls are different: use attachment tools for attachments/objects and wearable tools for clothing/body layers.\n" +
-        "- If asked to 'detach/remove attachments', use appearance_detach_all_attachments_except (empty keep filters unless exclusions are requested), then re-check with appearance_list_attachment_point_mappings. Avoid item-by-item detach loops unless explicitly requested.\n" +
-        "- If asked to remove everything worn, use appearance_detach_and_remove_all_worn_deterministic, then re-check and report both attachment and wearable sections separately.\n" +
-        "- When requester identity metadata is provided for IM, resolve pronouns like 'me', 'my', and 'here' to that requester unless they explicitly override it.\n" +
-        "- Ask concise clarifying questions when instructions are ambiguous or missing required identifiers.\n" +
-        "- For multi-step tasks, inspect -> plan -> execute -> verify and report results clearly.\n" +
-        "- Respect handler and policy restrictions configured by the bridge.";
 
     private GridClient? _client;
     private bool _connected;
     private string _lastLoginMessage = string.Empty;
     private int _reconnectLoopActive;
-
-    private readonly object _movementLock = new();
-    private CancellationTokenSource? _movementAutoStopCts;
-    private CancellationTokenSource? _followCts;
-    private Task? _followTask;
-    private string? _followTargetDescription;
-    private UUID _followTrackedAvatarId = UUID.Zero;
-    private uint _followTrackedLocalId;
-    private ulong _followAnchorSimHandle;
-    private readonly SpawnerClient _followSpawnerClient;
 
     public BotSession(AppOptions options)
     {
@@ -281,13 +235,13 @@ internal sealed partial class BotSession : IDisposable
             ? "/config/handlers.json"
             : _options.HandlerConfig.Trim();
         _parentFullName = NormalizeAvatarName(_options.BotSpawnerParent);
-        _opencodeChat = new OpencodeChatClient(_options);
-        _opencodeChat.SessionStatusChanged += OnOpencodeSessionStatusChanged;
-        _opencodeChat.MessagePartUpdated += OnOpencodeMessagePartUpdated;
+        _harnessClient = new OpencodeChatClient(_options);
+        _harnessClient.SessionStatusChanged += OnHarnessSessionStatusChanged;
+        _harnessClient.MessagePartUpdated += OnHarnessMessagePartUpdated;
         var startupModel = GetStartupDefaultModelId();
         if (!string.IsNullOrWhiteSpace(startupModel))
         {
-            Console.WriteLine($"[opencode] startup default model configured (runtime-overridable): {startupModel}");
+            Console.WriteLine($"[harness] startup default model configured (runtime-overridable): {startupModel}");
         }
 
         var configuredHandlers = GetConfiguredHandlerNamesOnStartup();
@@ -445,102 +399,6 @@ internal sealed partial class BotSession : IDisposable
             _lastLoginMessage);
     }
 
-    public async Task<BotToolResult> AnimationStartAsync(string animation, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(animation))
-        {
-            return BotToolResult.Fail("animation is required.");
-        }
-
-        if (!TryResolveAnimation(animation, out var animationId, out var resolvedName, out var error))
-        {
-            return BotToolResult.Fail(error);
-        }
-
-        return await RunActionAsync(
-            $"Started animation {resolvedName}.",
-            c => c.Self.AnimationStart(animationId, true),
-            cancellationToken);
-    }
-
-    public async Task<BotToolResult> AnimationStopAsync(string animation, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(animation))
-        {
-            return BotToolResult.Fail("animation is required.");
-        }
-
-        if (!TryResolveAnimation(animation, out var animationId, out var resolvedName, out var error))
-        {
-            return BotToolResult.Fail(error);
-        }
-
-        return await RunActionAsync(
-            $"Stopped animation {resolvedName}.",
-            c => c.Self.AnimationStop(animationId, true),
-            cancellationToken);
-    }
-
-    public Task<AnimationListResult> AnimationsListAsync(CancellationToken cancellationToken)
-    {
-        return ExecuteLockedAsync((client, _) =>
-        {
-            var entries = Animations.ToDictionary()
-                .Select(kvp => new AnimationInfo(kvp.Value, kvp.Key.ToString()))
-                .OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            return Task.FromResult(AnimationListResult.OkResult(entries, $"Listed {entries.Count} built-in animations."));
-        }, cancellationToken);
-    }
-
-    public Task<AnimationListResult> ActiveAnimationsAsync(CancellationToken cancellationToken)
-    {
-        return ExecuteLockedAsync((client, _) =>
-        {
-            var dict = Animations.ToDictionary();
-            var entries = client.Self.SignaledAnimations
-                .Select(kvp =>
-                {
-                    var name = dict.TryGetValue(kvp.Key, out var n) ? n : null;
-                    return new AnimationInfo(name ?? kvp.Key.ToString(), kvp.Key.ToString(), kvp.Value);
-                })
-                .OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            return Task.FromResult(AnimationListResult.OkResult(entries, $"Found {entries.Count} active animations."));
-        }, cancellationToken);
-    }
-
-    private static bool TryResolveAnimation(string input, out UUID animationId, out string resolvedName, out string error)
-    {
-        animationId = UUID.Zero;
-        resolvedName = input;
-        error = string.Empty;
-
-        var trimmed = input.Trim();
-
-        if (UUID.TryParse(trimmed, out animationId))
-        {
-            resolvedName = trimmed;
-            return true;
-        }
-
-        var dict = Animations.ToDictionary();
-        var match = dict.FirstOrDefault(kvp =>
-            string.Equals(kvp.Value, trimmed, StringComparison.OrdinalIgnoreCase));
-
-        if (match.Key != UUID.Zero)
-        {
-            animationId = match.Key;
-            resolvedName = match.Value;
-            return true;
-        }
-
-        error = $"Animation '{trimmed}' is not a valid UUID or built-in animation name.";
-        return false;
-    }
-
     private static bool TryResolveChatType(string? input, out ChatType chatType, out string error)
     {
         error = string.Empty;
@@ -631,1489 +489,6 @@ internal sealed partial class BotSession : IDisposable
             cancellationToken);
     }
 
-    public async Task<BotToolResult> SetBotMoodAsync(string emotion, CancellationToken cancellationToken)
-    {
-        var normalizedEmotion = NormalizeMoodName(emotion);
-        if (string.IsNullOrWhiteSpace(normalizedEmotion))
-        {
-            return BotToolResult.Fail("emotion is required and must contain letters, numbers, '-' or '_'.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            UUID targetBridgeObjectId;
-            lock (_dialogBridgeTrustLock)
-            {
-                targetBridgeObjectId = _trustedDialogBridgeObjectId;
-            }
-
-            if (targetBridgeObjectId == UUID.Zero)
-            {
-                return Task.FromResult(BotToolResult.Fail("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply)."));
-            }
-
-            // Leave target object token empty so the currently running bridge script
-            // in the attachment processes the mood request even if persisted UUID pins are stale.
-            var payload = string.Join("|", new[]
-            {
-                LslDialogBridgeMoodRequestPrefix,
-                EncodeDialogToken(string.Empty),
-                EncodeDialogToken(normalizedEmotion)
-            });
-
-            client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-            Console.WriteLine($"[dialog-bridge] sent mood request: object={targetBridgeObjectId} emotion={normalizedEmotion}");
-            return Task.FromResult(BotToolResult.OkResult($"Requested bot mood '{normalizedEmotion}' via dialog bridge request channel {LslDialogBridgeRequestChannel}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<DataToolResult> BotMoodListAsync(bool includeUtilityTextures, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            UUID targetBridgeObjectId;
-            lock (_dialogBridgeTrustLock)
-            {
-                targetBridgeObjectId = _trustedDialogBridgeObjectId;
-            }
-
-            if (targetBridgeObjectId == UUID.Zero)
-            {
-                return DataToolResult.FailResult("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply).");
-            }
-
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return DataToolResult.FailResult("No current simulator available.");
-            }
-
-            Primitive? bridgePrim = null;
-            foreach (var prim in sim.ObjectsPrimitives.Values)
-            {
-                if (prim.ID == targetBridgeObjectId)
-                {
-                    bridgePrim = prim;
-                    break;
-                }
-            }
-
-            if (bridgePrim == null)
-            {
-                return DataToolResult.FailResult($"Pinned dialog bridge object {targetBridgeObjectId} is not present in current simulator cache.");
-            }
-
-            var entries = await client.Inventory
-                .GetTaskInventoryAsync(targetBridgeObjectId, bridgePrim.LocalID, sim, token)
-                .ConfigureAwait(false);
-
-            var textureNames = entries
-                .OfType<InventoryItem>()
-                .Where(item => item.AssetType == AssetType.Texture)
-                .Select(item => item.Name?.Trim() ?? string.Empty)
-                .Where(name => !string.IsNullOrWhiteSpace(name))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            if (textureNames.Count == 0)
-            {
-                return DataToolResult.FailResult($"No texture assets were found in bridge object {targetBridgeObjectId} task inventory.");
-            }
-
-            var utilityNames = new[] { "base", "cross" };
-            var utilitySet = new HashSet<string>(utilityNames, StringComparer.OrdinalIgnoreCase);
-            var moodNames = textureNames
-                .Where(name => includeUtilityTextures || !utilitySet.Contains(name))
-                .ToList();
-
-            var payload = JsonSerializer.Serialize(new
-            {
-                bridgeObjectId = targetBridgeObjectId.ToString(),
-                includeUtilityTextures,
-                textureCount = textureNames.Count,
-                moodCount = moodNames.Count,
-                utilityTextures = utilityNames,
-                moodNames,
-                allTextureNames = textureNames
-            });
-
-            return DataToolResult.OkResult($"Found {moodNames.Count} mood texture name(s) on bridge object {targetBridgeObjectId}.", payload);
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<EnvironmentToolResult> GetRegionEnvironmentAsync(CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var environment = await client.Environment.GetRegionEnvironmentAsync(token).ConfigureAwait(false);
-            if (environment == null)
-            {
-                return EnvironmentToolResult.FailResult("Unable to fetch region environment (capability unavailable or request failed).");
-            }
-
-            var payloadJson = OSDParser.SerializeJsonString(environment.Serialize(), preserveDefaults: true);
-            return EnvironmentToolResult.OkResult("Fetched region environment.", payloadJson);
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<EnvironmentToolResult> GetParcelEnvironmentAsync(int parcelId, CancellationToken cancellationToken)
-    {
-        if (parcelId < 0)
-        {
-            return EnvironmentToolResult.FailResult("parcelId must be >= 0.");
-        }
-
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var environment = await client.Environment.GetParcelEnvironmentAsync(parcelId, token).ConfigureAwait(false);
-            if (environment == null)
-            {
-                return EnvironmentToolResult.FailResult($"Unable to fetch parcel environment for parcelId={parcelId} (capability unavailable or request failed).");
-            }
-
-            var payloadJson = OSDParser.SerializeJsonString(environment.Serialize(), preserveDefaults: true);
-            return EnvironmentToolResult.OkResult($"Fetched parcel environment for parcelId={parcelId}.", payloadJson);
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> ResetRegionEnvironmentAsync(CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var ok = await client.Environment.ResetRegionEnvironmentAsync(token).ConfigureAwait(false);
-            if (!ok)
-            {
-                return BotToolResult.Fail("Region environment reset failed or was rejected.");
-            }
-
-            return BotToolResult.OkResult("Region environment reset requested successfully.");
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> ResetParcelEnvironmentAsync(int parcelId, CancellationToken cancellationToken)
-    {
-        if (parcelId < 0)
-        {
-            return BotToolResult.Fail("parcelId must be >= 0.");
-        }
-
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var ok = await client.Environment.ResetParcelEnvironmentAsync(parcelId, token).ConfigureAwait(false);
-            if (!ok)
-            {
-                return BotToolResult.Fail($"Parcel environment reset failed or was rejected for parcelId={parcelId}.");
-            }
-
-            return BotToolResult.OkResult($"Parcel environment reset requested for parcelId={parcelId}.");
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<EnvironmentToolResult> GetLegacyEnvironmentAsync(CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var environment = await client.Environment.GetLegacyEnvironmentAsync(token).ConfigureAwait(false);
-            if (environment == null)
-            {
-                return EnvironmentToolResult.FailResult("Unable to fetch legacy environment (capability unavailable or request failed).");
-            }
-
-            var payloadJson = OSDParser.SerializeJsonString(environment.Serialize(), preserveDefaults: true);
-            return EnvironmentToolResult.OkResult("Fetched legacy environment.", payloadJson);
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetLegacyEnvironmentRawAsync(string payload, string payloadFormat, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(payload))
-        {
-            return BotToolResult.Fail("payload is required.");
-        }
-
-        if (!TryParseLlsdPayload(payload, payloadFormat, out var parsed, out var parseError))
-        {
-            return BotToolResult.Fail(parseError);
-        }
-
-        if (parsed is not OSDMap map)
-        {
-            return BotToolResult.Fail("payload must deserialize to an LLSD map/object at the root.");
-        }
-
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var ok = await client.Environment.SetLegacyEnvironmentAsync(map, token).ConfigureAwait(false);
-            if (!ok)
-            {
-                return BotToolResult.Fail("Legacy environment set failed or was rejected.");
-            }
-
-            return BotToolResult.OkResult("Legacy environment update posted successfully.");
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetRegionEnvironmentRawAsync(string payload, string payloadFormat, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(payload))
-        {
-            return BotToolResult.Fail("payload is required.");
-        }
-
-        if (!TryParseLlsdPayload(payload, payloadFormat, out var parsed, out var parseError))
-        {
-            return BotToolResult.Fail(parseError);
-        }
-
-        if (parsed is not OSDMap map)
-        {
-            return BotToolResult.Fail("payload must deserialize to an LLSD map/object at the root.");
-        }
-
-        if (!TryBuildEnvironmentDataFromPayloadMap(map, out var environment, out var environmentError))
-        {
-            return BotToolResult.Fail(environmentError);
-        }
-
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var response = await client.Environment.SetRegionEnvironmentAsync(environment, token).ConfigureAwait(false);
-            if (response == null)
-            {
-                return BotToolResult.Fail("Region environment update failed (capability unavailable or request failed).");
-            }
-
-            if (!response.Success)
-            {
-                var detail = string.IsNullOrWhiteSpace(response.Message) ? string.Empty : $" Detail: {response.Message}";
-                return BotToolResult.Fail($"Region environment update was rejected.{detail}");
-            }
-
-            return BotToolResult.OkResult($"Region environment updated successfully (version={response.Version}).");
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetParcelEnvironmentRawAsync(int parcelId, string payload, string payloadFormat, CancellationToken cancellationToken)
-    {
-        if (parcelId < 0)
-        {
-            return BotToolResult.Fail("parcelId must be >= 0.");
-        }
-
-        if (string.IsNullOrWhiteSpace(payload))
-        {
-            return BotToolResult.Fail("payload is required.");
-        }
-
-        if (!TryParseLlsdPayload(payload, payloadFormat, out var parsed, out var parseError))
-        {
-            return BotToolResult.Fail(parseError);
-        }
-
-        if (parsed is not OSDMap map)
-        {
-            return BotToolResult.Fail("payload must deserialize to an LLSD map/object at the root.");
-        }
-
-        if (!TryBuildEnvironmentDataFromPayloadMap(map, out var environment, out var environmentError))
-        {
-            return BotToolResult.Fail(environmentError);
-        }
-
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var response = await client.Environment.SetParcelEnvironmentAsync(parcelId, environment, token).ConfigureAwait(false);
-            if (response == null)
-            {
-                return BotToolResult.Fail($"Parcel environment update failed for parcelId={parcelId} (capability unavailable or request failed).");
-            }
-
-            if (!response.Success)
-            {
-                var detail = string.IsNullOrWhiteSpace(response.Message) ? string.Empty : $" Detail: {response.Message}";
-                return BotToolResult.Fail($"Parcel environment update was rejected for parcelId={parcelId}.{detail}");
-            }
-
-            return BotToolResult.OkResult($"Parcel environment updated for parcelId={parcelId} (version={response.Version}).");
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> ResetLegacyEnvironmentAsync(CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var ok = await client.Environment.SetLegacyEnvironmentAsync(new OSDMap(), token).ConfigureAwait(false);
-            if (!ok)
-            {
-                return BotToolResult.Fail("Legacy environment reset failed or was rejected.");
-            }
-
-            return BotToolResult.OkResult("Legacy environment reset posted using an empty LLSD map.");
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<PrimCreateResult> CreatePrimAsync(
-        string shape,
-        float x,
-        float y,
-        float z,
-        float scaleX,
-        float scaleY,
-        float scaleZ,
-        float rollDegrees,
-        float pitchDegrees,
-        float yawDegrees,
-        string material,
-        string? name,
-        string? description,
-        CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return PrimCreateResult.FailResult("No current simulator available.");
-            }
-
-            if (!TryBuildConstructionData(shape, material, out var primData, out var shapeError))
-            {
-                return PrimCreateResult.FailResult(shapeError);
-            }
-
-            var position = ClampLocalPosition(new Vector3(x, y, z));
-            var scale = ClampScale(new Vector3(scaleX, scaleY, scaleZ));
-            var rotation = Quaternion.CreateFromEulers(
-                rollDegrees * Utils.DEG_TO_RAD,
-                pitchDegrees * Utils.DEG_TO_RAD,
-                yawDegrees * Utils.DEG_TO_RAD);
-
-            var createdPrimTask = WaitForCreatedPrimAsync(client, sim, position, token);
-            client.Objects.AddPrim(sim, primData, client.Self.ActiveGroup, position, scale, rotation);
-
-            var created = await createdPrimTask.ConfigureAwait(false);
-            if (created == null)
-            {
-                return PrimCreateResult.FailResult("Timed out waiting for created prim confirmation.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(name))
-            {
-                client.Objects.SetName(sim, created.LocalID, name);
-            }
-
-            if (!string.IsNullOrWhiteSpace(description))
-            {
-                client.Objects.SetDescription(sim, created.LocalID, description);
-            }
-
-            return PrimCreateResult.OkResult(
-                created.LocalID,
-                $"Created {shape} prim localId={created.LocalID} at {FormatVector(created.Position)}.");
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetPrimPositionAsync(uint localId, float x, float y, float z, bool childOnly, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            var position = ClampLocalPosition(new Vector3(x, y, z));
-            client.Objects.SetPosition(sim, localId, position, childOnly);
-            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} position to {FormatVector(position)}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetPrimScaleAsync(uint localId, float x, float y, float z, bool childOnly, bool uniform, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            var scale = ClampScale(new Vector3(x, y, z));
-            client.Objects.SetScale(sim, localId, scale, childOnly, uniform);
-            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} scale to {FormatVector(scale)}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetPrimRotationEulerAsync(uint localId, float rollDegrees, float pitchDegrees, float yawDegrees, bool childOnly, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            var quat = Quaternion.CreateFromEulers(
-                rollDegrees * Utils.DEG_TO_RAD,
-                pitchDegrees * Utils.DEG_TO_RAD,
-                yawDegrees * Utils.DEG_TO_RAD);
-            client.Objects.SetRotation(sim, localId, quat, childOnly);
-            return Task.FromResult(BotToolResult.OkResult(
-                $"Set prim {localId} rotation to roll={rollDegrees:F2}, pitch={pitchDegrees:F2}, yaw={yawDegrees:F2} degrees."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetPrimTextureAsync(uint localId, string textureId, int faceIndex, CancellationToken cancellationToken)
-    {
-        if (!UUID.TryParse(textureId, out var textureUuid))
-        {
-            return BotToolResult.Fail("textureId must be a valid UUID.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
-
-            if (faceIndex < 0)
-            {
-                te.DefaultTexture ??= new Primitive.TextureEntryFace(null);
-                te.DefaultTexture.TextureID = textureUuid;
-                client.Objects.SetTextures(sim, localId, te);
-                return Task.FromResult(BotToolResult.OkResult($"Set default texture on prim {localId} to {textureUuid}."));
-            }
-
-            if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
-            {
-                return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
-            }
-
-            var face = te.CreateFace((uint)faceIndex);
-            face.TextureID = textureUuid;
-            client.Objects.SetTextures(sim, localId, te);
-            return Task.FromResult(BotToolResult.OkResult($"Set texture on prim {localId} face {faceIndex} to {textureUuid}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetPrimFaceParamsAsync(
-        uint localId,
-        int faceIndex,
-        float? red,
-        float? green,
-        float? blue,
-        float? alpha,
-        float? repeatU,
-        float? repeatV,
-        float? offsetU,
-        float? offsetV,
-        float? rotationRadians,
-        float? glow,
-        bool? fullbright,
-        string? shiny,
-        string? bump,
-        CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
-
-            Primitive.TextureEntryFace face;
-            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
-            if (faceIndex < 0)
-            {
-                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
-                te.DefaultTexture = face;
-            }
-            else
-            {
-                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
-                {
-                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
-                }
-
-                face = te.CreateFace((uint)faceIndex);
-            }
-
-            if (red.HasValue || green.HasValue || blue.HasValue || alpha.HasValue)
-            {
-                var rgba = face.RGBA;
-                var r = Math.Clamp(red ?? rgba.R, 0f, 1f);
-                var g = Math.Clamp(green ?? rgba.G, 0f, 1f);
-                var b = Math.Clamp(blue ?? rgba.B, 0f, 1f);
-                var a = Math.Clamp(alpha ?? rgba.A, 0f, 1f);
-                face.RGBA = new Color4(r, g, b, a);
-            }
-
-            if (repeatU.HasValue)
-            {
-                face.RepeatU = repeatU.Value;
-            }
-
-            if (repeatV.HasValue)
-            {
-                face.RepeatV = repeatV.Value;
-            }
-
-            if (offsetU.HasValue)
-            {
-                face.OffsetU = Math.Clamp(offsetU.Value, -1f, 1f);
-            }
-
-            if (offsetV.HasValue)
-            {
-                face.OffsetV = Math.Clamp(offsetV.Value, -1f, 1f);
-            }
-
-            if (rotationRadians.HasValue)
-            {
-                face.Rotation = rotationRadians.Value;
-            }
-
-            if (glow.HasValue)
-            {
-                face.Glow = Math.Clamp(glow.Value, 0f, 1f);
-            }
-
-            if (fullbright.HasValue)
-            {
-                face.Fullbright = fullbright.Value;
-            }
-
-            if (!string.IsNullOrWhiteSpace(shiny))
-            {
-                if (!Enum.TryParse<Shininess>(shiny, true, out var shinyValue))
-                {
-                    return Task.FromResult(BotToolResult.Fail("Invalid shiny value. Use: None, Low, Medium, High."));
-                }
-
-                face.Shiny = shinyValue;
-            }
-
-            if (!string.IsNullOrWhiteSpace(bump))
-            {
-                if (!Enum.TryParse<Bumpiness>(bump, true, out var bumpValue))
-                {
-                    return Task.FromResult(BotToolResult.Fail("Invalid bump value. Use values from Bumpiness enum (e.g. None, Brightness, Darkness, Woodgrain)."));
-                }
-
-                face.Bump = bumpValue;
-            }
-
-            client.Objects.SetTextures(sim, localId, te);
-            return Task.FromResult(BotToolResult.OkResult($"Updated {faceLabel} parameters on prim {localId}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> NudgePrimFaceUvAsync(
-        uint localId,
-        int faceIndex,
-        float? deltaRepeatU,
-        float? deltaRepeatV,
-        float? deltaOffsetU,
-        float? deltaOffsetV,
-        float? deltaRotationRadians,
-        CancellationToken cancellationToken)
-    {
-        if (!deltaRepeatU.HasValue
-            && !deltaRepeatV.HasValue
-            && !deltaOffsetU.HasValue
-            && !deltaOffsetV.HasValue
-            && !deltaRotationRadians.HasValue)
-        {
-            return BotToolResult.Fail("At least one delta value is required.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
-
-            Primitive.TextureEntryFace face;
-            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
-            if (faceIndex < 0)
-            {
-                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
-                te.DefaultTexture = face;
-            }
-            else
-            {
-                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
-                {
-                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
-                }
-
-                face = te.CreateFace((uint)faceIndex);
-            }
-
-            if (deltaRepeatU.HasValue)
-            {
-                face.RepeatU += deltaRepeatU.Value;
-            }
-
-            if (deltaRepeatV.HasValue)
-            {
-                face.RepeatV += deltaRepeatV.Value;
-            }
-
-            if (deltaOffsetU.HasValue)
-            {
-                face.OffsetU = Math.Clamp(face.OffsetU + deltaOffsetU.Value, -1f, 1f);
-            }
-
-            if (deltaOffsetV.HasValue)
-            {
-                face.OffsetV = Math.Clamp(face.OffsetV + deltaOffsetV.Value, -1f, 1f);
-            }
-
-            if (deltaRotationRadians.HasValue)
-            {
-                face.Rotation += deltaRotationRadians.Value;
-            }
-
-            client.Objects.SetTextures(sim, localId, te);
-            return Task.FromResult(BotToolResult.OkResult($"Nudged UV parameters on {faceLabel} of prim {localId}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> ApplyPrimFaceUvPresetAsync(
-        uint localId,
-        int faceIndex,
-        string preset,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(preset))
-        {
-            return BotToolResult.Fail("preset is required. Use: fit, reset, tile2x2, tile4x4, flipU, flipV, rotate90, rotate180, rotate270, center.");
-        }
-
-        var normalized = preset.Trim().ToLowerInvariant();
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
-
-            Primitive.TextureEntryFace face;
-            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
-            if (faceIndex < 0)
-            {
-                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
-                te.DefaultTexture = face;
-            }
-            else
-            {
-                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
-                {
-                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
-                }
-
-                face = te.CreateFace((uint)faceIndex);
-            }
-
-            switch (normalized)
-            {
-                case "fit":
-                case "reset":
-                    face.RepeatU = 1f;
-                    face.RepeatV = 1f;
-                    face.OffsetU = 0f;
-                    face.OffsetV = 0f;
-                    face.Rotation = 0f;
-                    break;
-                case "tile2x2":
-                    face.RepeatU = 2f;
-                    face.RepeatV = 2f;
-                    break;
-                case "tile4x4":
-                    face.RepeatU = 4f;
-                    face.RepeatV = 4f;
-                    break;
-                case "flipu":
-                    face.RepeatU = -face.RepeatU;
-                    break;
-                case "flipv":
-                    face.RepeatV = -face.RepeatV;
-                    break;
-                case "rotate90":
-                    face.Rotation += MathF.PI / 2f;
-                    break;
-                case "rotate180":
-                    face.Rotation += MathF.PI;
-                    break;
-                case "rotate270":
-                    face.Rotation += (MathF.PI * 3f) / 2f;
-                    break;
-                case "center":
-                    face.OffsetU = 0f;
-                    face.OffsetV = 0f;
-                    break;
-                default:
-                    return Task.FromResult(BotToolResult.Fail("Unknown preset. Use: fit, reset, tile2x2, tile4x4, flipU, flipV, rotate90, rotate180, rotate270, center."));
-            }
-
-            client.Objects.SetTextures(sim, localId, te);
-            return Task.FromResult(BotToolResult.OkResult($"Applied UV preset '{preset}' to {faceLabel} of prim {localId}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> TilePrimFaceUvAsync(
-        uint localId,
-        int faceIndex,
-        float repeat,
-        CancellationToken cancellationToken)
-    {
-        if (repeat <= 0f)
-        {
-            return BotToolResult.Fail("repeat must be greater than 0.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
-
-            Primitive.TextureEntryFace face;
-            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
-            if (faceIndex < 0)
-            {
-                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
-                te.DefaultTexture = face;
-            }
-            else
-            {
-                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
-                {
-                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
-                }
-
-                face = te.CreateFace((uint)faceIndex);
-            }
-
-            face.RepeatU = repeat;
-            face.RepeatV = repeat;
-
-            client.Objects.SetTextures(sim, localId, te);
-            return Task.FromResult(BotToolResult.OkResult($"Set tiling to {repeat:F2}x{repeat:F2} on {faceLabel} of prim {localId}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> TilePrimFaceUvNonUniformAsync(
-        uint localId,
-        int faceIndex,
-        float repeatU,
-        float repeatV,
-        CancellationToken cancellationToken)
-    {
-        if (repeatU <= 0f || repeatV <= 0f)
-        {
-            return BotToolResult.Fail("repeatU and repeatV must both be greater than 0.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
-
-            Primitive.TextureEntryFace face;
-            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
-            if (faceIndex < 0)
-            {
-                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
-                te.DefaultTexture = face;
-            }
-            else
-            {
-                if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
-                {
-                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
-                }
-
-                face = te.CreateFace((uint)faceIndex);
-            }
-
-            face.RepeatU = repeatU;
-            face.RepeatV = repeatV;
-
-            client.Objects.SetTextures(sim, localId, te);
-            return Task.FromResult(BotToolResult.OkResult($"Set tiling to U={repeatU:F2}, V={repeatV:F2} on {faceLabel} of prim {localId}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<PrimInspectResult> InspectPrimAsync(uint localId, bool includeFaceTextures, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(PrimInspectResult.FailResult("No current simulator available."));
-            }
-
-            if (!sim.ObjectsPrimitives.TryGetValue(localId, out var prim))
-            {
-                return Task.FromResult(PrimInspectResult.FailResult($"Prim {localId} not found in current simulator cache."));
-            }
-
-            var info = BuildPrimInfo(
-                prim,
-                includeFaceTextures,
-                refreshRequested: false,
-                refreshReceived: false,
-                refreshDetail: "Using simulator cache only (no explicit property refresh requested).",
-                refreshedAtUtc: null);
-
-            return Task.FromResult(PrimInspectResult.OkResult(info));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<PrimInspectResult> FetchPrimPropertiesAsync(
-        uint localId,
-        bool includeFaceTextures,
-        float waitTimeoutSeconds,
-        CancellationToken cancellationToken)
-    {
-        if (waitTimeoutSeconds <= 0f || waitTimeoutSeconds > 30f)
-        {
-            return PrimInspectResult.FailResult("waitTimeoutSeconds must be > 0 and <= 30.");
-        }
-
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return PrimInspectResult.FailResult("No current simulator available.");
-            }
-
-            if (!sim.ObjectsPrimitives.TryGetValue(localId, out var prim))
-            {
-                return PrimInspectResult.FailResult($"Prim {localId} not found in current simulator cache.");
-            }
-
-            var refresh = await RefreshPrimPropertiesAsync(
-                client,
-                sim,
-                prim,
-                TimeSpan.FromSeconds(waitTimeoutSeconds),
-                token).ConfigureAwait(false);
-
-            var info = BuildPrimInfo(
-                prim,
-                includeFaceTextures,
-                refreshRequested: true,
-                refreshReceived: refresh.Received,
-                refreshDetail: refresh.Detail,
-                refreshedAtUtc: refresh.RefreshedAtUtc);
-
-            var message = refresh.Received
-                ? $"Fetched refreshed prim properties for localId={localId}."
-                : $"Property refresh timed out for localId={localId}; returned best-effort cached data.";
-
-            return PrimInspectResult.OkResult(info, message);
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task<(bool Received, string Detail, DateTimeOffset? RefreshedAtUtc)> RefreshPrimPropertiesAsync(
-        GridClient client,
-        Simulator simulator,
-        Primitive prim,
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
-    {
-        var familyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var fullTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        DateTimeOffset? refreshedAtUtc = null;
-
-        void MarkRefreshed()
-        {
-            refreshedAtUtc = DateTimeOffset.UtcNow;
-            _primPropertiesRefreshedAtByObjectId[prim.ID] = refreshedAtUtc.Value;
-        }
-
-        void OnObjectPropertiesFamily(object? sender, ObjectPropertiesFamilyEventArgs e)
-        {
-            if (!ReferenceEquals(e.Simulator, simulator) || e.Properties.ObjectID != prim.ID)
-            {
-                return;
-            }
-
-            prim.Properties ??= new Primitive.ObjectProperties();
-            prim.Properties.SetFamilyProperties(e.Properties);
-            MarkRefreshed();
-            familyTcs.TrySetResult(true);
-        }
-
-        void OnObjectPropertiesUpdated(object? sender, ObjectPropertiesUpdatedEventArgs e)
-        {
-            if (!ReferenceEquals(e.Simulator, simulator) || e.Prim.LocalID != prim.LocalID)
-            {
-                return;
-            }
-
-            prim.Properties = e.Properties;
-            MarkRefreshed();
-            fullTcs.TrySetResult(true);
-        }
-
-        client.Objects.ObjectPropertiesFamily += OnObjectPropertiesFamily;
-        client.Objects.ObjectPropertiesUpdated += OnObjectPropertiesUpdated;
-
-        try
-        {
-            client.Objects.RequestObjectPropertiesFamily(simulator, prim.ID);
-            client.Objects.SelectObject(simulator, prim.LocalID, automaticDeselect: true);
-
-            var waitTask = Task.Delay(timeout, cancellationToken);
-            var bothTask = Task.WhenAll(familyTcs.Task, fullTcs.Task);
-            var completed = await Task.WhenAny(bothTask, waitTask).ConfigureAwait(false);
-
-            if (completed == bothTask)
-            {
-                return (true, "Received both family and full object property updates.", refreshedAtUtc);
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var gotFamily = familyTcs.Task.IsCompletedSuccessfully;
-            var gotFull = fullTcs.Task.IsCompletedSuccessfully;
-            var gotAny = gotFamily || gotFull;
-            var detail = gotAny
-                ? $"Timed out waiting for full property refresh ({(gotFamily ? "family " : string.Empty)}{(gotFull ? "full" : string.Empty)} update received)."
-                : "Timed out waiting for object property refresh updates.";
-            return (gotAny, detail.Trim(), refreshedAtUtc);
-        }
-        finally
-        {
-            client.Objects.ObjectPropertiesFamily -= OnObjectPropertiesFamily;
-            client.Objects.ObjectPropertiesUpdated -= OnObjectPropertiesUpdated;
-        }
-    }
-
-    private PrimInfo BuildPrimInfo(
-        Primitive prim,
-        bool includeFaceTextures,
-        bool refreshRequested,
-        bool refreshReceived,
-        string refreshDetail,
-        DateTimeOffset? refreshedAtUtc)
-    {
-        var faceTextures = new List<PrimFaceTextureInfo>();
-        string? defaultTextureId = null;
-        if (prim.Textures?.DefaultTexture != null)
-        {
-            defaultTextureId = prim.Textures.DefaultTexture.TextureID.ToString();
-        }
-
-        if (includeFaceTextures && prim.Textures != null)
-        {
-            for (var i = 0; i < Primitive.TextureEntry.MAX_FACES; i++)
-            {
-                var face = prim.Textures.FaceTextures[i];
-                if (face == null)
-                {
-                    continue;
-                }
-
-                faceTextures.Add(new PrimFaceTextureInfo(i, face.TextureID.ToString()));
-            }
-        }
-
-        var properties = prim.Properties;
-        var permissions = properties == null
-            ? null
-            : new PrimPermissionsInfo(
-                (uint)properties.Permissions.BaseMask,
-                (uint)properties.Permissions.OwnerMask,
-                (uint)properties.Permissions.GroupMask,
-                (uint)properties.Permissions.EveryoneMask,
-                (uint)properties.Permissions.NextOwnerMask);
-
-        var sale = properties == null
-            ? null
-            : new PrimSaleInfo(properties.SaleType.ToString(), properties.SalePrice);
-
-        var sitNamePresent = !string.IsNullOrWhiteSpace(properties?.SitName);
-        var clickActionSit = prim.ClickAction == ClickAction.Sit;
-        var likelySittablePrim = !prim.IsAttachment;
-        var isSittable = sitNamePresent || clickActionSit || likelySittablePrim;
-        var sitDetection = sitNamePresent
-            ? "SitName is populated on object properties."
-            : clickActionSit
-                ? "ClickAction is Sit."
-                : likelySittablePrim
-                    ? "Prim is non-attachment; most in-world prims can be sat even when SitName is empty."
-                    : "No sit indicators found from cached properties/click action.";
-
-        var sit = new PrimSitInfo(
-            properties?.SitName,
-            properties?.TouchName,
-            isSittable,
-            prim.ClickAction.ToString(),
-            sitDetection);
-
-        var flexible = prim.Flexible == null
-            ? null
-            : new PrimFlexibleInfo(
-                prim.Flexible.Softness,
-                prim.Flexible.Tension,
-                prim.Flexible.Drag,
-                prim.Flexible.Gravity,
-                prim.Flexible.Wind,
-                prim.Flexible.Force.X,
-                prim.Flexible.Force.Y,
-                prim.Flexible.Force.Z);
-
-        var light = prim.Light == null
-            ? null
-            : new PrimLightInfo(
-                prim.Light.Color.R,
-                prim.Light.Color.G,
-                prim.Light.Color.B,
-                prim.Light.Intensity,
-                prim.Light.Radius,
-                prim.Light.Cutoff,
-                prim.Light.Falloff);
-
-        var sculpt = prim.Sculpt == null
-            ? null
-            : new PrimSculptInfo(
-                prim.Sculpt.SculptTexture.ToString(),
-                prim.Sculpt.Type.ToString(),
-                prim.Sculpt.Type == SculptType.Mesh,
-                prim.Sculpt.Invert,
-                prim.Sculpt.Mirror,
-                prim.ExtendedMeshFlags);
-
-        var shape = new PrimShapeDetail(
-            prim.PrimData.PathCurve.ToString(),
-            prim.PrimData.ProfileCurve.ToString(),
-            prim.PrimData.ProfileHole.ToString(),
-            prim.PrimData.Material.ToString(),
-            prim.PrimData.PathBegin,
-            prim.PrimData.PathEnd,
-            prim.PrimData.PathScaleX,
-            prim.PrimData.PathScaleY,
-            prim.PrimData.PathShearX,
-            prim.PrimData.PathShearY,
-            prim.PrimData.PathTwist,
-            prim.PrimData.PathTwistBegin,
-            prim.PrimData.PathTaperX,
-            prim.PrimData.PathTaperY,
-            prim.PrimData.PathRadiusOffset,
-            prim.PrimData.PathSkew,
-            prim.PrimData.PathRevolutions,
-            prim.PrimData.ProfileBegin,
-            prim.PrimData.ProfileEnd,
-            prim.PrimData.ProfileHollow);
-
-        var freshestAt = refreshedAtUtc;
-        if (!freshestAt.HasValue && _primPropertiesRefreshedAtByObjectId.TryGetValue(prim.ID, out var cachedRefresh))
-        {
-            freshestAt = cachedRefresh;
-        }
-
-        var freshness = new PrimPropertyFreshnessInfo(
-            refreshRequested,
-            refreshReceived,
-            freshestAt?.ToString("O"),
-            refreshDetail);
-
-        return new PrimInfo(
-            prim.LocalID,
-            prim.ID.ToString(),
-            prim.ParentID,
-            prim.Type.ToString(),
-            prim.PrimData.PathCurve.ToString(),
-            prim.PrimData.ProfileCurve.ToString(),
-            prim.PrimData.Material.ToString(),
-            prim.Position.X,
-            prim.Position.Y,
-            prim.Position.Z,
-            prim.Scale.X,
-            prim.Scale.Y,
-            prim.Scale.Z,
-            prim.Rotation.X,
-            prim.Rotation.Y,
-            prim.Rotation.Z,
-            prim.Rotation.W,
-            properties?.Name,
-            properties?.Description,
-            properties?.OwnerID.ToString(),
-            properties?.CreatorID.ToString(),
-            defaultTextureId,
-            faceTextures,
-            shape,
-            permissions,
-            sale,
-            sit,
-            flexible,
-            light,
-            sculpt,
-            freshness);
-    }
-
-    public async Task<BotToolResult> SelectPrimAsync(uint localId, bool automaticDeselect, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            client.Objects.SelectObject(sim, localId, automaticDeselect);
-            return Task.FromResult(BotToolResult.OkResult(
-                automaticDeselect
-                    ? $"Selected prim {localId} (auto-deselect enabled)."
-                    : $"Selected prim {localId}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> DeselectPrimAsync(uint localId, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            client.Objects.DeselectObject(sim, localId);
-            return Task.FromResult(BotToolResult.OkResult($"Deselected prim {localId}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> DeletePrimAsync(uint localId, CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            // DeRez to inventory; if localId is a child prim, simulator deletes the whole linkset.
-            client.Inventory.RequestDeRezToInventory(localId);
-            return Task.FromResult(BotToolResult.OkResult($"Delete request sent for prim {localId} (de-rez to inventory)."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> DeleteManyPrimsAsync(string localIdsCsv, CancellationToken cancellationToken)
-    {
-        if (!TryParseLocalIdsCsv(localIdsCsv, out var localIds, out var parseError))
-        {
-            return BotToolResult.Fail(parseError);
-        }
-
-        if (localIds.Count == 0)
-        {
-            return BotToolResult.Fail("At least one local ID is required to delete prims.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            foreach (var localId in localIds)
-            {
-                // DeRez to inventory; if localId is a child prim, simulator deletes the whole linkset.
-                client.Inventory.RequestDeRezToInventory(localId);
-            }
-
-            return Task.FromResult(BotToolResult.OkResult($"Delete request sent for {localIds.Count} prim(s): {string.Join(",", localIds)}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<PrimQueryResult> FindPrimsByNameAsync(string name, int maxResults, bool caseSensitive, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return PrimQueryResult.FailResult("name is required.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(PrimQueryResult.FailResult("No current simulator available."));
-            }
-
-            var limit = Math.Clamp(maxResults, 1, 500);
-            var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-            var at = client.Self.SimPosition;
-
-            var prims = sim.ObjectsPrimitives.Values
-                .Where(p => !string.IsNullOrWhiteSpace(p.Properties?.Name)
-                    && p.Properties!.Name.Contains(name, comparison))
-                .Select(p => ToPrimSummary(p, at))
-                .OrderBy(p => p.DistanceMeters)
-                .ThenBy(p => p.LocalId)
-                .Take(limit)
-                .ToList();
-
-            return Task.FromResult(PrimQueryResult.OkResult(prims, $"Matched {prims.Count} prim(s)."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<PrimQueryResult> ListNearbyPrimsAsync(float radiusMeters, int maxResults, CancellationToken cancellationToken)
-    {
-        if (radiusMeters <= 0f)
-        {
-            return PrimQueryResult.FailResult("radiusMeters must be greater than 0.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(PrimQueryResult.FailResult("No current simulator available."));
-            }
-
-            var limit = Math.Clamp(maxResults, 1, 500);
-            var radius = Math.Clamp(radiusMeters, 0.1f, 4096f);
-            var at = client.Self.SimPosition;
-
-            var prims = sim.ObjectsPrimitives.Values
-                .Select(p => ToPrimSummary(p, at))
-                .Where(p => p.DistanceMeters <= radius)
-                .OrderBy(p => p.DistanceMeters)
-                .ThenBy(p => p.LocalId)
-                .Take(limit)
-                .ToList();
-
-            return Task.FromResult(PrimQueryResult.OkResult(prims, $"Found {prims.Count} nearby prim(s) within {radius:F2}m."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetPrimNameAsync(uint localId, string name, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return BotToolResult.Fail("name is required.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            client.Objects.SetName(sim, localId, name);
-            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} name to '{name}'."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> SetPrimDescriptionAsync(uint localId, string description, CancellationToken cancellationToken)
-    {
-        if (description == null)
-        {
-            return BotToolResult.Fail("description is required (empty string is allowed).");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            client.Objects.SetDescription(sim, localId, description);
-            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} description."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> LinkPrimsAsync(string localIdsCsv, CancellationToken cancellationToken)
-    {
-        if (!TryParseLocalIdsCsv(localIdsCsv, out var localIds, out var parseError))
-        {
-            return BotToolResult.Fail(parseError);
-        }
-
-        if (localIds.Count < 2)
-        {
-            return BotToolResult.Fail("At least two local IDs are required to link prims.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            client.Objects.LinkPrims(sim, localIds);
-            return Task.FromResult(BotToolResult.OkResult($"Link request sent for prims: {string.Join(",", localIds)}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<BotToolResult> UnlinkPrimsAsync(string localIdsCsv, CancellationToken cancellationToken)
-    {
-        if (!TryParseLocalIdsCsv(localIdsCsv, out var localIds, out var parseError))
-        {
-            return BotToolResult.Fail(parseError);
-        }
-
-        if (localIds.Count == 0)
-        {
-            return BotToolResult.Fail("At least one local ID is required to unlink prims.");
-        }
-
-        return await ExecuteLockedAsync((client, _) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
-            }
-
-            client.Objects.DelinkPrims(sim, localIds);
-            return Task.FromResult(BotToolResult.OkResult($"Unlink request sent for prims: {string.Join(",", localIds)}."));
-        }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<PrimCreateResult> ClonePrimAsync(
-        uint sourceLocalId,
-        float offsetX,
-        float offsetY,
-        float offsetZ,
-        bool copyTextures,
-        bool copyName,
-        bool copyDescription,
-        CancellationToken cancellationToken)
-    {
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return PrimCreateResult.FailResult("No current simulator available.");
-            }
-
-            if (!sim.ObjectsPrimitives.TryGetValue(sourceLocalId, out var sourcePrim))
-            {
-                return PrimCreateResult.FailResult($"Source prim {sourceLocalId} not found in current simulator cache.");
-            }
-
-            var newPosition = ClampLocalPosition(new Vector3(
-                sourcePrim.Position.X + offsetX,
-                sourcePrim.Position.Y + offsetY,
-                sourcePrim.Position.Z + offsetZ));
-            var newScale = ClampScale(sourcePrim.Scale);
-            var newRotation = sourcePrim.Rotation;
-            var primData = new Primitive.ConstructionData(sourcePrim.PrimData);
-
-            var createdPrimTask = WaitForCreatedPrimAsync(client, sim, newPosition, token);
-            client.Objects.AddPrim(sim, primData, client.Self.ActiveGroup, newPosition, newScale, newRotation);
-
-            var created = await createdPrimTask.ConfigureAwait(false);
-            if (created == null)
-            {
-                return PrimCreateResult.FailResult("Timed out waiting for cloned prim confirmation.");
-            }
-
-            if (copyTextures && sourcePrim.Textures != null)
-            {
-                client.Objects.SetTextures(sim, created.LocalID, new Primitive.TextureEntry(sourcePrim.Textures));
-            }
-
-            if (copyName && sourcePrim.Properties != null && !string.IsNullOrWhiteSpace(sourcePrim.Properties.Name))
-            {
-                client.Objects.SetName(sim, created.LocalID, sourcePrim.Properties.Name);
-            }
-
-            if (copyDescription && sourcePrim.Properties != null && sourcePrim.Properties.Description != null)
-            {
-                client.Objects.SetDescription(sim, created.LocalID, sourcePrim.Properties.Description);
-            }
-
-            return PrimCreateResult.OkResult(
-                created.LocalID,
-                $"Cloned prim {sourceLocalId} -> {created.LocalID} at {FormatVector(created.Position)}.");
-        }, cancellationToken).ConfigureAwait(false);
-    }
 
     private static string DescribeSimulator(Simulator? sim)
         => sim == null ? "(null)" : $"{sim.Name} ({sim.Handle})";
@@ -2129,10 +504,10 @@ internal sealed partial class BotSession : IDisposable
         }
 
         var client = _client;
-        if (_opencodeChat != null)
+        if (_harnessClient != null)
         {
-            _opencodeChat.SessionStatusChanged -= OnOpencodeSessionStatusChanged;
-            _opencodeChat.MessagePartUpdated -= OnOpencodeMessagePartUpdated;
+            _harnessClient.SessionStatusChanged -= OnHarnessSessionStatusChanged;
+            _harnessClient.MessagePartUpdated -= OnHarnessMessagePartUpdated;
         }
         StopTypingIndicatorIfActive();
         foreach (var cts in _inFlightRequestCtsByConversation.Values)
@@ -2170,7 +545,7 @@ internal sealed partial class BotSession : IDisposable
 
         _pendingDialogPromptWaitByConversation.Clear();
         _pendingTextPromptReplyByConversation.Clear();
-        _busyOpencodeSessions.Clear();
+        __busyHarnessSessions.Clear();
         ClearBusyHoverText();
         DisposeVoiceSupport();
         _client = null;
@@ -2183,7 +558,7 @@ internal sealed partial class BotSession : IDisposable
         {
             _connectGate.Dispose();
             _lifecycleCts.Dispose();
-            if (_opencodeChat is IDisposable disposableWhenNoClient)
+            if (_harnessClient is IDisposable disposableWhenNoClient)
             {
                 disposableWhenNoClient.Dispose();
             }
@@ -2193,9 +568,9 @@ internal sealed partial class BotSession : IDisposable
         CleanupClient(client, logout: true);
         _connectGate.Dispose();
         _lifecycleCts.Dispose();
-        if (_opencodeChat is IDisposable disposableOpencodeChat)
+        if (_harnessClient is IDisposable dsp)
         {
-            disposableOpencodeChat.Dispose();
+            dsp.Dispose();
         }
 
         foreach (var gate in _conversationLocks.Values)
@@ -2215,86 +590,6 @@ internal sealed partial class BotSession : IDisposable
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<PrimCreateResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<PrimCreateResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return PrimCreateResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<PrimInspectResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<PrimInspectResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return PrimInspectResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<PrimQueryResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<PrimQueryResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return PrimQueryResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<LinksetInspectResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<LinksetInspectResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return LinksetInspectResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
     private async Task<BotToolResult> ExecuteLockedAsync(
         Func<GridClient, CancellationToken, Task<BotToolResult>> action,
         CancellationToken cancellationToken)
@@ -2308,46 +603,6 @@ internal sealed partial class BotSession : IDisposable
         catch (Exception ex)
         {
             return BotToolResult.Fail(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<AnimationListResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<AnimationListResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return AnimationListResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<EnvironmentToolResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<EnvironmentToolResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return EnvironmentToolResult.FailResult(ex.Message);
         }
         finally
         {
@@ -2513,94 +768,6 @@ internal sealed partial class BotSession : IDisposable
         return $"I'm in {sim} at <{pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}>";
     }
 
-    private static bool TryBuildConstructionData(string shape, string material, out Primitive.ConstructionData primData, out string error)
-    {
-        primData = BuildDefaultConstructionData();
-        error = string.Empty;
-
-        var normalizedShape = (shape ?? string.Empty).Trim().ToLowerInvariant();
-        switch (normalizedShape)
-        {
-            case "box":
-            case "cube":
-                primData.PathCurve = PathCurve.Line;
-                primData.ProfileCurve = ProfileCurve.Square;
-                break;
-            case "cylinder":
-                primData.PathCurve = PathCurve.Line;
-                primData.ProfileCurve = ProfileCurve.Circle;
-                break;
-            case "prism":
-                primData.PathCurve = PathCurve.Line;
-                primData.ProfileCurve = ProfileCurve.EqualTriangle;
-                break;
-            case "sphere":
-                primData.PathCurve = PathCurve.Circle;
-                primData.ProfileCurve = ProfileCurve.HalfCircle;
-                primData.PathScaleX = 1f;
-                primData.PathScaleY = 1f;
-                break;
-            case "torus":
-                primData.PathCurve = PathCurve.Circle;
-                primData.ProfileCurve = ProfileCurve.Circle;
-                primData.PathScaleX = 1f;
-                primData.PathScaleY = 0.25f;
-                break;
-            case "tube":
-                primData.PathCurve = PathCurve.Circle;
-                primData.ProfileCurve = ProfileCurve.Square;
-                primData.PathScaleX = 1f;
-                primData.PathScaleY = 0.25f;
-                break;
-            case "ring":
-                primData.PathCurve = PathCurve.Circle;
-                primData.ProfileCurve = ProfileCurve.EqualTriangle;
-                primData.PathScaleX = 1f;
-                primData.PathScaleY = 0.25f;
-                break;
-            default:
-                error = "Unsupported shape. Use: box, cylinder, prism, sphere, torus, tube, ring.";
-                return false;
-        }
-
-        if (!Enum.TryParse<Material>((material ?? string.Empty).Trim(), true, out var parsedMaterial))
-        {
-            error = "Unsupported material. Use: Stone, Metal, Glass, Wood, Flesh, Plastic, Rubber, Light.";
-            return false;
-        }
-
-        primData.Material = parsedMaterial;
-        return true;
-    }
-
-    private static Primitive.ConstructionData BuildDefaultConstructionData()
-    {
-        return new Primitive.ConstructionData
-        {
-            PCode = PCode.Prim,
-            Material = Material.Wood,
-            PathCurve = PathCurve.Line,
-            PathBegin = 0f,
-            PathEnd = 1f,
-            PathRadiusOffset = 0f,
-            PathSkew = 0f,
-            PathScaleX = 1f,
-            PathScaleY = 1f,
-            PathShearX = 0f,
-            PathShearY = 0f,
-            PathTaperX = 0f,
-            PathTaperY = 0f,
-            PathTwist = 0f,
-            PathTwistBegin = 0f,
-            PathRevolutions = 1f,
-            ProfileBegin = 0f,
-            ProfileEnd = 1f,
-            ProfileHollow = 0f,
-            ProfileCurve = ProfileCurve.Square,
-            ProfileHole = HoleType.Same
-        };
-    }
-
     private static Vector3 ClampScale(Vector3 scale)
     {
         return new Vector3(
@@ -2612,20 +779,6 @@ internal sealed partial class BotSession : IDisposable
     private static string FormatVector(Vector3 pos)
     {
         return $"<{pos.X:F2}, {pos.Y:F2}, {pos.Z:F2}>";
-    }
-
-    private static PrimSummary ToPrimSummary(Primitive prim, Vector3 at)
-    {
-        return new PrimSummary(
-            prim.LocalID,
-            prim.ID.ToString(),
-            prim.ParentID,
-            prim.Properties?.Name,
-            prim.Type.ToString(),
-            prim.Position.X,
-            prim.Position.Y,
-            prim.Position.Z,
-            Vector3.Distance(at, prim.Position));
     }
 
     private static bool TryParseLocalIdsCsv(string localIdsCsv, out List<uint> localIds, out string error)
@@ -2690,85 +843,6 @@ internal sealed partial class BotSession : IDisposable
         {
             error = $"Failed to parse LLSD payload ({format}): {ex.Message}";
             return false;
-        }
-    }
-
-    private static bool TryBuildEnvironmentDataFromPayloadMap(OSDMap payloadMap, out EnvironmentData environment, out string error)
-    {
-        environment = new EnvironmentData();
-        error = string.Empty;
-
-        // Accept either a direct EnvironmentData map or an ExtEnvironment-style wrapper map
-        // containing an "environment" map.
-        OSDMap? environmentMap = null;
-        if (payloadMap.TryGetValue("environment", out var wrappedEnvironment))
-        {
-            environmentMap = wrappedEnvironment as OSDMap;
-            if (environmentMap == null)
-            {
-                error = "payload contains an 'environment' key, but its value is not an LLSD map/object.";
-                return false;
-            }
-        }
-        else
-        {
-            environmentMap = payloadMap;
-        }
-
-        try
-        {
-            environment.Deserialize(environmentMap);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            error = $"Failed to deserialize EnvironmentData payload: {ex.Message}";
-            return false;
-        }
-    }
-
-    private async Task<Primitive?> WaitForCreatedPrimAsync(
-        GridClient client,
-        Simulator simulator,
-        Vector3 expectedPosition,
-        CancellationToken cancellationToken)
-    {
-        var tcs = new TaskCompletionSource<Primitive>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        void OnObjectUpdate(object? sender, PrimEventArgs e)
-        {
-            if (!ReferenceEquals(e.Simulator, simulator))
-            {
-                return;
-            }
-
-            if ((e.Prim.Flags & PrimFlags.CreateSelected) == 0)
-            {
-                return;
-            }
-
-            if (Vector3.Distance(e.Prim.Position, expectedPosition) > 24f)
-            {
-                return;
-            }
-
-            tcs.TrySetResult(e.Prim);
-        }
-
-        client.Objects.ObjectUpdate += OnObjectUpdate;
-        try
-        {
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)).ConfigureAwait(false);
-            if (completed != tcs.Task)
-            {
-                return null;
-            }
-
-            return await tcs.Task.ConfigureAwait(false);
-        }
-        finally
-        {
-            client.Objects.ObjectUpdate -= OnObjectUpdate;
         }
     }
 
@@ -2879,7 +953,7 @@ internal sealed partial class BotSession : IDisposable
         return true;
     }
 
-    private void OnOpencodeSessionStatusChanged(HarnessSessionStatusEvent statusEvent)
+    private void OnHarnessSessionStatusChanged(HarnessSessionStatusEvent statusEvent)
     {
         if (statusEvent == null || string.IsNullOrWhiteSpace(statusEvent.SessionId))
         {
@@ -2889,7 +963,7 @@ internal sealed partial class BotSession : IDisposable
         var normalizedStatus = statusEvent.StatusType?.Trim().ToLowerInvariant() ?? string.Empty;
         if (normalizedStatus == "busy")
         {
-            _busyOpencodeSessions[statusEvent.SessionId] = 1;
+            __busyHarnessSessions[statusEvent.SessionId] = 1;
             UpdateBusyHoverText(incrementDots: true);
             PulseTypingIndicator(statusEvent.SessionId);
             return;
@@ -2904,11 +978,11 @@ internal sealed partial class BotSession : IDisposable
 
         if (normalizedStatus == "idle")
         {
-            MarkOpencodeSessionIdle(statusEvent.SessionId);
+            MarkHarnessSessionIdle(statusEvent.SessionId);
         }
     }
 
-    private void OnOpencodeMessagePartUpdated(HarnessMessagePartUpdatedEvent partEvent)
+    private void OnHarnessMessagePartUpdated(HarnessMessagePartUpdatedEvent partEvent)
     {
         if (partEvent == null || string.IsNullOrWhiteSpace(partEvent.SessionId))
         {
@@ -3016,7 +1090,7 @@ internal sealed partial class BotSession : IDisposable
         var dialog = isTyping ? InstantMessageDialog.StartTyping : InstantMessageDialog.StopTyping;
         var targets = new HashSet<UUID>();
 
-        if (_opencodeChat != null && !string.IsNullOrWhiteSpace(sessionIdHint))
+        if (_harnessClient != null && !string.IsNullOrWhiteSpace(sessionIdHint))
         {
             foreach (var pair in _conversationAgentByKey)
             {
@@ -3025,7 +1099,7 @@ internal sealed partial class BotSession : IDisposable
                     continue;
                 }
 
-                var mappedSessionId = _opencodeChat.GetConversationSessionId(pair.Key);
+                var mappedSessionId = _harnessClient.GetConversationSessionId(pair.Key);
                 if (!string.IsNullOrWhiteSpace(mappedSessionId)
                     && mappedSessionId.Equals(sessionIdHint, StringComparison.OrdinalIgnoreCase))
                 {
@@ -3067,111 +1141,18 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private void MarkOpencodeSessionIdle(string sessionId)
+    private void MarkHarnessSessionIdle(string sessionId)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             return;
         }
 
-        _busyOpencodeSessions.TryRemove(sessionId, out _);
-        if (_busyOpencodeSessions.IsEmpty)
+        __busyHarnessSessions.TryRemove(sessionId, out _);
+        if (__busyHarnessSessions.IsEmpty)
         {
             ClearBusyHoverText();
         }
-    }
-
-    private void UpdateBusyHoverText(bool incrementDots)
-    {
-        var now = DateTimeOffset.UtcNow;
-        string hoverText;
-        lock (_hoverStateLock)
-        {
-            if (incrementDots && (now - _lastHoverBusyUpdateAt).TotalMilliseconds < HoverBusyUpdateMinimumIntervalMs)
-            {
-                return;
-            }
-
-            if (incrementDots)
-            {
-                _busyHoverDots++;
-                if (_busyHoverDots > 4)
-                {
-                    _busyHoverDots = 1;
-                }
-            }
-            else if (_busyHoverDots <= 0)
-            {
-                _busyHoverDots = 1;
-            }
-
-            _lastHoverBusyUpdateAt = now;
-            hoverText = "Thinking " + new string('.', _busyHoverDots);
-        }
-
-        SendHoverBridgeCommand("set", hoverText);
-    }
-
-    private void ClearBusyHoverText()
-    {
-        lock (_hoverStateLock)
-        {
-            _busyHoverDots = 0;
-            _lastHoverBusyUpdateAt = DateTimeOffset.MinValue;
-        }
-
-        SendHoverBridgeCommand("clear", string.Empty);
-    }
-
-    private void SendHoverBridgeCommand(string mode, string text)
-    {
-        var client = _client;
-        if (!_connected || client == null)
-        {
-            return;
-        }
-
-        UUID pinnedObjectId;
-        lock (_dialogBridgeTrustLock)
-        {
-            pinnedObjectId = _trustedDialogBridgeObjectId;
-        }
-
-        var payload = string.Join("|", new[]
-        {
-            LslDialogBridgeHoverRequestPrefix,
-            EncodeDialogToken(pinnedObjectId == UUID.Zero ? string.Empty : pinnedObjectId.ToString()),
-            EncodeDialogToken(mode ?? string.Empty),
-            EncodeDialogToken(text ?? string.Empty)
-        });
-
-        try
-        {
-            client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[dialog-bridge] hover command failed: {ex.Message}");
-        }
-    }
-
-    private static string NormalizeMoodName(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return string.Empty;
-        }
-
-        var chars = value.Trim()
-            .Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_')
-            .ToArray();
-        if (chars.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        var normalized = new string(chars).ToLowerInvariant();
-        return normalized.Length <= 48 ? normalized : normalized[..48];
     }
 
     private static bool IsLikelyBackendTimeout(Exception ex)
@@ -3239,7 +1220,7 @@ internal sealed partial class BotSession : IDisposable
 
     private async Task<IReadOnlyList<HarnessPendingPermission>> GetPendingPermissionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
     {
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(sessionId))
         {
             return Array.Empty<HarnessPendingPermission>();
         }
@@ -3253,7 +1234,7 @@ internal sealed partial class BotSession : IDisposable
         var fromEventFamily = new List<HarnessPendingPermission>();
         foreach (var familySessionId in sessionFamily)
         {
-            if (_opencodeChat.TryGetPendingPermissionsFromEvents(familySessionId, out var fromEvents)
+            if (_harnessClient.TryGetPendingPermissionsFromEvents(familySessionId, out var fromEvents)
                 && fromEvents.Count > 0)
             {
                 fromEventFamily.AddRange(fromEvents);
@@ -3272,7 +1253,7 @@ internal sealed partial class BotSession : IDisposable
         var fromApiFamily = new List<HarnessPendingPermission>();
         foreach (var familySessionId in sessionFamily)
         {
-            var fromApi = await _opencodeChat.ListPendingPermissionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
+            var fromApi = await _harnessClient.ListPendingPermissionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
             if (fromApi.Count > 0)
             {
                 fromApiFamily.AddRange(fromApi);
@@ -3293,7 +1274,7 @@ internal sealed partial class BotSession : IDisposable
 
     private async Task<IReadOnlyList<HarnessPendingQuestion>> GetPendingQuestionsEventFirstAsync(string sessionId, CancellationToken cancellationToken)
     {
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(sessionId))
         {
             return Array.Empty<HarnessPendingQuestion>();
         }
@@ -3307,7 +1288,7 @@ internal sealed partial class BotSession : IDisposable
         var fromEventFamily = new List<HarnessPendingQuestion>();
         foreach (var familySessionId in sessionFamily)
         {
-            if (_opencodeChat.TryGetPendingQuestionsFromEvents(familySessionId, out var fromEvents)
+            if (_harnessClient.TryGetPendingQuestionsFromEvents(familySessionId, out var fromEvents)
                 && fromEvents.Count > 0)
             {
                 fromEventFamily.AddRange(fromEvents);
@@ -3326,7 +1307,7 @@ internal sealed partial class BotSession : IDisposable
         var fromApiFamily = new List<HarnessPendingQuestion>();
         foreach (var familySessionId in sessionFamily)
         {
-            var fromApi = await _opencodeChat.ListPendingQuestionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
+            var fromApi = await _harnessClient.ListPendingQuestionsAsync(familySessionId, cancellationToken).ConfigureAwait(false);
             if (fromApi.Count > 0)
             {
                 fromApiFamily.AddRange(fromApi);
@@ -3347,7 +1328,7 @@ internal sealed partial class BotSession : IDisposable
 
     private async Task<IReadOnlyList<string>> GetSessionFamilyIdsAsync(string sessionId, CancellationToken cancellationToken)
     {
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(sessionId))
         {
             return Array.Empty<string>();
         }
@@ -3366,7 +1347,7 @@ internal sealed partial class BotSession : IDisposable
             IReadOnlyList<HarnessSessionSummary> children;
             try
             {
-                children = await _opencodeChat.GetSessionChildrenAsync(current, cancellationToken).ConfigureAwait(false);
+                children = await _harnessClient.GetSessionChildrenAsync(current, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -3394,7 +1375,7 @@ internal sealed partial class BotSession : IDisposable
 
     private async Task NotifyPendingQuestionIfAppearsAsync(GridClient client, UUID agentId, string from, string conversationKey)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             return;
         }
@@ -3406,7 +1387,7 @@ internal sealed partial class BotSession : IDisposable
         {
             await Task.Delay(500).ConfigureAwait(false);
 
-            var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
             if (string.IsNullOrWhiteSpace(sessionId))
             {
                 return;
@@ -3469,7 +1450,7 @@ internal sealed partial class BotSession : IDisposable
         string conversationKey,
         CancellationToken cancellationToken)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             return;
         }
@@ -3488,7 +1469,7 @@ internal sealed partial class BotSession : IDisposable
                 return;
             }
 
-            var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
             if (string.IsNullOrWhiteSpace(sessionId))
             {
                 continue;
@@ -3740,7 +1721,7 @@ internal sealed partial class BotSession : IDisposable
             return false;
         }
 
-        if (_opencodeChat == null
+        if (_harnessClient == null
             || !_pendingTextPromptReplyByConversation.TryGetValue(conversationKey, out var state))
         {
             return false;
@@ -3761,7 +1742,7 @@ internal sealed partial class BotSession : IDisposable
                 return true;
             }
 
-            _ = await _opencodeChat.RespondToPermissionAsync(state.SessionId, state.RequestId, response, remember, CancellationToken.None).ConfigureAwait(false);
+            _ = await _harnessClient.RespondToPermissionAsync(state.SessionId, state.RequestId, response, remember, CancellationToken.None).ConfigureAwait(false);
             _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
             _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
             _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
@@ -3779,7 +1760,7 @@ internal sealed partial class BotSession : IDisposable
             }
         }
 
-        _ = await _opencodeChat.ReplyToQuestionAsync(state.SessionId, state.RequestId, new[] { resolved }, CancellationToken.None).ConfigureAwait(false);
+        _ = await _harnessClient.ReplyToQuestionAsync(state.SessionId, state.RequestId, new[] { resolved }, CancellationToken.None).ConfigureAwait(false);
         _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
         _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
         _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
@@ -3816,7 +1797,7 @@ internal sealed partial class BotSession : IDisposable
         HarnessPendingQuestion? question,
         string conversationKey)
     {
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(requestId))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(requestId))
         {
             return false;
         }
@@ -3824,7 +1805,7 @@ internal sealed partial class BotSession : IDisposable
         var effectiveSessionId = sessionId;
         if (string.IsNullOrWhiteSpace(effectiveSessionId))
         {
-            effectiveSessionId = _opencodeChat.GetConversationSessionId(conversationKey) ?? string.Empty;
+            effectiveSessionId = _harnessClient.GetConversationSessionId(conversationKey) ?? string.Empty;
         }
 
         if (string.IsNullOrWhiteSpace(effectiveSessionId))
@@ -4533,208 +2514,6 @@ internal sealed record BotToolResult(bool Ok, string Message)
 {
     public static BotToolResult OkResult(string message) => new(true, message);
     public static BotToolResult Fail(string message) => new(false, message);
-}
-
-internal sealed record EnvironmentToolResult(bool Ok, string Message, string? PayloadJson)
-{
-    public static EnvironmentToolResult OkResult(string message, string payloadJson) => new(true, message, payloadJson);
-    public static EnvironmentToolResult FailResult(string message) => new(false, message, null);
-}
-
-internal sealed record PrimCreateResult(bool Ok, string Message, uint LocalId)
-{
-    public static PrimCreateResult OkResult(uint localId, string message) => new(true, message, localId);
-    public static PrimCreateResult FailResult(string message) => new(false, message, 0);
-}
-
-internal sealed record PrimFaceTextureInfo(int FaceIndex, string TextureId);
-
-internal sealed record PrimSummary(
-    uint LocalId,
-    string Uuid,
-    uint ParentId,
-    string? Name,
-    string PrimType,
-    float PositionX,
-    float PositionY,
-    float PositionZ,
-    float DistanceMeters);
-
-internal sealed record PrimInfo(
-    uint LocalId,
-    string Uuid,
-    uint ParentId,
-    string PrimType,
-    string PathCurve,
-    string ProfileCurve,
-    string Material,
-    float PositionX,
-    float PositionY,
-    float PositionZ,
-    float ScaleX,
-    float ScaleY,
-    float ScaleZ,
-    float RotationX,
-    float RotationY,
-    float RotationZ,
-    float RotationW,
-    string? Name,
-    string? Description,
-    string? OwnerId,
-    string? CreatorId,
-    string? DefaultTextureId,
-    IReadOnlyList<PrimFaceTextureInfo> FaceTextureOverrides,
-    PrimShapeDetail Shape,
-    PrimPermissionsInfo? Permissions,
-    PrimSaleInfo? Sale,
-    PrimSitInfo? Sit,
-    PrimFlexibleInfo? Flexible,
-    PrimLightInfo? Light,
-    PrimSculptInfo? Sculpt,
-    PrimPropertyFreshnessInfo Freshness);
-
-internal sealed record PrimShapeDetail(
-    string PathCurve,
-    string ProfileCurve,
-    string ProfileHole,
-    string Material,
-    float PathBegin,
-    float PathEnd,
-    float PathScaleX,
-    float PathScaleY,
-    float PathShearX,
-    float PathShearY,
-    float PathTwist,
-    float PathTwistBegin,
-    float PathTaperX,
-    float PathTaperY,
-    float PathRadiusOffset,
-    float PathSkew,
-    float PathRevolutions,
-    float ProfileBegin,
-    float ProfileEnd,
-    float ProfileHollow);
-
-internal sealed record PrimPermissionsInfo(
-    uint BaseMask,
-    uint OwnerMask,
-    uint GroupMask,
-    uint EveryoneMask,
-    uint NextOwnerMask);
-
-internal sealed record PrimSaleInfo(string SaleType, int SalePrice);
-
-internal sealed record PrimSitInfo(
-    string? SitName,
-    string? TouchName,
-    bool IsSittable,
-    string ClickAction,
-    string Detection);
-
-internal sealed record PrimFlexibleInfo(
-    int Softness,
-    float Tension,
-    float Drag,
-    float Gravity,
-    float Wind,
-    float ForceX,
-    float ForceY,
-    float ForceZ);
-
-internal sealed record PrimLightInfo(
-    float Red,
-    float Green,
-    float Blue,
-    float Intensity,
-    float Radius,
-    float Cutoff,
-    float Falloff);
-
-internal sealed record PrimSculptInfo(
-    string SculptTextureId,
-    string SculptType,
-    bool IsMesh,
-    bool Invert,
-    bool Mirror,
-    uint ExtendedMeshFlags);
-
-internal sealed record PrimPropertyFreshnessInfo(
-    bool RefreshRequested,
-    bool RefreshReceived,
-    string? RefreshedAtUtc,
-    string Detail);
-
-internal sealed record PrimInspectResult(bool Ok, string Message, PrimInfo? Prim)
-{
-    public static PrimInspectResult OkResult(PrimInfo prim, string message = "OK") => new(true, message, prim);
-    public static PrimInspectResult FailResult(string message) => new(false, message, null);
-}
-
-internal sealed record PrimQueryResult(bool Ok, string Message, IReadOnlyList<PrimSummary> Prims)
-{
-    public static PrimQueryResult OkResult(IReadOnlyList<PrimSummary> prims, string message) => new(true, message, prims);
-    public static PrimQueryResult FailResult(string message) => new(false, message, Array.Empty<PrimSummary>());
-}
-
-internal sealed record LinksetNodeInfo(
-    uint LocalId,
-    string Uuid,
-    uint ParentId,
-    bool IsRoot,
-    int Order,
-    string? Name,
-    string PrimType,
-    float PositionX,
-    float PositionY,
-    float PositionZ,
-    float ScaleX,
-    float ScaleY,
-    float ScaleZ);
-
-internal sealed record LinksetInspectResult(bool Ok, string Message, uint RootLocalId, IReadOnlyList<LinksetNodeInfo> Nodes)
-{
-    public static LinksetInspectResult OkResult(uint rootLocalId, IReadOnlyList<LinksetNodeInfo> nodes, string message)
-        => new(true, message, rootLocalId, nodes);
-
-    public static LinksetInspectResult FailResult(string message)
-        => new(false, message, 0, Array.Empty<LinksetNodeInfo>());
-}
-
-internal sealed record CameraState(
-    float CameraX,
-    float CameraY,
-    float CameraZ,
-    float AtAxisX,
-    float AtAxisY,
-    float AtAxisZ,
-    float LeftAxisX,
-    float LeftAxisY,
-    float LeftAxisZ,
-    float UpAxisX,
-    float UpAxisY,
-    float UpAxisZ,
-    float Far,
-    float AgentX,
-    float AgentY,
-    float AgentZ);
-
-internal sealed record AnimationInfo(string Name, string AnimationId, int? SequenceId = null);
-
-internal sealed record AnimationListResult(
-    bool Ok,
-    string Message,
-    IReadOnlyList<AnimationInfo> Animations)
-{
-    public static AnimationListResult OkResult(IReadOnlyList<AnimationInfo> animations, string message)
-        => new(true, message, animations);
-
-    public static AnimationListResult FailResult(string message)
-        => new(false, message, Array.Empty<AnimationInfo>());
-}
-
-internal sealed record CameraStateResult(bool Ok, string Message, CameraState? State)
-{
-    public static CameraStateResult FailResult(string message) => new(false, message, null);
 }
 
 internal sealed class ConversationConfig

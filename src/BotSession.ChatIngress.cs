@@ -93,6 +93,15 @@ internal sealed partial class BotSession
             isGroupIm ? groupSessionId : e.IM.FromAgentID,
             e.IM.FromAgentID,
             from);
+        if (!isGroupIm)
+        {
+            _requesterImLocationHintByConversation[conversationKey] = new RequesterImLocationHint(
+                e.IM.FromAgentID,
+                e.IM.RegionID,
+                e.IM.Position,
+                DateTimeOffset.UtcNow);
+        }
+
         lock (_recentImSpeakerLock)
         {
             _lastImSpeakerAgentId = e.IM.FromAgentID;
@@ -238,7 +247,7 @@ internal sealed partial class BotSession
         var startedAt = Stopwatch.StartNew();
         try
         {
-            if (_opencodeChat == null)
+            if (_harnessClient == null)
             {
                 SendImText(client, senderAgentId, from, "AI chat is currently disabled by configuration.", conversationKey);
                 return;
@@ -315,7 +324,7 @@ internal sealed partial class BotSession
                     inFlightQuestionWatchCts.Token));
 
             Console.WriteLine($"[{channelLabel}] routing to opencode: from={from} conversation={conversationKey} textLength={routedText.Length} model={(sendOptions?.ModelId ?? "(default)")}");
-            var reply = await _opencodeChat.SendMessageAsync(
+            var reply = await _harnessClient.SendMessageAsync(
                 conversationKey: conversationKey,
                 title: title,
                 message: routedText,
@@ -345,7 +354,7 @@ internal sealed partial class BotSession
             }
             else
             {
-                var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
                 if (!string.IsNullOrWhiteSpace(currentSessionId))
                 {
                     var eventFirstPermissions = await GetPendingPermissionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
@@ -372,7 +381,7 @@ internal sealed partial class BotSession
             }
             else
             {
-                var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
                 if (!string.IsNullOrWhiteSpace(currentSessionId))
                 {
                     var polledQuestions = await GetPendingQuestionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
@@ -413,7 +422,7 @@ internal sealed partial class BotSession
         {
             startedAt.Stop();
             Console.WriteLine($"[{channelLabel}] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
-            _opencodeChat?.ResetConversation(conversationKey);
+            _harnessClient?.ResetConversation(conversationKey);
             SendImText(client, senderAgentId, from, "The AI is taking longer than expected and timed out. Please try again in a moment.", conversationKey);
         }
         catch (Exception ex)
@@ -422,13 +431,13 @@ internal sealed partial class BotSession
             if (IsLikelyBackendTimeout(ex))
             {
                 Console.WriteLine($"[{channelLabel}] opencode timeout after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
-                _opencodeChat?.ResetConversation(conversationKey);
+                _harnessClient?.ResetConversation(conversationKey);
                 SendImText(client, senderAgentId, from, "The AI is taking longer than expected and timed out. Please try again in a moment.", conversationKey);
                 return;
             }
 
             Console.WriteLine($"[{channelLabel}] failed to route to opencode after {startedAt.ElapsedMilliseconds}ms: {ex.Message}");
-            _opencodeChat?.ResetConversation(conversationKey);
+            _harnessClient?.ResetConversation(conversationKey);
             SendImText(client, senderAgentId, from, "Sorry, I could not reach the AI service right now.", conversationKey);
         }
         finally
@@ -440,10 +449,10 @@ internal sealed partial class BotSession
                 _inFlightRequestCtsByConversation.TryRemove(conversationKey, out _);
             }
 
-            var activeSessionId = _opencodeChat?.GetConversationSessionId(conversationKey);
+            var activeSessionId = _harnessClient?.GetConversationSessionId(conversationKey);
             if (!string.IsNullOrWhiteSpace(activeSessionId))
             {
-                MarkOpencodeSessionIdle(activeSessionId);
+                MarkHarnessSessionIdle(activeSessionId);
             }
 
             if (globalGateHeld)

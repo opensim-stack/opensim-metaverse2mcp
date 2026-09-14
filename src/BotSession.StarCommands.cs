@@ -44,7 +44,7 @@ internal sealed partial class BotSession
                     return true;
                 case "reset":
                     _conversationConfigs.TryRemove(conversationKey, out _);
-                    _opencodeChat?.ResetConversation(conversationKey);
+                    _harnessClient?.ResetConversation(conversationKey);
                     SetPersistedDefaultConversationConfig(null);
                     TrySaveOpencodeSessionStateForConversation(conversationKey, null);
                     _latestUsageByConversation.TryRemove(conversationKey, out _);
@@ -284,7 +284,7 @@ internal sealed partial class BotSession
 
     private string BuildUsageText(string conversationKey)
     {
-        var sessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
+        var sessionId = _harnessClient?.GetConversationSessionId(conversationKey) ?? "(none)";
         if (!_latestUsageByConversation.TryGetValue(conversationKey, out var usage))
         {
             return string.Join(
@@ -314,7 +314,7 @@ internal sealed partial class BotSession
 
     private string BuildConversationStatusText(string conversationKey)
     {
-        var currentSessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
+        var currentSessionId = _harnessClient?.GetConversationSessionId(conversationKey) ?? "(none)";
         var promptState = BuildPromptStatusText();
 
         if (!_conversationConfigs.TryGetValue(conversationKey, out var cfg))
@@ -365,7 +365,7 @@ internal sealed partial class BotSession
 
         if (sub == "status")
         {
-            var sessionId = _opencodeChat?.GetConversationSessionId(conversationKey) ?? "(none)";
+            var sessionId = _harnessClient?.GetConversationSessionId(conversationKey) ?? "(none)";
             var lines = new List<string>
             {
                 "Prompt status:",
@@ -551,14 +551,14 @@ internal sealed partial class BotSession
 
     private async Task HandleProvidersCommandAsync(GridClient client, UUID agentId, string from, string arg = "")
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
         }
 
         var configuredOnly = arg.Trim().Equals("configured", StringComparison.OrdinalIgnoreCase);
-        var configured = await _opencodeChat.ListProvidersAsync(CancellationToken.None).ConfigureAwait(false);
+        var configured = await _harnessClient.ListProvidersAsync(CancellationToken.None).ConfigureAwait(false);
         if (configuredOnly)
         {
             if (configured.Count == 0)
@@ -582,7 +582,7 @@ internal sealed partial class BotSession
             return;
         }
 
-        var available = await _opencodeChat.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
+        var available = await _harnessClient.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
         if (available.Count == 0)
         {
             SendImText(client, agentId, from, "No providers reported by Opencode.");
@@ -614,7 +614,7 @@ internal sealed partial class BotSession
     {
         var locallyCanceled = TryCancelLocalInFlightRequest(conversationKey);
 
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, locallyCanceled
                 ? "Canceled the current local request. AI chat is disabled by configuration, so no backend abort was sent."
@@ -622,7 +622,7 @@ internal sealed partial class BotSession
             return;
         }
 
-        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             SendImText(client, agentId, from, locallyCanceled
@@ -675,23 +675,23 @@ internal sealed partial class BotSession
 
     private async Task<bool?> TryAbortSessionAsync(string? sessionId)
     {
-        if (_opencodeChat == null || string.IsNullOrWhiteSpace(sessionId))
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(sessionId))
         {
             return null;
         }
 
-        return await _opencodeChat.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        return await _harnessClient.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task HandlePermissionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
         }
 
-        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             SendImText(client, agentId, from, "There is no active Opencode session for this IM yet.");
@@ -751,7 +751,7 @@ internal sealed partial class BotSession
         }
 
         var response = action == "allow" ? "allow" : "reject";
-        var ok = await _opencodeChat.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
+        var ok = await _harnessClient.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
         _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
         ClearPendingPromptWait(conversationKey);
         _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
@@ -898,13 +898,13 @@ internal sealed partial class BotSession
 
     private async Task HandleQuestionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
         }
 
-        var sessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+        var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             SendImText(client, agentId, from, "There is no active Opencode session for this IM yet.");
@@ -949,7 +949,7 @@ internal sealed partial class BotSession
             }
 
             var questionId = NormalizeLooseQuery(parts[1]);
-            var ok = await _opencodeChat.RejectQuestionAsync(sessionId, questionId, CancellationToken.None).ConfigureAwait(false);
+            var ok = await _harnessClient.RejectQuestionAsync(sessionId, questionId, CancellationToken.None).ConfigureAwait(false);
             _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
             ClearPendingPromptWait(conversationKey);
             _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
@@ -980,7 +980,7 @@ internal sealed partial class BotSession
             return;
         }
 
-        var answered = await _opencodeChat.ReplyToQuestionAsync(
+        var answered = await _harnessClient.ReplyToQuestionAsync(
             sessionId,
             selectedQuestionId,
             new[] { answerText },
@@ -996,7 +996,7 @@ internal sealed partial class BotSession
 
     private async Task HandleModelsCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
@@ -1012,7 +1012,7 @@ internal sealed partial class BotSession
             providerFilter = cfg.ProviderId;
         }
 
-        var models = await _opencodeChat.ListModelsAsync(providerFilter, CancellationToken.None).ConfigureAwait(false);
+        var models = await _harnessClient.ListModelsAsync(providerFilter, CancellationToken.None).ConfigureAwait(false);
         if (models.Count == 0)
         {
             SendImText(client, agentId, from, providerFilter == null
@@ -1042,7 +1042,7 @@ internal sealed partial class BotSession
 
     private async Task HandleConfigureCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
@@ -1060,7 +1060,7 @@ internal sealed partial class BotSession
         if (normalizedArg.Equals("reset", StringComparison.OrdinalIgnoreCase))
         {
             _conversationConfigs.TryRemove(conversationKey, out _);
-            _opencodeChat.ResetConversation(conversationKey);
+            _harnessClient.ResetConversation(conversationKey);
             SetPersistedDefaultConversationConfig(null);
             TrySaveOpencodeSessionStateForConversation(conversationKey, null);
             SendImText(client, agentId, from, "Conversation AI settings reset for this IM.");
@@ -1104,7 +1104,7 @@ internal sealed partial class BotSession
                 config.ProviderId = resolvedModelId[..slash];
             }
 
-            _opencodeChat.ResetConversation(conversationKey);
+            _harnessClient.ResetConversation(conversationKey);
             SetPersistedDefaultConversationConfig(config);
             TrySaveOpencodeSessionStateForConversation(conversationKey, config);
             SendImText(client, agentId, from, $"Model pinned for this IM: {config.ModelId}");
@@ -1129,18 +1129,18 @@ internal sealed partial class BotSession
                 config.ProviderId = resolvedModelId[..slash];
             }
 
-            _opencodeChat.ResetConversation(conversationKey);
+            _harnessClient.ResetConversation(conversationKey);
             SetPersistedDefaultConversationConfig(config);
             TrySaveOpencodeSessionStateForConversation(conversationKey, config);
             SendImText(client, agentId, from, $"Model pinned for this IM: {config.ModelId}");
             return;
         }
 
-        var providers = await _opencodeChat.ListProvidersAsync(CancellationToken.None).ConfigureAwait(false);
+        var providers = await _harnessClient.ListProvidersAsync(CancellationToken.None).ConfigureAwait(false);
         var matchedProvider = FindProviderByNameOrId(providers, providerLookup);
         if (matchedProvider == null)
         {
-            var available = await _opencodeChat.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
+            var available = await _harnessClient.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
             var availableMatch = FindProviderByNameOrId(available, providerLookup);
             if (availableMatch != null)
             {
@@ -1155,7 +1155,7 @@ internal sealed partial class BotSession
         config.ProviderId = matchedProvider.Id;
         config.ProviderName = matchedProvider.Name;
 
-        var providerModels = await _opencodeChat.ListModelsAsync(matchedProvider.Id, CancellationToken.None).ConfigureAwait(false);
+        var providerModels = await _harnessClient.ListModelsAsync(matchedProvider.Id, CancellationToken.None).ConfigureAwait(false);
         var selectedModel = providerModels
             .FirstOrDefault(m => m.Id.EndsWith("-free", StringComparison.OrdinalIgnoreCase))
             ?? providerModels.FirstOrDefault();
@@ -1163,7 +1163,7 @@ internal sealed partial class BotSession
         config.ModelId = selectedModel == null
             ? null
             : BuildCanonicalModelId(selectedModel.Id, selectedModel.Provider, matchedProvider.Id);
-        _opencodeChat.ResetConversation(conversationKey);
+        _harnessClient.ResetConversation(conversationKey);
         SetPersistedDefaultConversationConfig(config);
         TrySaveOpencodeSessionStateForConversation(conversationKey, config);
 
@@ -1178,7 +1178,7 @@ internal sealed partial class BotSession
 
     private async Task HandleAuthCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
@@ -1234,7 +1234,7 @@ internal sealed partial class BotSession
                 return;
             }
 
-            await _opencodeChat.SetProviderApiKeyAsync(provider.Id, apiKey, CancellationToken.None).ConfigureAwait(false);
+            await _harnessClient.SetProviderApiKeyAsync(provider.Id, apiKey, CancellationToken.None).ConfigureAwait(false);
             ApplyAuthenticatedProviderAsConversationDefault(conversationKey, provider);
             SendImText(client, agentId, from, $"Stored API key for provider {provider.Name} ({provider.Id}). I will now restart myself. When I'm back, run *configure provider {provider.Id}, then optionally *models to list available models. ");
             await RestartSelfViaSpawnerAndReportAsync(client, agentId, from).ConfigureAwait(false);
@@ -1244,7 +1244,7 @@ internal sealed partial class BotSession
         if (verb == "oauth")
         {
             var methodIndex = ParseOptionalMethodIndex(parts, 2);
-            var started = await _opencodeChat.StartProviderOAuthAsync(provider.Id, methodIndex, null, CancellationToken.None).ConfigureAwait(false);
+            var started = await _harnessClient.StartProviderOAuthAsync(provider.Id, methodIndex, null, CancellationToken.None).ConfigureAwait(false);
             var instructions = string.IsNullOrWhiteSpace(started.Instructions)
                 ? "Open the URL and complete login."
                 : started.Instructions;
@@ -1262,7 +1262,7 @@ internal sealed partial class BotSession
                 code = string.Join(' ', parts.Skip(3));
             }
 
-            var completed = await _opencodeChat.CompleteProviderOAuthAsync(provider.Id, methodIndex, code, CancellationToken.None).ConfigureAwait(false);
+            var completed = await _harnessClient.CompleteProviderOAuthAsync(provider.Id, methodIndex, code, CancellationToken.None).ConfigureAwait(false);
             if (completed.ProviderConfigured)
             {
                 ApplyAuthenticatedProviderAsConversationDefault(conversationKey, provider);
@@ -1337,14 +1337,14 @@ internal sealed partial class BotSession
 
     private async Task HandleAuthMethodsCommandAsync(GridClient client, UUID agentId, string from, string? providerFilter)
     {
-        var methodsByProvider = await _opencodeChat!.ListProviderAuthMethodsAsync(CancellationToken.None).ConfigureAwait(false);
+        var methodsByProvider = await _harnessClient!.ListProviderAuthMethodsAsync(CancellationToken.None).ConfigureAwait(false);
         if (methodsByProvider.Count == 0)
         {
             SendImText(client, agentId, from, "No provider auth methods were reported by Opencode.");
             return;
         }
 
-        var providers = await _opencodeChat.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
+        var providers = await _harnessClient.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
         var providerNameById = providers.ToDictionary(p => p.Id, p => p.Name, StringComparer.OrdinalIgnoreCase);
 
         IEnumerable<KeyValuePair<string, IReadOnlyList<HarnessProviderAuthMethod>>> selected = methodsByProvider;
@@ -1382,7 +1382,7 @@ internal sealed partial class BotSession
 
     private async Task HandleSessionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
@@ -1400,14 +1400,14 @@ internal sealed partial class BotSession
 
         if (verb is "list" or "ls")
         {
-            var sessions = await _opencodeChat.ListSessionsAsync(CancellationToken.None).ConfigureAwait(false);
+            var sessions = await _harnessClient.ListSessionsAsync(CancellationToken.None).ConfigureAwait(false);
             if (sessions.Count == 0)
             {
                 SendImText(client, agentId, from, "No sessions were reported by Opencode.");
                 return;
             }
 
-            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
             var lines = new List<string> { $"Sessions ({sessions.Count}):" };
             foreach (var session in sessions.Take(40))
             {
@@ -1446,12 +1446,12 @@ internal sealed partial class BotSession
 
             var requestedTitle = titleParts.Count == 0 ? null : string.Join(' ', titleParts);
             var createOptions = BuildSendOptions(conversationKey);
-            var created = await _opencodeChat
+            var created = await _harnessClient
                 .CreateSessionAsync(requestedTitle, null, createOptions?.ModelId, CancellationToken.None)
                 .ConfigureAwait(false);
             if (selectCreated)
             {
-                _opencodeChat.SetConversationSessionId(conversationKey, created.Id);
+                _harnessClient.SetConversationSessionId(conversationKey, created.Id);
                 TrySaveOpencodeSessionStateForConversation(conversationKey);
             }
 
@@ -1477,8 +1477,8 @@ internal sealed partial class BotSession
                 return;
             }
 
-            _ = await _opencodeChat.GetSessionDetailsJsonAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-            _opencodeChat.SetConversationSessionId(conversationKey, sessionId);
+            _ = await _harnessClient.GetSessionDetailsJsonAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            _harnessClient.SetConversationSessionId(conversationKey, sessionId);
             TrySaveOpencodeSessionStateForConversation(conversationKey);
             SendImText(client, agentId, from, $"Current IM Opencode session set to: {sessionId}");
             return;
@@ -1486,14 +1486,14 @@ internal sealed partial class BotSession
 
         if (verb == "status")
         {
-            var statuses = await _opencodeChat.GetSessionStatusAsync(CancellationToken.None).ConfigureAwait(false);
+            var statuses = await _harnessClient.GetSessionStatusAsync(CancellationToken.None).ConfigureAwait(false);
             if (statuses.Count == 0)
             {
                 SendImText(client, agentId, from, "No session status data was reported by Opencode.");
                 return;
             }
 
-            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
             var lines = new List<string> { $"Session status ({statuses.Count}):" };
             foreach (var entry in statuses.Take(60))
             {
@@ -1514,7 +1514,7 @@ internal sealed partial class BotSession
 
         if (verb == "current")
         {
-            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
             SendImText(client, agentId, from, string.IsNullOrWhiteSpace(currentSessionId)
                 ? "This IM conversation does not have an active Opencode session yet. Send a normal message first."
                 : $"Current IM Opencode session: {currentSessionId}");
@@ -1524,7 +1524,7 @@ internal sealed partial class BotSession
         if (verb == "details")
         {
             var sessionId = ResolveSessionSelector(conversationKey, tail, requireExplicit: true);
-            var details = await _opencodeChat.GetSessionDetailsJsonAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var details = await _harnessClient.GetSessionDetailsJsonAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             SendImText(client, agentId, from, $"Session details for {sessionId}:\n{details}");
             return;
         }
@@ -1532,7 +1532,7 @@ internal sealed partial class BotSession
         if (verb == "children")
         {
             var sessionId = ResolveSessionSelector(conversationKey, tail, requireExplicit: false);
-            var children = await _opencodeChat.GetSessionChildrenAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var children = await _harnessClient.GetSessionChildrenAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             if (children.Count == 0)
             {
                 SendImText(client, agentId, from, $"Session {sessionId} has no child sessions.");
@@ -1573,7 +1573,7 @@ internal sealed partial class BotSession
                 return;
             }
 
-            var updated = await _opencodeChat.UpdateSessionTitleAsync(sessionId, newTitle, CancellationToken.None).ConfigureAwait(false);
+            var updated = await _harnessClient.UpdateSessionTitleAsync(sessionId, newTitle, CancellationToken.None).ConfigureAwait(false);
             SendImText(client, agentId, from, $"Session renamed: {updated.Title} ({updated.Id})");
             return;
         }
@@ -1603,21 +1603,21 @@ internal sealed partial class BotSession
                     return;
                 }
 
-                var sessions = await _opencodeChat.ListSessionsAsync(CancellationToken.None).ConfigureAwait(false);
+                var sessions = await _harnessClient.ListSessionsAsync(CancellationToken.None).ConfigureAwait(false);
                 if (sessions.Count == 0)
                 {
                     SendImText(client, agentId, from, "No sessions were reported by Opencode.");
                     return;
                 }
 
-                var mappedCurrentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+                var mappedCurrentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
                 var deletedCount = 0;
                 var failedCount = 0;
                 foreach (var session in sessions)
                 {
                     try
                     {
-                        _ = await _opencodeChat.DeleteSessionAsync(session.Id, CancellationToken.None).ConfigureAwait(false);
+                        _ = await _harnessClient.DeleteSessionAsync(session.Id, CancellationToken.None).ConfigureAwait(false);
                         deletedCount++;
                     }
                     catch
@@ -1629,7 +1629,7 @@ internal sealed partial class BotSession
                 if (!string.IsNullOrWhiteSpace(mappedCurrentSessionId)
                     && sessions.Any(s => s.Id.Equals(mappedCurrentSessionId, StringComparison.OrdinalIgnoreCase)))
                 {
-                    _opencodeChat.ResetConversation(conversationKey);
+                    _harnessClient.ResetConversation(conversationKey);
                 }
 
                 SendImText(client, agentId, from, failedCount == 0
@@ -1648,13 +1648,13 @@ internal sealed partial class BotSession
                 return;
             }
 
-            var deleted = await _opencodeChat.DeleteSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var deleted = await _harnessClient.DeleteSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
 
-            var currentSessionId = _opencodeChat.GetConversationSessionId(conversationKey);
+            var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
             if (!string.IsNullOrWhiteSpace(currentSessionId)
                 && currentSessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase))
             {
-                _opencodeChat.ResetConversation(conversationKey);
+                _harnessClient.ResetConversation(conversationKey);
             }
 
             SendImText(client, agentId, from, deleted
@@ -1682,7 +1682,7 @@ internal sealed partial class BotSession
                 }
             }
 
-            var ok = await _opencodeChat.SummarizeSessionAsync(sessionId, providerId, modelId, CancellationToken.None).ConfigureAwait(false);
+            var ok = await _harnessClient.SummarizeSessionAsync(sessionId, providerId, modelId, CancellationToken.None).ConfigureAwait(false);
             SendImText(client, agentId, from, ok
                 ? $"Requested summary for session {sessionId}."
                 : $"Summary request completed for session {sessionId}, but Opencode did not return an explicit success flag.");
@@ -1692,7 +1692,7 @@ internal sealed partial class BotSession
         if (verb == "abort")
         {
             var sessionId = ResolveSessionSelector(conversationKey, tail, requireExplicit: false);
-            var ok = await _opencodeChat.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            var ok = await _harnessClient.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             SendImText(client, agentId, from, ok
                 ? $"Abort requested for session {sessionId}."
                 : $"Abort request completed for session {sessionId}, but Opencode did not return an explicit success flag.");
@@ -1704,7 +1704,7 @@ internal sealed partial class BotSession
 
     private async Task HandleProjectCommandAsync(GridClient client, UUID agentId, string from, string arg)
     {
-        if (_opencodeChat == null)
+        if (_harnessClient == null)
         {
             SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
             return;
@@ -1713,7 +1713,7 @@ internal sealed partial class BotSession
         var normalized = string.IsNullOrWhiteSpace(arg) ? "list" : arg.Trim().ToLowerInvariant();
         if (normalized is "list" or "all")
         {
-            var projects = await _opencodeChat.ListProjectsAsync(CancellationToken.None).ConfigureAwait(false);
+            var projects = await _harnessClient.ListProjectsAsync(CancellationToken.None).ConfigureAwait(false);
             if (projects.Count == 0)
             {
                 SendImText(client, agentId, from, "No projects were reported by Opencode.");
@@ -1739,7 +1739,7 @@ internal sealed partial class BotSession
 
         if (normalized == "current")
         {
-            var current = await _opencodeChat.GetCurrentProjectAsync(CancellationToken.None).ConfigureAwait(false);
+            var current = await _harnessClient.GetCurrentProjectAsync(CancellationToken.None).ConfigureAwait(false);
             if (current == null)
             {
                 SendImText(client, agentId, from, "Opencode did not report a current project.");
@@ -1759,7 +1759,7 @@ internal sealed partial class BotSession
         var normalized = string.IsNullOrWhiteSpace(selector) ? "current" : NormalizeLooseQuery(selector);
         if (normalized.Equals("current", StringComparison.OrdinalIgnoreCase))
         {
-            var current = _opencodeChat?.GetConversationSessionId(conversationKey);
+            var current = _harnessClient?.GetConversationSessionId(conversationKey);
             if (!string.IsNullOrWhiteSpace(current))
             {
                 return current;
@@ -1778,7 +1778,7 @@ internal sealed partial class BotSession
 
     private async Task<HarnessProviderSummary?> ResolveProviderForAuthAsync(string query)
     {
-        var available = await _opencodeChat!.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
+        var available = await _harnessClient!.ListAvailableProvidersAsync(CancellationToken.None).ConfigureAwait(false);
         return FindProviderByNameOrId(available, query);
     }
 
