@@ -21,6 +21,16 @@ internal sealed partial class BotSession
     private uint _followTrackedLocalId;
     private ulong _followAnchorSimHandle;
     private readonly SpawnerClient _followSpawnerClient;
+
+    private enum FollowCrossRegionState
+    {
+        None,
+        WalkingToBorder,
+        TeleportingToTarget,
+        AwaitingTeleportAssist
+    }
+
+    private static readonly TimeSpan FollowTeleportAssistTimeout = TimeSpan.FromSeconds(20);
     
     public async Task<BotToolResult> SitAsync(CancellationToken cancellationToken)
     {
@@ -393,6 +403,16 @@ internal sealed partial class BotSession
         string? lastSpawnerRegionName = null;
         var lastAvatarSeenAt = DateTime.UtcNow;
         var lastCacheMissDiagAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
+        var crossRegionState = FollowCrossRegionState.None;
+        var crossRegionStateSince = DateTime.MinValue;
+        var lastCrossRegionDistance = float.MaxValue;
+        var lastCrossRegionProgressAt = DateTime.UtcNow;
+        var crossRegionTeleportAttempts = 0;
+        var teleportRequestSent = false;
+        ulong lastKnownCrossRegionHandle = 0;
+        var lastKnownCrossRegionLocal = Vector3.Zero;
+        var followStartRegionHandle = sim.Handle;
+        var followStartLocal = ClampLocalPosition(client.Self.SimPosition);
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -481,6 +501,21 @@ internal sealed partial class BotSession
                             {
                                 Console.WriteLine(
                                     $"[follow][diag] spawner_locate target={label} targetUuid={trackedId} found=true regionName={locatedBySpawner.RegionName ?? "(unknown)"} regionUuid={(locatedBySpawner.RegionId == UUID.Zero ? "(unknown)" : locatedBySpawner.RegionId.ToString())} mappedSim={DescribeSimulator(locatedBySpawner.Simulator)} mappedHandle={locatedBySpawner.RegionHandle} mappedLocal={FormatPosition(locatedBySpawner.Position)}");
+                            }
+
+                            // Prevent stale same-region waypoints when the target moved away but a handle could not be resolved.
+                            if (locatedBySpawner.RegionHandle == 0)
+                            {
+                                var spawnerSaysDifferentRegion =
+                                    (locatedBySpawner.RegionId != UUID.Zero && locatedBySpawner.RegionId != botSim.ID)
+                                    || (!string.IsNullOrWhiteSpace(locatedBySpawner.RegionName)
+                                        && !string.Equals(locatedBySpawner.RegionName, botSim.Name, StringComparison.OrdinalIgnoreCase));
+
+                                if (spawnerSaysDifferentRegion)
+                                {
+                                    lastMappedTargetAt = DateTime.MinValue;
+                                    lastMappedRegionHandle = 0;
+                                }
                             }
                         }
                     }
@@ -648,10 +683,109 @@ internal sealed partial class BotSession
                     lastDiagAt = DateTime.UtcNow;
                 }
 
+                if (targetIsCrossRegion)
+                {
+                    if (crossRegionTargetHandle != 0)
+                    {
+                        lastKnownCrossRegionHandle = crossRegionTargetHandle;
+                        lastKnownCrossRegionLocal = ClampLocalPosition(crossRegionTargetLocal);
+                    }
+
+                    if (crossRegionState == FollowCrossRegionState.None)
+                    {
+                        crossRegionState = FollowCrossRegionState.WalkingToBorder;
+                        crossRegionStateSince = DateTime.UtcNow;
+                        lastCrossRegionDistance = distance;
+                        lastCrossRegionProgressAt = DateTime.UtcNow;
+                        crossRegionTeleportAttempts = 0;
+                        teleportRequestSent = false;
+                    }
+                    else if ((lastCrossRegionDistance - distance) >= 1.0f)
+                    {
+                        lastCrossRegionDistance = distance;
+                        lastCrossRegionProgressAt = DateTime.UtcNow;
+                    }
+
+                    if (crossRegionState == FollowCrossRegionState.WalkingToBorder
+                        && (DateTime.UtcNow - lastCrossRegionProgressAt) >= TimeSpan.FromSeconds(8))
+                    {
+                        crossRegionState = FollowCrossRegionState.TeleportingToTarget;
+                        crossRegionStateSince = DateTime.UtcNow;
+                        client.Self.AutoPilotCancel();
+                    }
+
+                    if (crossRegionState == FollowCrossRegionState.TeleportingToTarget
+                        && crossRegionTeleportAttempts < 2
+                        && lastKnownCrossRegionHandle != 0)
+                    {
+                        crossRegionTeleportAttempts++;
+                        var teleported = await client.Self.TeleportAsync(lastKnownCrossRegionHandle, lastKnownCrossRegionLocal, cancellationToken).ConfigureAwait(false);
+                        if (teleported)
+                        {
+                            crossRegionState = FollowCrossRegionState.None;
+                            crossRegionStateSince = DateTime.MinValue;
+                            lastCrossRegionDistance = float.MaxValue;
+                            lastCrossRegionProgressAt = DateTime.UtcNow;
+                            continue;
+                        }
+
+                        if (crossRegionTeleportAttempts >= 2)
+                        {
+                            crossRegionState = FollowCrossRegionState.AwaitingTeleportAssist;
+                            crossRegionStateSince = DateTime.UtcNow;
+                        }
+                    }
+
+                    if (crossRegionState == FollowCrossRegionState.AwaitingTeleportAssist
+                        && !teleportRequestSent
+                        && trackedId != UUID.Zero)
+                    {
+                        client.Self.SendTeleportLureRequest(
+                            trackedId,
+                            "Could you send me a teleport? I lost pathing while following you across regions.");
+                        teleportRequestSent = true;
+                    }
+
+                    if (crossRegionState == FollowCrossRegionState.AwaitingTeleportAssist
+                        && crossRegionStateSince != DateTime.MinValue
+                        && (DateTime.UtcNow - crossRegionStateSince) >= FollowTeleportAssistTimeout)
+                    {
+                        client.Self.AutoPilotCancel();
+                        var returnedToStart = await client.Self
+                            .TeleportAsync(followStartRegionHandle, followStartLocal, cancellationToken)
+                            .ConfigureAwait(false);
+
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] assist_timeout_return_to_start target={label} returned={returnedToStart} startHandle={followStartRegionHandle} startLocal={FormatPosition(followStartLocal)}");
+                        }
+
+                        Console.WriteLine(
+                            returnedToStart
+                                ? $"[follow] teleport assist timed out; returned to follow start and stopping follow of {label}."
+                                : $"[follow] teleport assist timed out; failed to return to follow start and stopping follow of {label}.");
+                        break;
+                    }
+                }
+                else
+                {
+                    crossRegionState = FollowCrossRegionState.None;
+                    crossRegionStateSince = DateTime.MinValue;
+                    lastCrossRegionDistance = float.MaxValue;
+                    lastCrossRegionProgressAt = DateTime.UtcNow;
+                    crossRegionTeleportAttempts = 0;
+                    teleportRequestSent = false;
+                    lastKnownCrossRegionHandle = 0;
+                }
+
+                var holdPositionForTeleportAssist = crossRegionState == FollowCrossRegionState.AwaitingTeleportAssist;
+
                 if (distance > buffer)
                 {
                     // Re-issue autopilot at most once per second to avoid packet spam.
-                    if ((DateTime.UtcNow - lastPilotAt) >= TimeSpan.FromSeconds(1))
+                    if (!holdPositionForTeleportAssist
+                        && (DateTime.UtcNow - lastPilotAt) >= TimeSpan.FromSeconds(1))
                     {
                         if (targetIsCrossRegion && crossRegionTargetHandle != 0)
                         {
@@ -806,6 +940,24 @@ internal sealed partial class BotSession
         if (parsed.Found && TryResolveConnectedSimulator(client, parsed.RegionId, parsed.RegionName, out simulator))
         {
             regionHandle = simulator!.Handle;
+        }
+        else if (parsed.Found && !string.IsNullOrWhiteSpace(parsed.RegionName))
+        {
+            try
+            {
+                var region = await client.Grid
+                    .GetGridRegionAsync(parsed.RegionName, GridLayerType.Objects, cancellationToken)
+                    .ConfigureAwait(false);
+                if (region.HasValue)
+                {
+                    regionHandle = region.Value.RegionHandle;
+                    simulator = client.Network.Simulators.FirstOrDefault(candidate => candidate.Handle == regionHandle);
+                }
+            }
+            catch
+            {
+                // Best effort: fallback path should keep running even if grid lookup fails.
+            }
         }
 
         return new SpawnerLocatedAgent(
