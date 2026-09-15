@@ -406,6 +406,7 @@ internal sealed partial class BotSession
                 config.OffsetZ ?? prim.Position.Z);
             targetPosition = ClampLocalPosition(targetPosition);
             client.Objects.SetPosition(sim, localId, targetPosition, childOnly: false);
+            Console.WriteLine($"[appearance] transforming to position '{targetPosition}'.");
         }
 
         if (config.ScaleX.HasValue || config.ScaleY.HasValue || config.ScaleZ.HasValue)
@@ -416,6 +417,7 @@ internal sealed partial class BotSession
                 config.ScaleZ ?? prim.Scale.Z);
             targetScale = ClampScale(targetScale);
             client.Objects.SetScale(sim, localId, targetScale, false, false);
+            Console.WriteLine($"[appearance] transforming to scale '{targetScale}'.");
         }
 
         if (config.RotateX.HasValue || config.RotateY.HasValue || config.RotateZ.HasValue)
@@ -426,6 +428,7 @@ internal sealed partial class BotSession
             var targetYaw = (config.RotateZ ?? (currentYaw * Utils.RAD_TO_DEG)) * Utils.DEG_TO_RAD;
             var targetRotation = Quaternion.CreateFromEulers(targetRoll, targetPitch, targetYaw);
             client.Objects.SetRotation(sim, localId, targetRotation, childOnly: false);
+            Console.WriteLine($"[appearance] transforming to rotation '{targetRotation}'.");
         }
     }
 

@@ -306,6 +306,8 @@ internal sealed partial class BotSession
         {
             return;
         }
+        
+        Console.WriteLine($"[group-bootstrap] {reason}: handler {handlerId} not in control group {controlGroupId}; inviting.");
 
         var rolesReply = await RequestGroupRolesReplyAsync(client, controlGroupId, cancellationToken).ConfigureAwait(false);
         if (rolesReply == null)
