@@ -8,8 +8,6 @@ internal sealed partial class BotSession
     private const string LslDialogBridgeRequestPrefix = "dlgreq";
     private const string LslDialogBridgeTextRequestPrefix = "txtreq";
     private const string LslDialogBridgeAckPrefix = "dlgack";
-    private const string LslDialogBridgePingPrefix = "brping";
-    private const string LslDialogBridgePongPrefix = "brpong";
     private const string LslDialogBridgeReplyPrefix = "dlgrep";
     private const string LslDialogBridgePermissionRequestPrefix = "perm:";
     private const string LslDialogBridgeMoodRequestPrefix = "moodreq";
@@ -265,7 +263,6 @@ internal sealed partial class BotSession
             Console.WriteLine($"[dialog-bridge] compacted question payload for {question.Id}: {payload.Length} chars.");
         }
 
-        SendDialogBridgePing(client, conversationKey, question.Id, "question");
         client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
         if (payload.Length > LslDialogBridgeMaxPayloadLength)
         {
@@ -295,7 +292,6 @@ internal sealed partial class BotSession
             header,
             prompt);
 
-        SendDialogBridgePing(client, conversationKey, question.Id, "question-text");
         client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
         if (payload.Length > LslDialogBridgeMaxPayloadLength)
         {
@@ -341,7 +337,6 @@ internal sealed partial class BotSession
             Console.WriteLine($"[dialog-bridge] compacted permission payload for {permissionId}: {payload.Length} chars.");
         }
 
-        SendDialogBridgePing(client, conversationKey, bridgeRequestId, "permission");
         client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
         if (payload.Length > LslDialogBridgeMaxPayloadLength)
         {
@@ -355,17 +350,6 @@ internal sealed partial class BotSession
 
     private async Task<bool> TryHandleLslDialogBridgeReplyAsync(GridClient client, UUID senderObjectId, string senderName, string text)
     {
-        if (TryParseLslDialogBridgePong(text, out var pingNonce, out var pingProto))
-        {
-            if (!IsTrustedDialogBridgeSender(client, senderObjectId, senderName, string.Empty))
-            {
-                return false;
-            }
-
-            Console.WriteLine($"[dialog-bridge] ping ack: nonce={pingNonce} proto={pingProto} sender={senderObjectId}");
-            return true;
-        }
-
         if (TryParseLslDialogBridgeAck(text, out var ackConversationKey, out var ackRequestId, out var ackMode))
         {
             if (!IsTrustedDialogBridgeSender(client, senderObjectId, senderName, ackConversationKey))
@@ -423,6 +407,7 @@ internal sealed partial class BotSession
         Console.WriteLine($"[dialog-bridge] forwarded reply to opencode: session={sessionId} question={requestId} success={ok} answer={resolvedAnswer}");
         _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
         _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
+        ClearPendingPromptActive(conversationKey, requestId);
         ClearPendingPromptWait(conversationKey);
         _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
 
@@ -438,6 +423,15 @@ internal sealed partial class BotSession
                 SendImText(client, agentId, from,
                     "I sent your dialog choice, but Opencode did not return an explicit success flag.");
             }
+        }
+
+        if (ok && _conversationAgentByKey.TryGetValue(conversationKey, out var nextAgentId)
+            && nextAgentId != UUID.Zero)
+        {
+            var nextFrom = _conversationNameByKey.TryGetValue(conversationKey, out var nextDisplayName)
+                ? nextDisplayName
+                : "handler";
+            ScheduleDrainPendingPrompts(client, nextAgentId, nextFrom, conversationKey);
         }
 
         return true;
@@ -465,6 +459,14 @@ internal sealed partial class BotSession
         var objectMatchesPin = pinnedObjectId != UUID.Zero && senderObjectId == pinnedObjectId;
         if (pinnedObjectId != UUID.Zero && senderObjectId != pinnedObjectId)
         {
+            // Some OpenSim builds report bot-owned object IMs with the bot AgentID as
+            // senderObjectId instead of the attachment object UUID.
+            if (senderObjectId == client.Self.AgentID && pinnedOwnerId == client.Self.AgentID)
+            {
+                Console.WriteLine($"[dialog-bridge] warning: sender UUID resolved as bot agent ({senderObjectId}) instead of pinned object ({pinnedObjectId}); accepting by trusted owner pin.");
+                return true;
+            }
+
             Console.WriteLine($"[dialog-bridge] dropped reply: untrusted object {senderObjectId} (expected {pinnedObjectId}) sender='{senderName}'.");
             return false;
         }
@@ -619,6 +621,9 @@ internal sealed partial class BotSession
         Console.WriteLine($"[dialog-bridge] forwarded permission reply to opencode: session={sessionId} permission={permissionId} success={ok} response={response} remember={remember}");
         _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
         _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
+        ClearPendingPromptActive(conversationKey, permissionId);
+        ClearPendingPromptWait(conversationKey);
+        _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
 
         if (_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
             && targetAgentId != UUID.Zero)
@@ -632,6 +637,15 @@ internal sealed partial class BotSession
                 SendImText(client, targetAgentId, from,
                     "I could not confirm that approval was accepted. If needed, try again.");
             }
+        }
+
+        if (ok && _conversationAgentByKey.TryGetValue(conversationKey, out var nextAgentId)
+            && nextAgentId != UUID.Zero)
+        {
+            var nextFrom = _conversationNameByKey.TryGetValue(conversationKey, out var nextDisplayName)
+                ? nextDisplayName
+                : "handler";
+            ScheduleDrainPendingPrompts(client, nextAgentId, nextFrom, conversationKey);
         }
 
         return true;
@@ -728,40 +742,6 @@ internal sealed partial class BotSession
         return !string.IsNullOrWhiteSpace(conversationKey)
             && !string.IsNullOrWhiteSpace(requestId)
             && !string.IsNullOrWhiteSpace(mode);
-    }
-
-    private static bool TryParseLslDialogBridgePong(string text, out string nonce, out string proto)
-    {
-        nonce = string.Empty;
-        proto = string.Empty;
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        var parts = text.Split('|');
-        if (parts.Length < 3 || !parts[0].Equals(LslDialogBridgePongPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        nonce = DecodeDialogToken(parts[1]);
-        proto = DecodeDialogToken(parts[2]);
-        return !string.IsNullOrWhiteSpace(nonce) && !string.IsNullOrWhiteSpace(proto);
-    }
-
-    private static void SendDialogBridgePing(GridClient client, string conversationKey, string requestId, string kind)
-    {
-        var nonce = $"{kind}:{conversationKey}:{requestId}:{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
-        var payload = string.Join("|", new[]
-        {
-            LslDialogBridgePingPrefix,
-            EncodeDialogToken(nonce),
-            EncodeDialogToken(client.Self.AgentID.ToString())
-        });
-
-        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-        Console.WriteLine($"[dialog-bridge] sent ping: nonce={nonce} channel={LslDialogBridgeRequestChannel}");
     }
 
     private static string BuildPermissionDialogHeader(HarnessPendingPermission permission)

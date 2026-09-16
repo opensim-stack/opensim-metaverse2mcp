@@ -11,6 +11,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 {
     public event Action<HarnessSessionStatusEvent>? SessionStatusChanged;
     public event Action<HarnessMessagePartUpdatedEvent>? MessagePartUpdated;
+    public event Action<HarnessPendingPromptStateEvent>? PendingPromptStateChanged;
 
     private readonly HttpClient _http;
     private readonly HttpClient? _eventHttp;
@@ -550,6 +551,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
     private void IngestEventDerivedPendingState(string eventType, string? hintedSessionId, JsonElement root)
     {
         var normalizedType = (eventType ?? string.Empty).Trim().ToLowerInvariant();
+        var touchedSessions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var derivedPermissions = ParsePendingPermissions(root)
             .Select(p => string.IsNullOrWhiteSpace(p.SessionId) && !string.IsNullOrWhiteSpace(hintedSessionId)
                 ? new HarnessPendingPermission(p.Id, hintedSessionId!, p.Title, p.Description)
@@ -566,12 +568,15 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     .Select(g => g.First())
                     .ToList();
                 _pendingPermissionsBySession[group.Key] = _eventPendingPermissionsBySession[group.Key];
+                touchedSessions.Add(group.Key);
             }
         }
         else if (ShouldClearPermissionPendingStateForEvent(normalizedType)
             && !string.IsNullOrWhiteSpace(hintedSessionId))
         {
             _eventPendingPermissionsBySession.TryRemove(hintedSessionId, out _);
+            _pendingPermissionsBySession.TryRemove(hintedSessionId, out _);
+            touchedSessions.Add(hintedSessionId);
         }
 
         var derivedQuestions = ParsePendingQuestions(root)
@@ -590,12 +595,34 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     .Select(g => g.First())
                     .ToList();
                 _pendingQuestionsBySession[group.Key] = _eventPendingQuestionsBySession[group.Key];
+                touchedSessions.Add(group.Key);
             }
         }
         else if (ShouldClearQuestionPendingStateForEvent(normalizedType)
             && !string.IsNullOrWhiteSpace(hintedSessionId))
         {
             _eventPendingQuestionsBySession.TryRemove(hintedSessionId, out _);
+            _pendingQuestionsBySession.TryRemove(hintedSessionId, out _);
+            touchedSessions.Add(hintedSessionId);
+        }
+
+        foreach (var sessionKey in touchedSessions)
+        {
+            var pendingPermissions = _eventPendingPermissionsBySession.TryGetValue(sessionKey, out var currentPermissions)
+                ? currentPermissions
+                : Array.Empty<HarnessPendingPermission>();
+            var pendingQuestions = _eventPendingQuestionsBySession.TryGetValue(sessionKey, out var currentQuestions)
+                ? currentQuestions
+                : Array.Empty<HarnessPendingQuestion>();
+
+            try
+            {
+                PendingPromptStateChanged?.Invoke(new HarnessPendingPromptStateEvent(sessionKey, pendingPermissions, pendingQuestions));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[opencode:event] pending prompt callback error: {ex.Message}");
+            }
         }
     }
 
@@ -1962,31 +1989,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         var isConfirmationPrompt = IsLikelyConfirmationPrompt(text);
-        var pendingPermissions = TryGetPendingPermissionsFromEvents(sessionId, out var fromEventPermissions)
-            ? fromEventPermissions
-            : Array.Empty<HarnessPendingPermission>();
-        if (pendingPermissions.Count > 0)
-        {
-            _pendingPermissionsBySession[sessionId] = pendingPermissions;
-        }
-        else
-        {
-            _pendingPermissionsBySession.TryRemove(sessionId, out _);
-        }
-
-        var pendingQuestions = TryGetPendingQuestionsFromEvents(sessionId, out var fromEventQuestions)
-            ? fromEventQuestions
-            : Array.Empty<HarnessPendingQuestion>();
-        if (pendingQuestions.Count > 0)
-        {
-            _pendingQuestionsBySession[sessionId] = pendingQuestions;
-        }
-        else
-        {
-            _pendingQuestionsBySession.TryRemove(sessionId, out _);
-        }
-
-        return new HarnessChatReply(text, isConfirmationPrompt, pendingPermissions, pendingQuestions, usage);
+        return new HarnessChatReply(text, isConfirmationPrompt, usage);
     }
 
     private static Dictionary<string, object?> BuildSessionCreateBody(string? title, string? configuredModelId, string? parentSessionId)
@@ -2365,21 +2368,15 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             || element.TryGetProperty("remember", out _);
         if (!isPermissionContext && !hasCanonicalIdField)
         {
-            // Guard against unrelated objects that happen to have an id field.
-            var typeLooksPermission = TryGetStringProperty(element, "type", out var typeValue)
-                && !string.IsNullOrWhiteSpace(typeValue)
-                && typeValue.Contains("permission", StringComparison.OrdinalIgnoreCase);
-            var looksLikePermissionRecord = hasGenericId
-                && (hasSessionField || hasNestedSessionField)
-                && hasPermissionSignals;
-            if (!typeLooksPermission && !looksLikePermissionRecord)
-            {
-                return false;
-            }
+            // Do not infer permission prompts from generic event envelopes.
+            // This avoids false positives from message.part.updated / message.updated payloads
+            // that contain tool/action/command fields unrelated to permission requests.
+            return false;
         }
 
-        // Prefer explicit request IDs, but fall back to generic id for newer/variant payload shapes.
-        // Some event envelopes only expose a generic id in nested `properties` records.
+        // Prefer explicit request IDs, but fall back to the generic id only when it is already
+        // a canonical permission request id. This prevents top-level event envelopes from being
+        // misclassified as permissions.
         var id = hasRequestIdField
             ? parsedRequestId!.Trim()
             : hasPermissionIdField
@@ -2388,6 +2385,11 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     ? genericId!.Trim()
                     : string.Empty;
         if (string.IsNullOrWhiteSpace(id))
+        {
+            return false;
+        }
+
+        if (!id.StartsWith("per", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -2626,6 +2628,14 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         var id = parsedId!.Trim();
         if (!id.StartsWith("que", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Only accept canonical question request records here; do not infer prompts from
+        // generic event envelopes that merely happen to carry a question-like field.
+        var hasCanonicalQuestionId = id.StartsWith("que", StringComparison.OrdinalIgnoreCase);
+        if (!hasCanonicalQuestionId)
         {
             return false;
         }

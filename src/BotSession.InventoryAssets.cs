@@ -4497,6 +4497,124 @@ internal sealed partial class BotSession
         Base64,
         TempFile,
         Both
+    }    private async Task<WearableDirectControlResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<WearableDirectControlResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return WearableDirectControlResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AttachmentPointMappingResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AttachmentPointMappingResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AttachmentPointMappingResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AttachmentObjectResolutionResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AttachmentObjectResolutionResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AttachmentObjectResolutionResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AppearanceVisualParamsResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AppearanceVisualParamsResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AppearanceVisualParamsResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AppearanceVisualParamSetResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AppearanceVisualParamSetResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AppearanceVisualParamSetResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AppearanceBakeDiagnosticsResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AppearanceBakeDiagnosticsResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AppearanceBakeDiagnosticsResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
     }
 }
 

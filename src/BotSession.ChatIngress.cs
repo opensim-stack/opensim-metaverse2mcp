@@ -9,14 +9,22 @@ internal sealed partial class BotSession
     private void OnInstantMessage(object? sender, InstantMessageEventArgs e)
     {
         var client = _client;
-        if (client == null || e.IM.FromAgentID == client.Self.AgentID)
+        if (client == null)
         {
             return;
         }
 
         var from = e.IM.FromAgentName;
         var text = e.IM.Message?.Trim() ?? string.Empty;
-        var isDialogBridgePayload = text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase);
+        var isDialogBridgeReplyPayload = text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase);
+        var isDialogBridgeAckPayload = text.StartsWith(LslDialogBridgeAckPrefix + "|", StringComparison.OrdinalIgnoreCase);
+        var isDialogBridgePayload = isDialogBridgeReplyPayload || isDialogBridgeAckPayload;
+        if (e.IM.FromAgentID == client.Self.AgentID
+            && e.IM.Dialog != InstantMessageDialog.MessageFromObject
+            && !isDialogBridgePayload)
+        {
+            return;
+        }
         if (e.IM.Dialog != InstantMessageDialog.MessageFromAgent
             && e.IM.Dialog != InstantMessageDialog.SessionSend
             && e.IM.Dialog != InstantMessageDialog.MessageFromObject
@@ -50,16 +58,9 @@ internal sealed partial class BotSession
 
         if (e.IM.Dialog == InstantMessageDialog.MessageFromObject || isDialogBridgePayload)
         {
-            var bridgeSenderObjectId = e.IM.FromAgentID;
-            if (isDialogBridgePayload && e.IM.IMSessionID != UUID.Zero)
-            {
-                // For object-origin payloads, IMSessionID carries the object UUID in OpenSim.
-                bridgeSenderObjectId = e.IM.IMSessionID;
-            }
-
             _ = Task.Run(async () =>
             {
-                await TryHandleLslDialogBridgeReplyAsync(client, bridgeSenderObjectId, e.IM.FromAgentName, text).ConfigureAwait(false);
+                await TryHandleLslDialogBridgeReplyAsync(client, e.IM.FromAgentID, e.IM.FromAgentName, text).ConfigureAwait(false);
             });
             return;
         }
@@ -314,15 +315,6 @@ internal sealed partial class BotSession
                     return requestCts;
                 });
 
-            using var inFlightQuestionWatchCts = CancellationTokenSource.CreateLinkedTokenSource(requestCts.Token);
-            var inFlightQuestionWatchTask = Task.Run(() =>
-                NotifyPendingQuestionDuringInFlightRequestAsync(
-                    client,
-                    senderAgentId,
-                    from,
-                    conversationKey,
-                    inFlightQuestionWatchCts.Token));
-
             Console.WriteLine($"[{channelLabel}] routing to opencode: from={from} conversation={conversationKey} textLength={routedText.Length} model={(sendOptions?.ModelId ?? "(default)")}");
             var reply = await _harnessClient.SendMessageAsync(
                 conversationKey: conversationKey,
@@ -343,74 +335,9 @@ internal sealed partial class BotSession
                 ? reply.Text + "\n\nReply with yes or no to continue."
                 : reply.Text;
 
-            if (reply.PendingPermissions != null && reply.PendingPermissions.Count > 0)
-            {
-                var latestPermission = reply.PendingPermissions
-                    .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Id));
-                if (latestPermission != null)
-                {
-                    await OfferPermissionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, latestPermission.SessionId, latestPermission).ConfigureAwait(false);
-                }
-            }
-            else
-            {
-                var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
-                if (!string.IsNullOrWhiteSpace(currentSessionId))
-                {
-                    var eventFirstPermissions = await GetPendingPermissionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
-                    if (eventFirstPermissions.Count > 0)
-                    {
-                        var latestPermission = eventFirstPermissions[0];
-                        if (!_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
-                            || !announcedPermissionId.Equals(latestPermission.Id, StringComparison.OrdinalIgnoreCase))
-                        {
-                            await OfferPermissionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, currentSessionId, latestPermission).ConfigureAwait(false);
-                        }
-                    }
-                }
-            }
-
-            if (reply.PendingQuestions != null && reply.PendingQuestions.Count > 0)
-            {
-                var latestQuestion = reply.PendingQuestions
-                    .FirstOrDefault(q => !string.IsNullOrWhiteSpace(q.Id));
-                if (latestQuestion != null)
-                {
-                    await OfferQuestionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, latestQuestion.SessionId, latestQuestion).ConfigureAwait(false);
-                }
-            }
-            else
-            {
-                var currentSessionId = _harnessClient.GetConversationSessionId(conversationKey);
-                if (!string.IsNullOrWhiteSpace(currentSessionId))
-                {
-                    var polledQuestions = await GetPendingQuestionsEventFirstAsync(currentSessionId, CancellationToken.None).ConfigureAwait(false);
-                    if (polledQuestions.Count > 0)
-                    {
-                        if (!_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedQuestionId)
-                            || !announcedQuestionId.Equals(polledQuestions[0].Id, StringComparison.OrdinalIgnoreCase))
-                        {
-                            await OfferQuestionPromptWithFallbackAsync(client, senderAgentId, from, conversationKey, currentSessionId, polledQuestions[0]).ConfigureAwait(false);
-                        }
-                    }
-                }
-            }
-
             SendImText(client, senderAgentId, from, responseText, conversationKey);
 
             StopTypingIndicatorIfActive();
-
-            inFlightQuestionWatchCts.Cancel();
-            try
-            {
-                await inFlightQuestionWatchTask.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Ignore watcher cancellation or transient polling errors.
-            }
-
-            _ = Task.Run(() => NotifyPendingQuestionIfAppearsAsync(client, senderAgentId, from, conversationKey));
         }
         catch (OperationCanceledException) when (inFlightRequestCts?.IsCancellationRequested == true)
         {
@@ -641,7 +568,9 @@ internal sealed partial class BotSession
         }
 
         var text = e.Message?.Trim() ?? string.Empty;
-        if (text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase))
+        var isDialogBridgeChatReply = text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase);
+        var isDialogBridgeChatAck = text.StartsWith(LslDialogBridgeAckPrefix + "|", StringComparison.OrdinalIgnoreCase);
+        if (isDialogBridgeChatReply || isDialogBridgeChatAck)
         {
             Console.WriteLine($"[chat] ({e.SourceType}/{e.Type}) {e.FromName}: {SanitizeImLogText(text)}");
             _ = Task.Run(async () =>

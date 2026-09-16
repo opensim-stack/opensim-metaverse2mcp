@@ -136,6 +136,21 @@ internal sealed partial class BotSession : IDisposable
         HarnessPendingQuestion? Question,
         DateTimeOffset ActivatedAt);
 
+    private sealed record PendingPromptQueueEntry(
+        PendingPromptKind Kind,
+        string SessionId,
+        string RequestId,
+        HarnessPendingPermission? Permission,
+        HarnessPendingQuestion? Question);
+
+    private sealed class PendingPromptQueueState
+    {
+        public readonly object SyncRoot = new();
+        public readonly Queue<PendingPromptQueueEntry> Queue = new();
+        public readonly HashSet<string> EnqueuedRequestIds = new(StringComparer.OrdinalIgnoreCase);
+        public string? ActiveRequestId;
+    }
+
     private readonly record struct RequesterImLocationHint(
         UUID RequesterAgentId,
         UUID RegionId,
@@ -163,6 +178,8 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _pendingPromptLocks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingPromptQueueState> _pendingPromptQueuesByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RequesterImLocationHint> _requesterImLocationHintByConversation = new(StringComparer.Ordinal);
     private readonly AsyncLocal<string?> _ambientConversationKey = new();
     private readonly string _handlerConfigPath;
@@ -238,6 +255,7 @@ internal sealed partial class BotSession : IDisposable
         _harnessClient = new OpencodeChatClient(_options);
         _harnessClient.SessionStatusChanged += OnHarnessSessionStatusChanged;
         _harnessClient.MessagePartUpdated += OnHarnessMessagePartUpdated;
+        _harnessClient.PendingPromptStateChanged += OnHarnessPendingPromptStateChanged;
         var startupModel = GetStartupDefaultModelId();
         if (!string.IsNullOrWhiteSpace(startupModel))
         {
@@ -508,6 +526,7 @@ internal sealed partial class BotSession : IDisposable
         {
             _harnessClient.SessionStatusChanged -= OnHarnessSessionStatusChanged;
             _harnessClient.MessagePartUpdated -= OnHarnessMessagePartUpdated;
+            _harnessClient.PendingPromptStateChanged -= OnHarnessPendingPromptStateChanged;
         }
         StopTypingIndicatorIfActive();
         foreach (var cts in _inFlightRequestCtsByConversation.Values)
@@ -630,125 +649,6 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private async Task<WearableDirectControlResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<WearableDirectControlResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return WearableDirectControlResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<AttachmentPointMappingResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<AttachmentPointMappingResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return AttachmentPointMappingResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<AttachmentObjectResolutionResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<AttachmentObjectResolutionResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return AttachmentObjectResolutionResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<AppearanceVisualParamsResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<AppearanceVisualParamsResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return AppearanceVisualParamsResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<AppearanceVisualParamSetResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<AppearanceVisualParamSetResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return AppearanceVisualParamSetResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
-
-    private async Task<AppearanceBakeDiagnosticsResult> ExecuteLockedAsync(
-        Func<GridClient, CancellationToken, Task<AppearanceBakeDiagnosticsResult>> action,
-        CancellationToken cancellationToken)
-    {
-        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var client = EnsureClient();
-            return await action(client, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            return AppearanceBakeDiagnosticsResult.FailResult(ex.Message);
-        }
-        finally
-        {
-            _actionGate.Release();
-        }
-    }
 
     private GridClient EnsureClient()
     {
@@ -992,6 +892,295 @@ internal sealed partial class BotSession : IDisposable
         PulseTypingIndicator(partEvent.SessionId);
     }
 
+    private void OnHarnessPendingPromptStateChanged(HarnessPendingPromptStateEvent promptStateEvent)
+    {
+        if (promptStateEvent == null || string.IsNullOrWhiteSpace(promptStateEvent.SessionId))
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await HandlePendingPromptStateChangedAsync(promptStateEvent).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[opencode:event] pending prompt callback error: {ex.Message}");
+            }
+        });
+    }
+
+    private bool HasActivePromptForConversation(string conversationKey)
+        => _pendingDialogPromptWaitByConversation.ContainsKey(conversationKey)
+            || _pendingTextPromptReplyByConversation.ContainsKey(conversationKey);
+
+    private PendingPromptQueueState GetPendingPromptQueueState(string conversationKey)
+        => _pendingPromptQueuesByConversation.GetOrAdd(conversationKey, _ => new PendingPromptQueueState());
+
+    private void EnqueuePendingPromptEntries(string conversationKey, IEnumerable<PendingPromptQueueEntry> entries)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return;
+        }
+
+        var state = GetPendingPromptQueueState(conversationKey);
+        lock (state.SyncRoot)
+        {
+            foreach (var entry in entries)
+            {
+                if (string.IsNullOrWhiteSpace(entry.RequestId)
+                    || (!string.IsNullOrWhiteSpace(state.ActiveRequestId)
+                        && entry.RequestId.Equals(state.ActiveRequestId, StringComparison.OrdinalIgnoreCase))
+                    || state.EnqueuedRequestIds.Contains(entry.RequestId))
+                {
+                    continue;
+                }
+
+                state.Queue.Enqueue(entry);
+                state.EnqueuedRequestIds.Add(entry.RequestId);
+            }
+        }
+    }
+
+    private bool TryDequeueNextPendingPromptEntry(string conversationKey, out PendingPromptQueueEntry? entry)
+    {
+        entry = null;
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return false;
+        }
+
+        var state = GetPendingPromptQueueState(conversationKey);
+        lock (state.SyncRoot)
+        {
+            while (state.Queue.Count > 0)
+            {
+                var candidate = state.Queue.Dequeue();
+                state.EnqueuedRequestIds.Remove(candidate.RequestId);
+                if (!string.IsNullOrWhiteSpace(state.ActiveRequestId)
+                    && candidate.RequestId.Equals(state.ActiveRequestId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                state.ActiveRequestId = candidate.RequestId;
+                entry = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void MarkPendingPromptActive(string conversationKey, string requestId)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
+        {
+            return;
+        }
+
+        var state = GetPendingPromptQueueState(conversationKey);
+        lock (state.SyncRoot)
+        {
+            state.ActiveRequestId = requestId.Trim();
+            state.EnqueuedRequestIds.Remove(state.ActiveRequestId);
+        }
+    }
+
+    private void ClearPendingPromptActive(string conversationKey, string requestId)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
+        {
+            return;
+        }
+
+        var state = GetPendingPromptQueueState(conversationKey);
+        lock (state.SyncRoot)
+        {
+            if (!string.IsNullOrWhiteSpace(state.ActiveRequestId)
+                && state.ActiveRequestId.Equals(requestId.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                state.ActiveRequestId = null;
+            }
+        }
+    }
+
+    private async Task SeedPendingPromptQueueFromSnapshotAsync(string conversationKey, string sessionId)
+    {
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        var state = GetPendingPromptQueueState(conversationKey);
+        lock (state.SyncRoot)
+        {
+            if (state.Queue.Count > 0 || !string.IsNullOrWhiteSpace(state.ActiveRequestId))
+            {
+                return;
+            }
+        }
+
+        var permissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        var questions = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        if (permissions.Count == 0 && questions.Count == 0)
+        {
+            return;
+        }
+
+        var entries = new List<PendingPromptQueueEntry>(permissions.Count + questions.Count);
+        foreach (var permission in permissions)
+        {
+            if (!string.IsNullOrWhiteSpace(permission.Id))
+            {
+                entries.Add(new PendingPromptQueueEntry(PendingPromptKind.Permission, string.IsNullOrWhiteSpace(permission.SessionId) ? sessionId : permission.SessionId, permission.Id, permission, null));
+            }
+        }
+
+        foreach (var question in questions)
+        {
+            if (!string.IsNullOrWhiteSpace(question.Id))
+            {
+                entries.Add(new PendingPromptQueueEntry(PendingPromptKind.Question, string.IsNullOrWhiteSpace(question.SessionId) ? sessionId : question.SessionId, question.Id, null, question));
+            }
+        }
+
+        if (entries.Count > 0)
+        {
+            EnqueuePendingPromptEntries(conversationKey, entries);
+        }
+    }
+
+    private void ScheduleDrainPendingPrompts(GridClient client, UUID agentId, string from, string conversationKey)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await DrainPendingPromptsAsync(client, agentId, from, conversationKey).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[opencode:event] pending prompt drain error: {ex.Message}");
+            }
+        });
+    }
+
+    private async Task DrainPendingPromptsAsync(GridClient client, UUID agentId, string from, string conversationKey)
+    {
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || HasActivePromptForConversation(conversationKey))
+        {
+            return;
+        }
+
+        var promptGate = _pendingPromptLocks.GetOrAdd(conversationKey, _ => new SemaphoreSlim(1, 1));
+        await promptGate.WaitAsync().ConfigureAwait(false);
+
+        try
+        {
+            if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || HasActivePromptForConversation(conversationKey))
+            {
+                return;
+            }
+
+            var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                await SeedPendingPromptQueueFromSnapshotAsync(conversationKey, sessionId).ConfigureAwait(false);
+            }
+
+            if (TryDequeueNextPendingPromptEntry(conversationKey, out var nextEntry)
+                && nextEntry != null)
+            {
+                sessionId ??= nextEntry.SessionId;
+                if (nextEntry.Kind == PendingPromptKind.Permission)
+                {
+                    if (nextEntry.Permission != null)
+                    {
+                        await OfferPermissionPromptWithFallbackAsync(client, agentId, from, conversationKey, string.IsNullOrWhiteSpace(nextEntry.Permission.SessionId) ? sessionId : nextEntry.Permission.SessionId, nextEntry.Permission).ConfigureAwait(false);
+                    }
+                }
+                else if (nextEntry.Question != null)
+                {
+                    await OfferQuestionPromptWithFallbackAsync(client, agentId, from, conversationKey, string.IsNullOrWhiteSpace(nextEntry.Question.SessionId) ? sessionId : nextEntry.Question.SessionId, nextEntry.Question).ConfigureAwait(false);
+                }
+            }
+        }
+        finally
+        {
+            promptGate.Release();
+        }
+    }
+
+    private async Task HandlePendingPromptStateChangedAsync(HarnessPendingPromptStateEvent promptStateEvent)
+    {
+        var client = _client;
+        if (_harnessClient == null || client == null || !_connected || string.IsNullOrWhiteSpace(promptStateEvent.SessionId))
+        {
+            return;
+        }
+
+        var conversationKey = FindConversationKeyForSessionId(promptStateEvent.SessionId);
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            var sessionFamily = await GetSessionFamilyIdsAsync(promptStateEvent.SessionId, CancellationToken.None).ConfigureAwait(false);
+            foreach (var pair in _conversationAgentByKey)
+            {
+                var mappedSessionId = _harnessClient.GetConversationSessionId(pair.Key);
+                if (!string.IsNullOrWhiteSpace(mappedSessionId)
+                    && sessionFamily.Contains(mappedSessionId, StringComparer.OrdinalIgnoreCase))
+                {
+                    conversationKey = pair.Key;
+                    break;
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(conversationKey)
+            || !_conversationAgentByKey.TryGetValue(conversationKey, out var agentId)
+            || agentId == UUID.Zero)
+        {
+            return;
+        }
+
+        var queueEntries = new List<PendingPromptQueueEntry>();
+        foreach (var permission in promptStateEvent.PendingPermissions)
+        {
+            if (!string.IsNullOrWhiteSpace(permission?.Id))
+            {
+                queueEntries.Add(new PendingPromptQueueEntry(PendingPromptKind.Permission, string.IsNullOrWhiteSpace(permission.SessionId) ? promptStateEvent.SessionId : permission.SessionId, permission.Id, permission, null));
+            }
+        }
+
+        foreach (var question in promptStateEvent.PendingQuestions)
+        {
+            if (!string.IsNullOrWhiteSpace(question?.Id))
+            {
+                queueEntries.Add(new PendingPromptQueueEntry(PendingPromptKind.Question, string.IsNullOrWhiteSpace(question.SessionId) ? promptStateEvent.SessionId : question.SessionId, question.Id, null, question));
+            }
+        }
+
+        if (queueEntries.Count > 0)
+        {
+            EnqueuePendingPromptEntries(conversationKey, queueEntries);
+        }
+
+        if (!_conversationNameByKey.TryGetValue(conversationKey, out var from) || string.IsNullOrWhiteSpace(from))
+        {
+            from = "handler";
+        }
+
+        await DrainPendingPromptsAsync(client, agentId, from, conversationKey).ConfigureAwait(false);
+    }
+
     private void PulseTypingIndicator(string? sessionIdHint = null)
     {
         var client = _client;
@@ -1231,25 +1420,6 @@ internal sealed partial class BotSession : IDisposable
             return Array.Empty<HarnessPendingPermission>();
         }
 
-        var fromEventFamily = new List<HarnessPendingPermission>();
-        foreach (var familySessionId in sessionFamily)
-        {
-            if (_harnessClient.TryGetPendingPermissionsFromEvents(familySessionId, out var fromEvents)
-                && fromEvents.Count > 0)
-            {
-                fromEventFamily.AddRange(fromEvents);
-            }
-        }
-
-        if (fromEventFamily.Count > 0)
-        {
-            return fromEventFamily
-                .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.First())
-                .OrderBy(p => p.Title, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
         var fromApiFamily = new List<HarnessPendingPermission>();
         foreach (var familySessionId in sessionFamily)
         {
@@ -1260,12 +1430,31 @@ internal sealed partial class BotSession : IDisposable
             }
         }
 
-        if (fromApiFamily.Count == 0)
+        if (fromApiFamily.Count > 0)
+        {
+            return fromApiFamily
+                .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(p => p.Title, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        var fromEventFamily = new List<HarnessPendingPermission>();
+        foreach (var familySessionId in sessionFamily)
+        {
+            if (_harnessClient.TryGetPendingPermissionsFromEvents(familySessionId, out var fromEvents)
+                && fromEvents.Count > 0)
+            {
+                fromEventFamily.AddRange(fromEvents);
+            }
+        }
+
+        if (fromEventFamily.Count == 0)
         {
             return Array.Empty<HarnessPendingPermission>();
         }
 
-        return fromApiFamily
+        return fromEventFamily
             .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
             .OrderBy(p => p.Title, StringComparer.OrdinalIgnoreCase)
@@ -1285,25 +1474,6 @@ internal sealed partial class BotSession : IDisposable
             return Array.Empty<HarnessPendingQuestion>();
         }
 
-        var fromEventFamily = new List<HarnessPendingQuestion>();
-        foreach (var familySessionId in sessionFamily)
-        {
-            if (_harnessClient.TryGetPendingQuestionsFromEvents(familySessionId, out var fromEvents)
-                && fromEvents.Count > 0)
-            {
-                fromEventFamily.AddRange(fromEvents);
-            }
-        }
-
-        if (fromEventFamily.Count > 0)
-        {
-            return fromEventFamily
-                .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.First())
-                .OrderBy(q => q.Header, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
         var fromApiFamily = new List<HarnessPendingQuestion>();
         foreach (var familySessionId in sessionFamily)
         {
@@ -1314,12 +1484,31 @@ internal sealed partial class BotSession : IDisposable
             }
         }
 
-        if (fromApiFamily.Count == 0)
+        if (fromApiFamily.Count > 0)
+        {
+            return fromApiFamily
+                .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(q => q.Header, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        var fromEventFamily = new List<HarnessPendingQuestion>();
+        foreach (var familySessionId in sessionFamily)
+        {
+            if (_harnessClient.TryGetPendingQuestionsFromEvents(familySessionId, out var fromEvents)
+                && fromEvents.Count > 0)
+            {
+                fromEventFamily.AddRange(fromEvents);
+            }
+        }
+
+        if (fromEventFamily.Count == 0)
         {
             return Array.Empty<HarnessPendingQuestion>();
         }
 
-        return fromApiFamily
+        return fromEventFamily
             .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
             .OrderBy(q => q.Header, StringComparer.OrdinalIgnoreCase)
@@ -1373,160 +1562,6 @@ internal sealed partial class BotSession : IDisposable
         return visited.ToList();
     }
 
-    private async Task NotifyPendingQuestionIfAppearsAsync(GridClient client, UUID agentId, string from, string conversationKey)
-    {
-        if (_harnessClient == null)
-        {
-            return;
-        }
-
-        // TEMP(event-first migration): delete this method once event stream routing replaces delayed
-        // polling of /question. This exists only as a migration fallback.
-        // Keep this short to avoid stale prompts, but long enough for async question.asked emission.
-        for (var attempt = 0; attempt < 10; attempt++)
-        {
-            await Task.Delay(500).ConfigureAwait(false);
-
-            var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
-            if (string.IsNullOrWhiteSpace(sessionId))
-            {
-                return;
-            }
-
-            IReadOnlyList<HarnessPendingPermission> pendingPermissions;
-            try
-            {
-                pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch
-            {
-                return;
-            }
-
-            var permission = pendingPermissions.FirstOrDefault();
-            if (permission != null && !string.IsNullOrWhiteSpace(permission.Id))
-            {
-                if (_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
-                    && announcedPermissionId.Equals(permission.Id, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Already announced; still check for pending questions in this same poll cycle.
-                }
-                else
-                {
-                    await OfferPermissionPromptWithFallbackAsync(client, agentId, from, conversationKey, sessionId, permission).ConfigureAwait(false);
-                }
-            }
-
-            IReadOnlyList<HarnessPendingQuestion> pending;
-            try
-            {
-                pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch
-            {
-                return;
-            }
-
-            var question = pending.FirstOrDefault();
-            if (question == null || string.IsNullOrWhiteSpace(question.Id))
-            {
-                continue;
-            }
-
-            _latestPendingQuestionByConversation[conversationKey] = question.Id;
-            if (!_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedQuestionId)
-                || !announcedQuestionId.Equals(question.Id, StringComparison.OrdinalIgnoreCase))
-            {
-                await OfferQuestionPromptWithFallbackAsync(client, agentId, from, conversationKey, sessionId, question).ConfigureAwait(false);
-                continue;
-            }
-        }
-    }
-
-    private async Task NotifyPendingQuestionDuringInFlightRequestAsync(
-        GridClient client,
-        UUID agentId,
-        string from,
-        string conversationKey,
-        CancellationToken cancellationToken)
-    {
-        if (_harnessClient == null)
-        {
-            return;
-        }
-
-        // TEMP(event-first migration): delete this method once in-flight question/permission events
-        // are forwarded directly to IM from the stream observer.
-        // Keep watching until the in-flight request ends (token is canceled by caller).
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            try
-            {
-                await Task.Delay(500, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-
-            var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
-            if (string.IsNullOrWhiteSpace(sessionId))
-            {
-                continue;
-            }
-
-            IReadOnlyList<HarnessPendingPermission> pendingPermissions;
-            try
-            {
-                pendingPermissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch
-            {
-                continue;
-            }
-
-            var permission = pendingPermissions.FirstOrDefault();
-            if (permission != null && !string.IsNullOrWhiteSpace(permission.Id))
-            {
-                if (_announcedPendingPermissionByConversation.TryGetValue(conversationKey, out var announcedPermissionId)
-                    && announcedPermissionId.Equals(permission.Id, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Already announced; still check for pending questions in this same poll cycle.
-                }
-                else
-                {
-                    await OfferPermissionPromptWithFallbackAsync(client, agentId, from, conversationKey, sessionId, permission).ConfigureAwait(false);
-                }
-            }
-
-            IReadOnlyList<HarnessPendingQuestion> pendingQuestions;
-            try
-            {
-                pendingQuestions = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch
-            {
-                continue;
-            }
-
-            var question = pendingQuestions.FirstOrDefault();
-            if (question == null || string.IsNullOrWhiteSpace(question.Id))
-            {
-                continue;
-            }
-
-            _latestPendingQuestionByConversation[conversationKey] = question.Id;
-            if (_announcedPendingQuestionByConversation.TryGetValue(conversationKey, out var announcedId)
-                && announcedId.Equals(question.Id, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            await OfferQuestionPromptWithFallbackAsync(client, agentId, from, conversationKey, sessionId, question).ConfigureAwait(false);
-            continue;
-        }
-    }
-
     private bool IsDialogBridgePinned()
     {
         lock (_dialogBridgeTrustLock)
@@ -1548,6 +1583,12 @@ internal sealed partial class BotSession : IDisposable
             return Task.CompletedTask;
         }
 
+        if (HasActivePromptForConversation(conversationKey))
+        {
+            return Task.CompletedTask;
+        }
+
+        MarkPendingPromptActive(conversationKey, permission.Id);
         _latestPendingPermissionByConversation[conversationKey] = permission.Id;
         if (!IsDialogBridgePinned())
         {
@@ -1581,6 +1622,12 @@ internal sealed partial class BotSession : IDisposable
             return Task.CompletedTask;
         }
 
+        if (HasActivePromptForConversation(conversationKey))
+        {
+            return Task.CompletedTask;
+        }
+
+        MarkPendingPromptActive(conversationKey, question.Id);
         _latestPendingQuestionByConversation[conversationKey] = question.Id;
         if (!IsDialogBridgePinned())
         {
@@ -1680,6 +1727,7 @@ internal sealed partial class BotSession : IDisposable
         HarnessPendingQuestion? question = null)
     {
         ClearPendingPromptWait(conversationKey);
+        MarkPendingPromptActive(conversationKey, requestId);
         _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
         _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
         if (kind == PendingPromptKind.Permission)
@@ -1746,6 +1794,8 @@ internal sealed partial class BotSession : IDisposable
             _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
             _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
             _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
+            ClearPendingPromptActive(conversationKey, state.RequestId);
+            ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
             return true;
         }
 
@@ -1764,6 +1814,8 @@ internal sealed partial class BotSession : IDisposable
         _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
         _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
         _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
+        ClearPendingPromptActive(conversationKey, state.RequestId);
+        ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
         return true;
     }
 

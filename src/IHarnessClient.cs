@@ -33,13 +33,12 @@ internal interface IHarnessClient
     Task<HarnessProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken);
     event Action<HarnessSessionStatusEvent>? SessionStatusChanged;
     event Action<HarnessMessagePartUpdatedEvent>? MessagePartUpdated;
+    event Action<HarnessPendingPromptStateEvent>? PendingPromptStateChanged;
 }
 
 internal sealed record HarnessChatReply(
     string Text,
     bool IsConfirmationPrompt,
-    IReadOnlyList<HarnessPendingPermission>? PendingPermissions = null,
-    IReadOnlyList<HarnessPendingQuestion>? PendingQuestions = null,
     HarnessUsageSummary? Usage = null);
 
 internal sealed record HarnessSendOptions(string? ModelId, string? ThinkingLevel, string? SystemPrompt);
@@ -59,3 +58,7 @@ internal sealed record HarnessSessionStatusEvent(
     DateTimeOffset? NextRetryAt = null,
     int? Attempt = null);
 internal sealed record HarnessMessagePartUpdatedEvent(string SessionId, string PartType);
+internal sealed record HarnessPendingPromptStateEvent(
+    string SessionId,
+    IReadOnlyList<HarnessPendingPermission> PendingPermissions,
+    IReadOnlyList<HarnessPendingQuestion> PendingQuestions);
