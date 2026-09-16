@@ -13,7 +13,7 @@ internal sealed partial class BotSession
     private const string LslDialogBridgeMoodRequestPrefix = "moodreq";
     // OpenSimulator tolerates larger chat payloads than strict SL-era assumptions.
     // Keep this conservative enough to avoid most truncation while preserving prompt fidelity.
-    private const int LslDialogBridgeMaxPayloadLength = 900;
+    private const int LslDialogBridgeMaxPayloadLength = 255;
     private const string LslDialogBridgeHoverRequestPrefix = "hovreq";
     
     private readonly object _hoverStateLock = new();
