@@ -13,7 +13,6 @@ internal sealed partial class BotSession
         "- Simulator/cache state may be stale; verify current state before mutating it.\n" +
         "Tooling basics:\n" +
         "- Use metaverse MCP tools for avatar/world operations (movement, prims, inventory, scripts, environment).\n" +
-        "- Use console2mcp tools for simulator administration tasks when needed.\n" +
         "Operating rules:\n" +
         "- Prefer safe and reversible actions.\n" +
         "- Confirm destructive or high-impact actions first (delete, bulk changes, ownership/permission changes, restarts).\n" +
