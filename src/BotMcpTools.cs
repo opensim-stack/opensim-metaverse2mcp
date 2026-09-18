@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using LibreMetaverse;
 using ModelContextProtocol.Server;
 
 namespace Opensim.Metaverse2Mcp;
@@ -1896,6 +1897,131 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken)
     {
         return _bot.InventoryGiveFolderAsync(folderId, recipientAgentId, withBeamEffect, cancellationToken);
+    }
+
+    [McpServerTool, Description("Import an IAR (Inventory Archive) file from a URL into bot inventory, with optional transfer to another agent.")]
+    public async Task<BotToolResult> ImportIarUrl(
+        [Description("URL where the IAR file will be imported from (can be anything, doesn't have to end in .oar).")]
+        string url,
+        [Description("Optional inventory folder path where the IAR contents will be imported; defaults to 'Inventory/Imports/<filename>' if blank.")]
+        string? inventoryPath,
+        [Description("Optional target agent UUID; if provided, the imported folder will be given to this agent with a beam effect.")]
+        string? targetAgentId,
+        [Description("Optional boolean; if true and folder is given to another agent, the folder will be deleted from bot's inventory after transfer.")]
+        bool? deleteAfterSending,
+        CancellationToken cancellationToken)
+    {
+        var botFirst = _options.BotFirstName?.Trim() ?? string.Empty;
+        var botLast = _options.BotLastName?.Trim() ?? string.Empty;
+        
+        if (botFirst.Length == 0 || botLast.Length == 0)
+        {
+            return BotToolResult.Fail("Bot identity is not configured (BotFirstName/BotLastName missing).");
+        }
+
+        // Call spawner API to import OAR
+        var importResult = await _spawnerClient.ImportIarUrlAsync(botFirst, botLast, url, inventoryPath, cancellationToken).ConfigureAwait(false);
+        if (!importResult.Ok)
+        {
+            return BotToolResult.Fail($"IAR import failed: {importResult.Message}");
+        }
+
+        // If no target agent ID, we're done
+        if (string.IsNullOrWhiteSpace(targetAgentId))
+        {
+            return BotToolResult.OkResult($"IAR imported from URL: {importResult.Message}");
+        }
+
+        // Parse target agent ID
+        if (!UUID.TryParse(targetAgentId.Trim(), out _))
+        {
+            return BotToolResult.Fail("targetAgentId is not a valid UUID.");
+        }
+
+        // Extract the filename from the URL to determine the imported folder name
+        var urlTrim = url.Trim();
+        var filename = Path.GetFileName(urlTrim);
+        if (string.IsNullOrWhiteSpace(filename) || filename.Contains("?"))
+        {
+            filename = Path.GetFileName(urlTrim.Split('?')[0]);
+        }
+
+        if (string.IsNullOrWhiteSpace(filename))
+        {
+            return BotToolResult.Fail("Could not extract filename from URL for folder lookup.");
+        }
+
+        // Remove .oar extension if present for folder name
+        var folderName = filename.EndsWith(".oar", StringComparison.OrdinalIgnoreCase)
+            ? filename.Substring(0, filename.Length - 4)
+            : filename;
+
+        // Wait a moment for inventory to update
+        await Task.Delay(500, cancellationToken).ConfigureAwait(false);
+
+        // Try to find the imported folder
+        var inventory = await _bot.InventoryListAsync(
+            null,
+            true,
+            1000,
+            folderName,
+            null,
+            null,
+            null,
+            null,
+            null,
+            100,
+            cancellationToken).ConfigureAwait(false);
+
+        if (!inventory.Ok)
+        {
+            return BotToolResult.Fail($"IAR imported successfully, but could not locate imported folder: {inventory.Message}");
+        }
+
+        // Find the imported folder in entries
+        string? importedFolderId = null;
+        var folderEntry = inventory.Entries.FirstOrDefault(e =>
+            e.Kind == "folder" &&
+            string.Equals(e.Name, folderName, StringComparison.OrdinalIgnoreCase));
+
+        if (folderEntry != null)
+        {
+            importedFolderId = folderEntry.Id;
+        }
+
+        if (string.IsNullOrWhiteSpace(importedFolderId))
+        {
+            return BotToolResult.Fail($"IAR imported successfully, but could not find imported folder '{folderName}' in inventory.");
+        }
+
+        // Give folder to target agent
+        var giveResult = await _bot.InventoryGiveFolderAsync(
+            importedFolderId,
+            targetAgentId.Trim(),
+            true,
+            cancellationToken).ConfigureAwait(false);
+
+        if (!giveResult.Ok)
+        {
+            return BotToolResult.Fail($"IAR imported but transfer to agent failed: {giveResult.Message}");
+        }
+
+        // Delete folder if requested
+        if (deleteAfterSending == true)
+        {
+            var deleteResult = await _bot.InventoryDeleteFolderAsync(
+                importedFolderId,
+                cancellationToken).ConfigureAwait(false);
+
+            if (!deleteResult.Ok)
+            {
+                return BotToolResult.Fail($"IAR imported and transferred, but folder deletion failed: {deleteResult.Message}");
+            }
+
+            return BotToolResult.OkResult($"IAR imported from URL, transferred to agent {targetAgentId.Trim()}, and folder deleted.");
+        }
+
+        return BotToolResult.OkResult($"IAR imported from URL and transferred to agent {targetAgentId.Trim()}.");
     }
 
     [McpServerTool, Description("Delete an inventory item by UUID.")]

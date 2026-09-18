@@ -183,6 +183,45 @@ internal sealed class SpawnerClient : IDisposable
             cancellationToken);
     }
 
+    public Task<DataToolResult> ImportIarUrlAsync(
+        string first,
+        string last,
+        string url,
+        string? inventoryPath,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+        {
+            return Task.FromResult(DataToolResult.FailResult("first and last are required."));
+        }
+
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return Task.FromResult(DataToolResult.FailResult("url is required."));
+        }
+
+        var escapedFirst = Uri.EscapeDataString(first.Trim());
+        var escapedLast = Uri.EscapeDataString(last.Trim());
+        var path = $"api/import/iar-url/{escapedFirst}/{escapedLast}";
+        
+        var request = CreateRequest(HttpMethod.Get, path);
+        
+        var queryParams = new List<string>
+        {
+            $"url={Uri.EscapeDataString(url.Trim())}"
+        };
+
+        if (!string.IsNullOrWhiteSpace(inventoryPath))
+        {
+            queryParams.Add($"inventoryPath={Uri.EscapeDataString(inventoryPath.Trim())}");
+        }
+
+        var queryString = string.Join("&", queryParams);
+        request.RequestUri = new Uri($"{_http.BaseAddress}{path}?{queryString}");
+
+        return SendAsync(request, "Imported IAR from URL via spawner.", cancellationToken);
+    }
+
     public void Dispose()
     {
         _http.Dispose();
