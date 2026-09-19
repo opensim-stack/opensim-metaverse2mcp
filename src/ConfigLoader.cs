@@ -57,7 +57,8 @@ internal static class ConfigLoader
             PromptNotecardRequireHandler = ParseBool(Env("PROMPT_NOTECARD_REQUIRE_HANDLER"), true),
             PromptMaxChars = ParseInt(Env("PROMPT_MAX_CHARS"), 16000),
             RequesterContextDebugLogging = ParseBool(Env("REQUESTER_CONTEXT_DEBUG_LOGGING"), false),
-            ReceiveChatAllowedTypes = Env("LOCAL_CHAT_ALLOWED_TYPES") ?? "Normal,Whisper,Shout,StartTyping,StopTyping,Debug,OwnerSay,RegionSayTo,RegionSay"
+            ReceiveChatAllowedTypes = Env("LOCAL_CHAT_ALLOWED_TYPES") ?? "Normal,Whisper,Shout,StartTyping,StopTyping,Debug,OwnerSay,RegionSayTo,RegionSay",
+            AllowIarImport = ParseBool(Env("ALLOW_IAR_IMPORT"), true)
         };
 
         options.McpPort = ParseInt(Env("METAVERSE_MCP_PORT"), 8999);
@@ -182,6 +183,9 @@ internal static class ConfigLoader
             "                                (env: INVENTORY_OFFER_POLICY_FILE)",
             "  --inventory-offer-policy-autosave <bool>",
             "                                Auto-save policy changes (env: INVENTORY_OFFER_POLICY_AUTOSAVE, default: true)",
+             string.Empty,
+            "Permissions:",
+            "  --allow-iar-import <bool>     Allow IAR import (env: ALLOW_IAR_IMPORT, default: true)",
             string.Empty,
             "General:",
             "  -h, --help                     Show help"
@@ -198,6 +202,9 @@ internal static class ConfigLoader
                 case "-h":
                 case "--help":
                     options.ShowHelp = true;
+                    break;
+                case "--allow-iar-import":
+                    options.AllowIarImport  = ParseBool(RequireValue(args, ref i, arg), options.AllowIarImport);
                     break;
                 case "--first-name":
                     options.BotFirstName = RequireValue(args, ref i, arg);

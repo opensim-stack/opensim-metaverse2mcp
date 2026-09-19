@@ -2040,6 +2040,51 @@ internal sealed class BotMcpTools
                 cancellationToken).ConfigureAwait(false);
         }
 
+        static string DescribeFolderEntries(InventoryQueryResult listing, int maxEntries = 12)
+        {
+            if (listing.Entries.Count == 0)
+            {
+                return "<empty>";
+            }
+
+            var sample = listing.Entries
+                .Where(e => e.Kind == "folder")
+                .Take(maxEntries)
+                .Select(e => $"{e.Name} ({e.Id})")
+                .ToList();
+
+            if (sample.Count == 0)
+            {
+                return "<no-folders>";
+            }
+
+            var suffix = listing.Entries.Count > sample.Count ? $" ... +{listing.Entries.Count - sample.Count} more" : string.Empty;
+            return string.Join(", ", sample) + suffix;
+        }
+
+        static string? TryExtractCreatedFolderId(string createMessage)
+        {
+            if (string.IsNullOrWhiteSpace(createMessage))
+            {
+                return null;
+            }
+
+            var open = createMessage.IndexOf('(');
+            if (open < 0)
+            {
+                return null;
+            }
+
+            var close = createMessage.IndexOf(')', open + 1);
+            if (close <= open + 1)
+            {
+                return null;
+            }
+
+            var candidate = createMessage.Substring(open + 1, close - open - 1).Trim();
+            return UUID.TryParse(candidate, out var parsed) ? parsed.ToString() : null;
+        }
+
         async Task<(bool Exists, string? FolderId, string? Error)> TryResolveFolderPathAsync(IReadOnlyList<string> segments)
         {
             string? parentFolderId = null;
@@ -2071,14 +2116,18 @@ internal sealed class BotMcpTools
         async Task<BotToolResult?> EnsureFolderPathExistsAsync(IReadOnlyList<string> segments)
         {
             string? parentFolderId = null;
+            var segmentPath = new List<string>(segments.Count);
 
             foreach (var segment in segments)
             {
+                segmentPath.Add(segment);
                 var listing = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
                 if (!listing.Ok)
                 {
                     return BotToolResult.Fail($"Failed to list inventory folder while preparing import path: {listing.Message}");
                 }
+
+                Console.WriteLine($"[iar-import] ensure-path inspect segment='{segment}' parent='{parentFolderId ?? "<root>"}' listingFolders={DescribeFolderEntries(listing)}");
 
                 var child = listing.Entries.FirstOrDefault(e =>
                     e.Kind == "folder" &&
@@ -2097,24 +2146,71 @@ internal sealed class BotMcpTools
                     return BotToolResult.Fail($"Failed to create inventory folder '{segment}' in '{inventoryPath}': {createResult.Message}");
                 }
 
-                // Re-list to resolve the UUID of the newly created folder for the next path segment.
-                var afterCreate = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
-                if (!afterCreate.Ok)
+                var createdFolderId = TryExtractCreatedFolderId(createResult.Message);
+                Console.WriteLine($"[iar-import] ensure-path created segment='{segment}' parent='{parentFolderId ?? "<root>"}' createdFolderId='{createdFolderId ?? "<unknown>"}' createMessage='{createResult.Message}'");
+
+                // Local inventory cache can lag after folder creation; retry resolution with short backoff.
+                const int resolveAttempts = 8;
+                const int resolveDelayMs = 250;
+                InventoryQueryResult? lastAfterCreate = null;
+                string? resolvedChildId = null;
+
+                for (var attempt = 1; attempt <= resolveAttempts; attempt++)
                 {
-                    return BotToolResult.Fail($"Created folder '{segment}', but failed to verify it in inventory: {afterCreate.Message}");
+                    var afterCreate = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
+                    if (!afterCreate.Ok)
+                    {
+                        return BotToolResult.Fail($"Created folder '{segment}', but failed to verify it in inventory: {afterCreate.Message}");
+                    }
+
+                    lastAfterCreate = afterCreate;
+                    var createdChild = afterCreate.Entries.FirstOrDefault(e =>
+                        e.Kind == "folder" &&
+                        string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
+
+                    if (createdChild != null)
+                    {
+                        resolvedChildId = createdChild.Id;
+                        Console.WriteLine($"[iar-import] ensure-path resolved segment='{segment}' as folderId='{resolvedChildId}' after attempt={attempt}");
+                        break;
+                    }
+
+                    // Fallback: if create returned a UUID, probe that folder directly and continue if it resolves.
+                    if (!string.IsNullOrWhiteSpace(createdFolderId))
+                    {
+                        var directProbe = await ListFolderAsync(createdFolderId).ConfigureAwait(false);
+                        if (directProbe.Ok)
+                        {
+                            resolvedChildId = createdFolderId;
+                            Console.WriteLine($"[iar-import] ensure-path fallback-resolved segment='{segment}' from createResult UUID='{resolvedChildId}' on attempt={attempt}");
+                            break;
+                        }
+
+                        Console.WriteLine($"[iar-import] ensure-path fallback probe failed for createdFolderId='{createdFolderId}' attempt={attempt}: {directProbe.Message}");
+                    }
+
+                    Console.WriteLine($"[iar-import] ensure-path unresolved segment='{segment}' attempt={attempt}/{resolveAttempts} parent='{parentFolderId ?? "<root>"}' listingFolders={DescribeFolderEntries(afterCreate)}");
+
+                    if (attempt < resolveAttempts)
+                    {
+                        await Task.Delay(resolveDelayMs, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
-                var createdChild = afterCreate.Entries.FirstOrDefault(e =>
-                    e.Kind == "folder" &&
-                    string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
-
-                if (createdChild == null)
+                if (string.IsNullOrWhiteSpace(resolvedChildId))
                 {
-                    return BotToolResult.Fail($"Created folder '{segment}', but it could not be resolved in local inventory.");
+                    var attemptedPath = string.Join("/", segmentPath);
+                    var listingDebug = lastAfterCreate == null
+                        ? "<no listing captured>"
+                        : DescribeFolderEntries(lastAfterCreate);
+
+                    return BotToolResult.Fail(
+                        $"Created folder '{segment}' while preparing '{inventoryPath}', but it could not be resolved in local inventory after retries. " +
+                        $"Attempted path='{attemptedPath}', parentFolderId='{parentFolderId ?? "<root>"}', createdFolderId='{createdFolderId ?? "<unknown>"}', visibleFolders={listingDebug}");
                 }
 
-                parentFolderId = createdChild.Id;
+                parentFolderId = resolvedChildId;
             }
 
             return null;

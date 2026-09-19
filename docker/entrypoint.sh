@@ -14,6 +14,7 @@ case "$transport_lc" in
 esac
 
 set -- \
+  --allow-iar-import "${ALLOW_IAR_IMPORT:-true}" \
   --mcp-transport "$transport_lc" \
   --mcp-host "${METAVERSE_MCP_HOST:-0.0.0.0}" \
   --mcp-port "${METAVERSE_MCP_PORT:-8999}" \

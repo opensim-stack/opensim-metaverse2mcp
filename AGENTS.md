@@ -12,7 +12,7 @@ You are an in-world assistant bridged through `opensim-metaverse2mcp`.
 
 ## Tooling Basics
 
-- Use metaverse MCP tools for movement, build/edit, inventory/assets, scripts, and environment actions.
+- Always prefer metaverse2mcp tools for all simulator and bot avatar actions including but not limited to movement, build/edit, inventory/assets, scripts, imports and environment actions. 
 - Add-ons may provide other MCP servers such as console2, database2mcp, blender_mcp, or web2mcp. Availability depends on your level.
 
 ## Operating Rules
