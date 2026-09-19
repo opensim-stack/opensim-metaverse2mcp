@@ -282,6 +282,23 @@ internal sealed partial class BotSession
             });
     }
 
+    public void EmitRegionImportProgressEvent(string handle, string message, int progressPercent)
+    {
+        var normalizedMessage = string.IsNullOrWhiteSpace(message) ? "Region import is in progress." : message.Trim();
+        var clampedPercent = Math.Clamp(progressPercent, 0, 100);
+
+        EmitRuntimeEvent(
+            "progress",
+            "region.import.message",
+            "region.import",
+            normalizedMessage,
+            new Dictionary<string, string?>
+            {
+                ["handle"] = handle,
+                ["progressPercent"] = clampedPercent.ToString(CultureInfo.InvariantCulture)
+            });
+    }
+
     public void EmitInventoryImportCompleteEvent(string handle, bool success, string message)
     {
         _botTaskManager.TryReportCompletion(handle, success, message);
@@ -294,6 +311,26 @@ internal sealed partial class BotSession
             "progress",
             "inventory.import.complete",
             "inventory.import",
+            normalizedMessage,
+            new Dictionary<string, string?>
+            {
+                ["handle"] = handle,
+                ["success"] = success ? "true" : "false"
+            });
+    }
+
+    public void EmitRegionImportCompleteEvent(string handle, bool success, string message)
+    {
+        _botTaskManager.TryReportCompletion(handle, success, message);
+
+        var normalizedMessage = string.IsNullOrWhiteSpace(message)
+            ? (success ? "Region import completed." : "Region import failed.")
+            : message.Trim();
+
+        EmitRuntimeEvent(
+            "progress",
+            "region.import.complete",
+            "region.import",
             normalizedMessage,
             new Dictionary<string, string?>
             {

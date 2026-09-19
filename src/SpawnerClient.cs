@@ -221,6 +221,49 @@ internal sealed class SpawnerClient : IDisposable
 
         return SendAsync(request, "Imported IAR from URL via spawner.", cancellationToken);
     }
+    
+    public Task<DataToolResult> ImportOarUrlAsync(
+        string regionName,
+        string url,
+        bool? merge,
+        bool? skipAssets,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(regionName))
+        {
+            return Task.FromResult(DataToolResult.FailResult("regionName is required."));
+        }
+
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return Task.FromResult(DataToolResult.FailResult("url is required."));
+        }
+
+        var escaped  = Uri.EscapeDataString(regionName.Trim());
+        var path = $"api/import/iar-url/{escaped}";
+        
+        var request = CreateRequest(HttpMethod.Get, path);
+        
+        var queryParams = new List<string>
+        {
+            $"url={Uri.EscapeDataString(url.Trim())}"
+        };
+
+        if (merge.HasValue)
+        {
+            queryParams.Add($"merge={merge.Value.ToString().ToLowerInvariant()}");
+        }
+        
+        if (skipAssets.HasValue)
+        {
+            queryParams.Add($"skipAssets={skipAssets.Value.ToString().ToLowerInvariant()}");
+        }
+
+        var queryString = string.Join("&", queryParams);
+        request.RequestUri = new Uri($"{_http.BaseAddress}{path}?{queryString}");
+
+        return SendAsync(request, "Imported OAR from URL via spawner.", cancellationToken);
+    }
 
     public void Dispose()
     {

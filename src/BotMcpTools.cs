@@ -1933,70 +1933,7 @@ internal sealed class BotMcpTools
         }
         
 
-        // Extract the filename from the URL to determine the imported folder name.
-        // Outworldz can proxy IAR downloads via sculpt-save.plx?File=..., where File holds the real archive path.
-        static string? TryGetQueryParameter(string query, string key)
-        {
-            foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var split = pair.Split('=', 2);
-                if (split.Length == 0)
-                {
-                    continue;
-                }
-
-                var name = Uri.UnescapeDataString(split[0].Replace('+', ' '));
-                if (!name.Equals(key, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (split.Length == 1)
-                {
-                    return string.Empty;
-                }
-
-                return Uri.UnescapeDataString(split[1].Replace('+', ' '));
-            }
-
-            return null;
-        }
-
-        var urlTrim = url.Trim();
-        var filename = string.Empty;
-
-        if (Uri.TryCreate(urlTrim, UriKind.Absolute, out var parsedUrl))
-        {
-            filename = Path.GetFileName(parsedUrl.AbsolutePath);
-
-            if (filename.Equals("sculpt-save.plx", StringComparison.OrdinalIgnoreCase))
-            {
-                var fileParam = TryGetQueryParameter(parsedUrl.Query.TrimStart('?'), "File");
-                if (!string.IsNullOrWhiteSpace(fileParam))
-                {
-                    filename = Path.GetFileName(fileParam);
-                }
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(filename))
-        {
-            filename = Path.GetFileName(urlTrim.Split('?')[0]);
-        }
-
-        // Fallback for non-absolute URLs that still use sculpt-save.plx?File=...
-        if (filename.Equals("sculpt-save.plx", StringComparison.OrdinalIgnoreCase))
-        {
-            var queryStart = urlTrim.IndexOf('?');
-            if (queryStart >= 0 && queryStart < urlTrim.Length - 1)
-            {
-                var fileParam = TryGetQueryParameter(urlTrim[(queryStart + 1)..], "File");
-                if (!string.IsNullOrWhiteSpace(fileParam))
-                {
-                    filename = Path.GetFileName(fileParam);
-                }
-            }
-        }
+        var filename = ParseImportUrl(url);
 
         if (string.IsNullOrWhiteSpace(filename))
         {
@@ -2348,6 +2285,135 @@ internal sealed class BotMcpTools
                     _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR import task failed: {ex.Message}");
                 }
             });
+    }
+    
+
+    [McpServerTool, Description("Queue an OAR (OpenSim Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel.")]
+    public async Task<BotTaskHandle> ImportOarUrl(
+        [Description("URL where the OAR file will be imported from (can be anything, doesn't have to end in .oar). OutWorldz URLs are treated specially to extract the real filename from the File= query parameter.")]
+        string url,
+        [Description("Name of region  where the OAR file will be imported to.")]
+        string regionName,
+        [Description("Optional boolean; if true region will be merged with existing region. Default is true")]
+        bool? merge = null,
+        [Description("Optional boolean; if true assets will not be included in the archive. Default is false.")]
+        bool? skipAssets = null,
+        CancellationToken cancellationToken = default)
+    {
+        BotTaskHandle QueueImmediateFailure(string failureMessage)
+        {
+            return _bot.StartBotTask(
+                "Import OAR URL.",
+                (taskHandle, _) =>
+                {
+                    _bot.EmitRegionImportCompleteEvent(taskHandle.Handle, false, failureMessage);
+                    return Task.CompletedTask;
+                });
+        }
+
+        var filename = ParseImportUrl(url);
+
+        if (string.IsNullOrWhiteSpace(filename))
+        {
+            return QueueImmediateFailure("Could not extract filename from URL for folder lookup.");
+        }
+
+        return _bot.StartBotTask(
+            $"Import OAR URL into '{regionName}'.",
+            async (taskHandle, taskCancellationToken) =>
+            {
+                try
+                {
+                    _bot.EmitRegionImportProgressEvent(taskHandle.Handle, "Starting OAR import.", 5);
+
+                    // Call spawner API to import OAR.
+                    var importResult = await _spawnerClient.ImportOarUrlAsync(regionName, url, merge, skipAssets, taskCancellationToken).ConfigureAwait(false);
+                    if (!importResult.Ok)
+                    {
+                        _bot.EmitRegionImportCompleteEvent(taskHandle.Handle, false, $"OAR import failed: {importResult.Message}");
+                        return;
+                    }
+                    _bot.EmitRegionImportCompleteEvent(taskHandle.Handle, true, $"OAR imported from URL.");
+                }
+                catch (OperationCanceledException) when (taskCancellationToken.IsCancellationRequested)
+                {
+                    _bot.EmitRegionImportCompleteEvent(taskHandle.Handle, false, "OAR import task was cancelled.");
+                }
+                catch (Exception ex)
+                {
+                    _bot.EmitRegionImportCompleteEvent(taskHandle.Handle, false, $"OAR import task failed: {ex.Message}");
+                }
+            });
+    }
+    
+    static string ParseImportUrl(string url)
+    {
+        var urlTrim = url.Trim();
+        var filename = string.Empty;
+
+        if (Uri.TryCreate(urlTrim, UriKind.Absolute, out var parsedUrl))
+        {
+            filename = Path.GetFileName(parsedUrl.AbsolutePath);
+
+            if (filename.Equals("sculpt-save.plx", StringComparison.OrdinalIgnoreCase))
+            {
+                var fileParam = TryGetQueryParameter(parsedUrl.Query.TrimStart('?'), "File");
+                if (!string.IsNullOrWhiteSpace(fileParam))
+                {
+                    filename = Path.GetFileName(fileParam);
+                }
+            }
+        }
+        
+        if (string.IsNullOrWhiteSpace(filename))
+        {
+            filename = Path.GetFileName(urlTrim.Split('?')[0]);
+        }
+
+        // Fallback for non-absolute URLs that still use sculpt-save.plx?File=...
+        if (filename.Equals("sculpt-save.plx", StringComparison.OrdinalIgnoreCase))
+        {
+            var queryStart = urlTrim.IndexOf('?');
+            if (queryStart >= 0 && queryStart < urlTrim.Length - 1)
+            {
+                var fileParam = TryGetQueryParameter(urlTrim[(queryStart + 1)..], "File");
+                if (!string.IsNullOrWhiteSpace(fileParam))
+                {
+                    filename = Path.GetFileName(fileParam);
+                }
+            }
+        }
+        
+        return filename;
+    }
+    
+    // Extract the filename from the URL to determine the imported folder name.
+    // Outworldz can proxy IAR downloads via sculpt-save.plx?File=..., where File holds the real archive path.
+    static string? TryGetQueryParameter(string query, string key)
+    {
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var split = pair.Split('=', 2);
+            if (split.Length == 0)
+            {
+                continue;
+            }
+
+            var name = Uri.UnescapeDataString(split[0].Replace('+', ' '));
+            if (!name.Equals(key, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (split.Length == 1)
+            {
+                return string.Empty;
+            }
+
+            return Uri.UnescapeDataString(split[1].Replace('+', ' '));
+        }
+
+        return null;
     }
 
     [McpServerTool, Description("List currently active BotTask handles with descriptions and cancellation state.")]
