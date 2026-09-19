@@ -9,12 +9,14 @@ internal sealed partial class BotSession
     private const int EventStreamMaxGeneral = 1000;
     private const int EventStreamMaxObject = 2000;
     private const int EventStreamMaxTeleport = 500;
+    private const int EventStreamMaxProgress = 1000;
     private const int EventStreamObjectMinIntervalMs = 250;
 
     private readonly object _eventStreamLock = new();
     private readonly Queue<RuntimeEventInfo> _eventStreamGeneral = new();
     private readonly Queue<RuntimeEventInfo> _eventStreamObject = new();
     private readonly Queue<RuntimeEventInfo> _eventStreamTeleport = new();
+    private readonly Queue<RuntimeEventInfo> _eventStreamProgress = new();
     private readonly SemaphoreSlim _eventStreamSignal = new(0, int.MaxValue);
     private readonly ConcurrentDictionary<string, EventStreamSubscriptionState> _eventSubscriptions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _objectEventThrottle = new(StringComparer.OrdinalIgnoreCase);
@@ -23,6 +25,7 @@ internal sealed partial class BotSession
     private int _eventStreamTrimmedGeneral;
     private int _eventStreamTrimmedObject;
     private int _eventStreamTrimmedTeleport;
+    private int _eventStreamTrimmedProgress;
 
     public EventStreamSubscriptionResult EventStreamSubscribe(
         string? channels,
@@ -250,14 +253,53 @@ internal sealed partial class BotSession
                 _eventStreamGeneral.Count,
                 _eventStreamObject.Count,
                 _eventStreamTeleport.Count,
+                _eventStreamProgress.Count,
                 _eventStreamTrimmedTotal,
                 _eventStreamTrimmedGeneral,
                 _eventStreamTrimmedObject,
                 _eventStreamTrimmedTeleport,
+                _eventStreamTrimmedProgress,
                 _eventSubscriptions.Count,
                 _eventStreamSequence.ToString(CultureInfo.InvariantCulture),
                 "Current event stream buffer stats.");
         }
+    }
+
+    public void EmitInventoryImportProgressEvent(string handle, string message, int progressPercent)
+    {
+        var normalizedMessage = string.IsNullOrWhiteSpace(message) ? "Inventory import is in progress." : message.Trim();
+        var clampedPercent = Math.Clamp(progressPercent, 0, 100);
+
+        EmitRuntimeEvent(
+            "progress",
+            "inventory.import.message",
+            "inventory.import",
+            normalizedMessage,
+            new Dictionary<string, string?>
+            {
+                ["handle"] = handle,
+                ["progressPercent"] = clampedPercent.ToString(CultureInfo.InvariantCulture)
+            });
+    }
+
+    public void EmitInventoryImportCompleteEvent(string handle, bool success, string message)
+    {
+        _botTaskManager.TryReportCompletion(handle, success, message);
+
+        var normalizedMessage = string.IsNullOrWhiteSpace(message)
+            ? (success ? "Inventory import completed." : "Inventory import failed.")
+            : message.Trim();
+
+        EmitRuntimeEvent(
+            "progress",
+            "inventory.import.complete",
+            "inventory.import",
+            normalizedMessage,
+            new Dictionary<string, string?>
+            {
+                ["handle"] = handle,
+                ["success"] = success ? "true" : "false"
+            });
     }
 
     private void EmitRuntimeEvent(
@@ -366,12 +408,13 @@ internal sealed partial class BotSession
         {
             "object" => "object",
             "teleport" => "teleport",
+            "progress" => "progress",
             _ => "general"
         };
     }
 
     private static HashSet<string> DefaultEventChannels()
-        => new(new[] { "general", "object", "teleport" }, StringComparer.OrdinalIgnoreCase);
+        => new(new[] { "general", "object", "teleport", "progress" }, StringComparer.OrdinalIgnoreCase);
 
     private static HashSet<string>? ParseEventTypes(string? raw)
     {
@@ -415,13 +458,13 @@ internal sealed partial class BotSession
         var accepted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var channel in requested)
         {
-            if (channel == "general" || channel == "object" || channel == "teleport")
+            if (channel == "general" || channel == "object" || channel == "teleport" || channel == "progress")
             {
                 accepted.Add(channel);
                 continue;
             }
 
-            error = "channels must use: general, object, teleport, or all.";
+            error = "channels must use: general, object, teleport, progress, or all.";
             return null;
         }
 
@@ -524,6 +567,14 @@ internal sealed partial class BotSession
         if (channels.Contains("teleport"))
         {
             foreach (var item in _eventStreamTeleport)
+            {
+                yield return item;
+            }
+        }
+
+        if (channels.Contains("progress"))
+        {
+            foreach (var item in _eventStreamProgress)
             {
                 yield return item;
             }
@@ -737,6 +788,7 @@ internal sealed partial class BotSession
         {
             "object" => _eventStreamObject,
             "teleport" => _eventStreamTeleport,
+            "progress" => _eventStreamProgress,
             _ => _eventStreamGeneral,
         };
     }
@@ -747,6 +799,7 @@ internal sealed partial class BotSession
         {
             "object" => EventStreamMaxObject,
             "teleport" => EventStreamMaxTeleport,
+            "progress" => EventStreamMaxProgress,
             _ => EventStreamMaxGeneral,
         };
 
@@ -761,6 +814,9 @@ internal sealed partial class BotSession
                     break;
                 case "teleport":
                     _eventStreamTrimmedTeleport++;
+                    break;
+                case "progress":
+                    _eventStreamTrimmedProgress++;
                     break;
                 default:
                     _eventStreamTrimmedGeneral++;
@@ -866,10 +922,12 @@ internal sealed record EventStreamStatsResult(
     int GeneralBufferCount,
     int ObjectBufferCount,
     int TeleportBufferCount,
+    int ProgressBufferCount,
     int TrimmedTotal,
     int TrimmedGeneral,
     int TrimmedObject,
     int TrimmedTeleport,
+    int TrimmedProgress,
     int SubscriptionCount,
     string CurrentCursor)
 {
@@ -877,10 +935,12 @@ internal sealed record EventStreamStatsResult(
         int generalBufferCount,
         int objectBufferCount,
         int teleportBufferCount,
+        int progressBufferCount,
         int trimmedTotal,
         int trimmedGeneral,
         int trimmedObject,
         int trimmedTeleport,
+        int trimmedProgress,
         int subscriptionCount,
         string currentCursor,
         string message)
@@ -890,15 +950,17 @@ internal sealed record EventStreamStatsResult(
             generalBufferCount,
             objectBufferCount,
             teleportBufferCount,
+            progressBufferCount,
             trimmedTotal,
             trimmedGeneral,
             trimmedObject,
             trimmedTeleport,
+            trimmedProgress,
             subscriptionCount,
             currentCursor);
 
     public static EventStreamStatsResult FailResult(string message)
-        => new(false, message, 0, 0, 0, 0, 0, 0, 0, 0, "0");
+        => new(false, message, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "0");
 }
 
 internal sealed record EventStreamHistoryResult(

@@ -192,6 +192,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly object _dialogBridgeAutoProvisionLock = new();
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private readonly CancellationTokenSource _lifecycleCts = new();
+    private readonly BotTaskManager _botTaskManager;
     private readonly HashSet<ChatType> _receiveChatAllowedTypes;
 
     private string? _projectAgentsPromptCache;
@@ -244,6 +245,7 @@ internal sealed partial class BotSession : IDisposable
     public BotSession(AppOptions options)
     {
         _options = options;
+        _botTaskManager = new BotTaskManager(_lifecycleCts.Token);
         _followSpawnerClient = new SpawnerClient(options);
         _receiveChatAllowedTypes = ParseLocalChatAllowedTypes(_options.ReceiveChatAllowedTypes, out var invalidLocalChatTypeNames);
         _controlGroupName = BuildControlGroupName();
@@ -287,6 +289,40 @@ internal sealed partial class BotSession : IDisposable
     }
 
     public string LastLoginMessage => _lastLoginMessage;
+
+    public BotTaskHandle StartBotTask(string description, Func<BotTaskHandle, CancellationToken, Task> work)
+    {
+        return _botTaskManager.Start(description, work);
+    }
+
+    public IReadOnlyList<BotTaskHandle> ListActiveBotTasks()
+    {
+        return _botTaskManager.ListActive();
+    }
+
+    public BotTaskQueryResult GetBotTask(string handle)
+    {
+        if (string.IsNullOrWhiteSpace(handle))
+        {
+            return BotTaskQueryResult.FailResult("handle is required.");
+        }
+
+        return _botTaskManager.TryGet(handle, out var taskInfo)
+            ? BotTaskQueryResult.OkResult(taskInfo!, "Task status returned.")
+            : BotTaskQueryResult.FailResult("Task handle was not found.");
+    }
+
+    public BotToolResult CancelBotTask(string handle)
+    {
+        if (string.IsNullOrWhiteSpace(handle))
+        {
+            return BotToolResult.Fail("handle is required.");
+        }
+
+        return _botTaskManager.TryCancel(handle, out var taskHandle)
+            ? BotToolResult.OkResult($"Requested cancellation for task {taskHandle!.Handle}.")
+            : BotToolResult.Fail("Task handle was not found among active tasks.");
+    }
 
         public async Task<bool> ConnectAsync(CancellationToken cancellationToken)
     {
@@ -572,6 +608,7 @@ internal sealed partial class BotSession : IDisposable
         StopFollowInternal();
         CancelMovementAutoStop();
         _followSpawnerClient.Dispose();
+        _botTaskManager.Dispose();
 
         if (client == null)
         {
@@ -2566,6 +2603,15 @@ internal sealed record BotToolResult(bool Ok, string Message)
 {
     public static BotToolResult OkResult(string message) => new(true, message);
     public static BotToolResult Fail(string message) => new(false, message);
+}
+
+internal sealed record BotTaskQueryResult(bool Ok, string Message, BotTaskInfo? Task)
+{
+    public static BotTaskQueryResult OkResult(BotTaskInfo task, string message)
+        => new(true, message, task);
+
+    public static BotTaskQueryResult FailResult(string message)
+        => new(false, message, null);
 }
 
 internal sealed class ConversationConfig

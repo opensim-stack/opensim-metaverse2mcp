@@ -1899,8 +1899,8 @@ internal sealed class BotMcpTools
         return _bot.InventoryGiveFolderAsync(folderIdOrPath, recipientAgentId, withBeamEffect, cancellationToken);
     }
 
-    [McpServerTool, Description("Import an IAR (Inventory Archive) file from a URL into bot inventory, with optional transfer to another agent.")]
-    public async Task<BotToolResult> ImportIarUrl(
+    [McpServerTool, Description("Queue an IAR (Inventory Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel.")]
+    public async Task<BotTaskHandle> ImportIarUrl(
         [Description("URL where the IAR file will be imported from (can be anything, doesn't have to end in .oar). OutWorldz URLs are treated specially to extract the real filename from the File= query parameter.")]
         string url,
         [Description("Optional inventory folder path where the IAR contents will be imported; defaults to 'Imports/[filename]' if blank.")]
@@ -1913,12 +1913,23 @@ internal sealed class BotMcpTools
         bool? replaceExistingFolder = null,
         CancellationToken cancellationToken = default)
     {
+        BotTaskHandle QueueImmediateFailure(string failureMessage)
+        {
+            return _bot.StartBotTask(
+                "Import IAR URL.",
+                (taskHandle, _) =>
+                {
+                    _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, failureMessage);
+                    return Task.CompletedTask;
+                });
+        }
+
         var botFirst = _options.BotFirstName?.Trim() ?? string.Empty;
         var botLast = _options.BotLastName?.Trim() ?? string.Empty;
         
         if (botFirst.Length == 0 || botLast.Length == 0)
         {
-            return BotToolResult.Fail("Bot identity is not configured (BotFirstName/BotLastName missing).");
+            return QueueImmediateFailure("Bot identity is not configured (BotFirstName/BotLastName missing).");
         }
         
 
@@ -1989,7 +2000,7 @@ internal sealed class BotMcpTools
 
         if (string.IsNullOrWhiteSpace(filename))
         {
-            return BotToolResult.Fail("Could not extract filename from URL for folder lookup.");
+            return QueueImmediateFailure("Could not extract filename from URL for folder lookup.");
         }
 
         // Remove .oar extension if present for folder name
@@ -2010,7 +2021,7 @@ internal sealed class BotMcpTools
 
         if (pathParts.Count == 0)
         {
-            return BotToolResult.Fail("inventoryPath must contain at least one folder name.");
+            return QueueImmediateFailure("inventoryPath must contain at least one folder name.");
         }
 
         async Task<InventoryQueryResult> ListFolderAsync(string? parentFolderId)
@@ -2112,114 +2123,155 @@ internal sealed class BotMcpTools
         var existingPath = await TryResolveFolderPathAsync(pathParts).ConfigureAwait(false);
         if (existingPath.Error != null)
         {
-            return BotToolResult.Fail($"Failed to inspect inventory path '{inventoryPath}': {existingPath.Error}");
+            return QueueImmediateFailure($"Failed to inspect inventory path '{inventoryPath}': {existingPath.Error}");
         }
 
         if (existingPath.Exists)
         {
             if (replaceExistingFolder != true)
             {
-                return BotToolResult.Fail(
+                return QueueImmediateFailure(
                     $"Import path '{inventoryPath}' already exists. Set replaceExistingFolder=true to move it to Trash before import.");
             }
 
             var deleteExisting = await _bot.InventoryDeleteFolderAsync(existingPath.FolderId!, cancellationToken).ConfigureAwait(false);
             if (!deleteExisting.Ok)
             {
-                return BotToolResult.Fail($"Failed to replace existing inventory path '{inventoryPath}': {deleteExisting.Message}");
+                return QueueImmediateFailure($"Failed to replace existing inventory path '{inventoryPath}': {deleteExisting.Message}");
             }
         }
 
         var ensurePath = await EnsureFolderPathExistsAsync(pathParts).ConfigureAwait(false);
         if (ensurePath != null)
         {
-            return ensurePath;
+            return QueueImmediateFailure(ensurePath.Message);
         }
 
-        // Call spawner API to import OAR
-        var importResult = await _spawnerClient.ImportIarUrlAsync(botFirst, botLast, url, inventoryPath, cancellationToken).ConfigureAwait(false);
-        if (!importResult.Ok)
-        {
-            return BotToolResult.Fail($"IAR import failed: {importResult.Message}");
-        }
+        var taskDescription = string.IsNullOrWhiteSpace(targetAgentId)
+            ? $"Import IAR URL into '{inventoryPath}'."
+            : $"Import IAR URL into '{inventoryPath}' and transfer to {targetAgentId.Trim()}.";
 
-        // If no target agent ID, we're done
-        if (string.IsNullOrWhiteSpace(targetAgentId))
-        {
-            return BotToolResult.OkResult($"IAR imported from URL: {importResult.Message}");
-        }
-
-        // Parse target agent ID
-        if (!UUID.TryParse(targetAgentId.Trim(), out _))
-        {
-            return BotToolResult.Fail("targetAgentId is not a valid UUID.");
-        }
-
-        // Wait a moment for inventory to update
-        await Task.Delay(500, cancellationToken).ConfigureAwait(false);
-
-        // Try to find the imported folder
-        var inventory = await _bot.InventoryListAsync(
-            null,
-            true,
-            1000,
-            inventoryPath,
-            null,
-            null,
-            null,
-            null,
-            null,
-            100,
-            cancellationToken).ConfigureAwait(false);
-
-        if (!inventory.Ok)
-        {
-            return BotToolResult.Fail($"IAR imported successfully, but could not locate imported folder: {inventory.Message}");
-        }
-
-        // Find the first imported folder in entries
-        string? importedFolderId = null;
-        var folderEntry = inventory.Entries.FirstOrDefault(e =>
-            e.Kind == "folder");
-
-        if (folderEntry != null)
-        {
-            importedFolderId = folderEntry.Id;
-        }
-
-        if (string.IsNullOrWhiteSpace(importedFolderId))
-        {
-            return BotToolResult.Fail($"IAR imported successfully, but could not find imported folder '{folderName}' in inventory.");
-        }
-
-        // Give folder to target agent
-        var giveResult = await _bot.InventoryGiveFolderAsync(
-            importedFolderId,
-            targetAgentId.Trim(),
-            true,
-            cancellationToken).ConfigureAwait(false);
-
-        if (!giveResult.Ok)
-        {
-            return BotToolResult.Fail($"IAR imported but transfer to agent failed: {giveResult.Message}");
-        }
-
-        // Delete folder if requested
-        if (deleteAfterSending == true)
-        {
-            var deleteResult = await _bot.InventoryDeleteFolderAsync(
-                importedFolderId,
-                cancellationToken).ConfigureAwait(false);
-
-            if (!deleteResult.Ok)
+        return _bot.StartBotTask(
+            taskDescription,
+            async (taskHandle, taskCancellationToken) =>
             {
-                return BotToolResult.Fail($"IAR imported and transferred, but folder deletion failed: {deleteResult.Message}");
-            }
+                try
+                {
+                    _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Starting IAR import.", 5);
 
-            return BotToolResult.OkResult($"IAR imported from URL, transferred to agent {targetAgentId.Trim()}, and folder moved to Trash.");
-        }
+                    // Call spawner API to import IAR.
+                    var importResult = await _spawnerClient.ImportIarUrlAsync(botFirst, botLast, url, inventoryPath, taskCancellationToken).ConfigureAwait(false);
+                    if (!importResult.Ok)
+                    {
+                        _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR import failed: {importResult.Message}");
+                        return;
+                    }
 
-        return BotToolResult.OkResult($"IAR imported from URL and transferred to agent {targetAgentId.Trim()}.");
+                    _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "IAR import completed on spawner.", 60);
+
+                    if (string.IsNullOrWhiteSpace(targetAgentId))
+                    {
+                        _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, true, $"IAR imported from URL: {importResult.Message}");
+                        return;
+                    }
+
+                    if (!UUID.TryParse(targetAgentId.Trim(), out _))
+                    {
+                        _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, "targetAgentId is not a valid UUID.");
+                        return;
+                    }
+
+                    _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Waiting for inventory index update.", 70);
+                    await Task.Delay(500, taskCancellationToken).ConfigureAwait(false);
+
+                    var inventory = await _bot.InventoryListAsync(
+                        inventoryPath,
+                        false,
+                        1000,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        100,
+                        taskCancellationToken).ConfigureAwait(false);
+
+                    if (!inventory.Ok)
+                    {
+                        _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported successfully, but could not locate imported folder: {inventory.Message}");
+                        return;
+                    }
+
+                    var folderEntry = inventory.Entries.FirstOrDefault(e => e.Kind == "folder");
+                    var importedFolderId = folderEntry?.Id;
+                    if (string.IsNullOrWhiteSpace(importedFolderId))
+                    {
+                        _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported successfully, but could not find imported folder '{folderName}' in inventory.");
+                        return;
+                    }
+
+                    _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Transferring imported folder to target agent.", 85);
+                    var giveResult = await _bot.InventoryGiveFolderAsync(
+                        importedFolderId,
+                        targetAgentId.Trim(),
+                        true,
+                        taskCancellationToken).ConfigureAwait(false);
+
+                    if (!giveResult.Ok)
+                    {
+                        _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported but transfer to agent failed: {giveResult.Message}");
+                        return;
+                    }
+
+                    if (deleteAfterSending == true)
+                    {
+                        _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Transfer complete, deleting imported folder from bot inventory.", 95);
+                        var deleteResult = await _bot.InventoryDeleteFolderAsync(
+                            importedFolderId,
+                            taskCancellationToken).ConfigureAwait(false);
+
+                        if (!deleteResult.Ok)
+                        {
+                            _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported and transferred, but folder deletion failed: {deleteResult.Message}");
+                            return;
+                        }
+
+                        _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, true, $"IAR imported from URL, transferred to agent {targetAgentId.Trim()}, and folder moved to Trash.");
+                        return;
+                    }
+
+                    _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, true, $"IAR imported from URL and transferred to agent {targetAgentId.Trim()}.");
+                }
+                catch (OperationCanceledException) when (taskCancellationToken.IsCancellationRequested)
+                {
+                    _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, "IAR import task was cancelled.");
+                }
+                catch (Exception ex)
+                {
+                    _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR import task failed: {ex.Message}");
+                }
+            });
+    }
+
+    [McpServerTool, Description("List currently active BotTask handles with descriptions and cancellation state.")]
+    public IReadOnlyList<BotTaskHandle> BotTaskListActive()
+    {
+        return _bot.ListActiveBotTasks();
+    }
+
+    [McpServerTool, Description("Get status/details for a BotTask handle (active or recently completed).")]
+    public BotTaskQueryResult BotTaskGet(
+        [Description("BotTask handle UUID.")] string handle)
+    {
+        return _bot.GetBotTask(handle);
+    }
+
+    [McpServerTool, Description("Cancel an active BotTask by handle (best effort).")]
+    public BotToolResult BotTaskCancel(
+        [Description("BotTask handle UUID.")] string handle)
+    {
+        return _bot.CancelBotTask(handle);
     }
 
     [McpServerTool, Description("Delete an inventory item by UUID.")]
@@ -2361,7 +2413,7 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Create an MCP runtime event subscription for filtered channels/types.")]
     public EventStreamSubscriptionResult EventStreamSubscribe(
-        [Description("Optional channels list: general, object, teleport, all. Delimit with comma/space/pipe.")] string? channels = null,
+        [Description("Optional channels list: general, object, teleport, progress, all. Delimit with comma/space/pipe.")] string? channels = null,
         [Description("Optional event-type filter list. Delimit with comma/space/pipe.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter list (comma/pipe/semicolon delimited).") ] string? objectIds = null,
@@ -2384,7 +2436,7 @@ internal sealed class BotMcpTools
         [Description("Long-poll wait timeout in milliseconds (0..30000).") ] int waitMs,
         [Description("Optional subscription ID. If provided, defaults to that subscription's channels/types/cursor.")] string? subscriptionId = null,
         [Description("Optional cursor returned by prior poll. Omit to use subscription cursor (or 0).") ] string? cursor = null,
-        [Description("Optional channels override: general, object, teleport, all.")] string? channels = null,
+        [Description("Optional channels override: general, object, teleport, progress, all.")] string? channels = null,
         [Description("Optional event-type filter override.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter override list.")] string? objectIds = null,
@@ -2409,7 +2461,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Query a short historical window of retained runtime events for debugging.")]
     public EventStreamHistoryResult EventStreamHistory(
         [Description("Window size in seconds (1..1800).") ] int lastSeconds,
-        [Description("Optional channels list: general, object, teleport, all.")] string? channels = null,
+        [Description("Optional channels list: general, object, teleport, progress, all.")] string? channels = null,
         [Description("Optional event-type filter list.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter list.")] string? objectIds = null,
