@@ -106,7 +106,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 var currentEventName = "message";
                 var dataBuilder = new StringBuilder();
 
-                while (!cancellationToken.IsCancellationRequested && !reader.EndOfStream)
+                while (!cancellationToken.IsCancellationRequested)
                 {
                     var line = await reader.ReadLineAsync().ConfigureAwait(false);
                     if (line == null)

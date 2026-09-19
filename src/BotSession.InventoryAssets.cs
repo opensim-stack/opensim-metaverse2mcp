@@ -1665,7 +1665,7 @@ internal sealed partial class BotSession
     }
 
     public async Task<InventoryQueryResult> InventoryListAsync(
-        string? folderId,
+        string? folderIdOrPath,
         bool recursive,
         int maxResults,
         string? nameContains,
@@ -1677,18 +1677,26 @@ internal sealed partial class BotSession
         int pageSize,
         CancellationToken cancellationToken)
     {
+        var overallStopwatch = Stopwatch.StartNew();
+        Console.WriteLine($"[inventory-list] start folderIdOrPath='{folderIdOrPath ?? ""}' recursive={recursive} maxResults={maxResults} pageSize={pageSize} cursor='{cursor ?? ""}' nameContains='{nameContains ?? ""}' type='{type ?? ""}' creatorId='{creatorId ?? ""}' createdAfterUtc='{createdAfterUtc ?? ""}' createdBeforeUtc='{createdBeforeUtc ?? ""}' canceled={cancellationToken.IsCancellationRequested}");
+
+        try
+        {
         if (!TryParseOptionalUtc(createdAfterUtc, "createdAfterUtc", out var createdAfter, out var createdAfterError))
         {
+            Console.WriteLine($"[inventory-list] invalid createdAfterUtc='{createdAfterUtc ?? ""}': {createdAfterError ?? "createdAfterUtc is invalid."}");
             return InventoryQueryResult.FailResult(createdAfterError ?? "createdAfterUtc is invalid.");
         }
 
         if (!TryParseOptionalUtc(createdBeforeUtc, "createdBeforeUtc", out var createdBefore, out var createdBeforeError))
         {
+            Console.WriteLine($"[inventory-list] invalid createdBeforeUtc='{createdBeforeUtc ?? ""}': {createdBeforeError ?? "createdBeforeUtc is invalid."}");
             return InventoryQueryResult.FailResult(createdBeforeError ?? "createdBeforeUtc is invalid.");
         }
 
         if (createdAfter.HasValue && createdBefore.HasValue && createdAfter.Value > createdBefore.Value)
         {
+            Console.WriteLine($"[inventory-list] invalid utc range createdAfterUtc={createdAfter.Value:O} createdBeforeUtc={createdBefore.Value:O}");
             return InventoryQueryResult.FailResult("createdAfterUtc must be earlier than or equal to createdBeforeUtc.");
         }
 
@@ -1697,6 +1705,7 @@ internal sealed partial class BotSession
         {
             if (!UUID.TryParse(creatorId, out var parsedCreatorUuid))
             {
+                Console.WriteLine($"[inventory-list] invalid creatorId='{creatorId}'");
                 return InventoryQueryResult.FailResult("creatorId is not a valid UUID.");
             }
 
@@ -1705,37 +1714,42 @@ internal sealed partial class BotSession
 
         if (!TryDecodeInventoryCursor(cursor, out var cursorOffset, out var cursorError))
         {
+            Console.WriteLine($"[inventory-list] invalid cursor='{cursor ?? ""}': {cursorError ?? "cursor is invalid."}");
             return InventoryQueryResult.FailResult(cursorError ?? "cursor is invalid.");
         }
 
         var normalizedNameContains = string.IsNullOrWhiteSpace(nameContains) ? null : nameContains.Trim();
         var normalizedType = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
         var effectivePageSize = Math.Clamp(pageSize <= 0 ? 200 : pageSize, 1, 500);
+        Console.WriteLine($"[inventory-list] normalized cursorOffset={cursorOffset} pageSize={effectivePageSize} nameContains='{normalizedNameContains ?? ""}' type='{normalizedType ?? ""}' creatorUuid='{creatorUuid?.ToString() ?? ""}'");
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
+            var lockStopwatch = Stopwatch.StartNew();
+            Console.WriteLine("[inventory-list] execute-locked begin");
+
             var store = client.Inventory.Store;
             var root = store?.RootFolder;
             if (store == null || root == null)
             {
+                Console.WriteLine("[inventory-list] inventory store/root not initialized");
                 return InventoryQueryResult.FailResult("Inventory store is not initialized.");
             }
 
-            var folderUuid = root.UUID;
-            if (!string.IsNullOrWhiteSpace(folderId))
+            if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: true, parameterName: "folderIdOrPath", out var folderUuid, out var folderResolveError))
             {
-                if (!UUID.TryParse(folderId, out folderUuid))
-                {
-                    return InventoryQueryResult.FailResult("folderId is not a valid UUID.");
-                }
+                Console.WriteLine($"[inventory-list] folder resolve failed folderIdOrPath='{folderIdOrPath ?? ""}': {folderResolveError}");
+                return InventoryQueryResult.FailResult(folderResolveError);
             }
 
             var limit = Math.Clamp(maxResults, 1, 10000);
             var owner = client.Self.AgentID;
             var entries = new List<InventoryBase>();
+            Console.WriteLine($"[inventory-list] querying folder={folderUuid} owner={owner} recursive={recursive} limit={limit}");
 
-            if (!store.TryGetValue(folderUuid, out var folderNode) || folderNode is not InventoryFolder folder)
+            if (!TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
             {
+                Console.WriteLine($"[inventory-list] folder not found in local store folder={folderUuid}");
                 return InventoryQueryResult.FailResult($"Folder {folderUuid} was not found in local inventory store.");
             }
 
@@ -1748,6 +1762,7 @@ internal sealed partial class BotSession
                 await client.Inventory.GetInventoryRecursiveAsync(folderUuid, owner, folders, items, token).ConfigureAwait(false);
                 entries.AddRange(folders);
                 entries.AddRange(items);
+                Console.WriteLine($"[inventory-list] recursive fetch completed folders={folders.Count} items={items.Count} totalEntries={entries.Count}");
             }
             else
             {
@@ -1755,6 +1770,7 @@ internal sealed partial class BotSession
                     .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, token)
                     .ConfigureAwait(false);
                 entries.AddRange(contents);
+                Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
             }
 
             var materialized = new List<InventoryEntry>(entries.Count);
@@ -1783,9 +1799,11 @@ internal sealed partial class BotSession
                     creatorUuid))
                 .Take(limit)
                 .ToList();
+            Console.WriteLine($"[inventory-list] materialized={materialized.Count} filtered={filtered.Count} limit={limit}");
 
             if (cursorOffset > filtered.Count)
             {
+                Console.WriteLine($"[inventory-list] cursor offset out of range cursorOffset={cursorOffset} filteredCount={filtered.Count}");
                 return InventoryQueryResult.FailResult($"cursor offset {cursorOffset} is beyond available results ({filtered.Count}).");
             }
 
@@ -1797,6 +1815,7 @@ internal sealed partial class BotSession
             var nextOffset = cursorOffset + page.Count;
             var hasMore = nextOffset < filtered.Count;
             var nextCursor = hasMore ? EncodeInventoryCursor(nextOffset) : null;
+            Console.WriteLine($"[inventory-list] page={page.Count} nextOffset={nextOffset} hasMore={hasMore} nextCursor='{nextCursor ?? ""}' elapsedMs={lockStopwatch.ElapsedMilliseconds}");
 
             return InventoryQueryResult.OkResult(
                 page,
@@ -1805,10 +1824,25 @@ internal sealed partial class BotSession
                 hasMore,
                 filtered.Count);
         }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+        {
+            Console.WriteLine($"[inventory-list] canceled elapsedMs={overallStopwatch.ElapsedMilliseconds} canceledByCaller={cancellationToken.IsCancellationRequested} error={ex.Message}");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[inventory-list] failed elapsedMs={overallStopwatch.ElapsedMilliseconds} error={ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
+        finally
+        {
+            Console.WriteLine($"[inventory-list] end elapsedMs={overallStopwatch.ElapsedMilliseconds}");
+        }
     }
 
     public async Task<BotToolResult> InventoryCreateFolderAsync(
-        string? parentFolderId,
+        string? parentFolderIdOrPath,
         string name,
         string? preferredType,
         CancellationToken cancellationToken)
@@ -1833,20 +1867,9 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("Inventory store is not initialized."));
             }
 
-            var parentUuid = rootFolder.UUID;
-            if (!string.IsNullOrWhiteSpace(parentFolderId))
+            if (!TryResolveInventoryFolderUuid(client, store, parentFolderIdOrPath, allowEmptyForRoot: true, parameterName: "parentFolderIdOrPath", out var parentUuid, out var resolveError))
             {
-                if (!UUID.TryParse(parentFolderId, out parentUuid))
-                {
-                    return Task.FromResult(BotToolResult.Fail("parentFolderId is not a valid UUID."));
-                }
-
-                if (!TryGetInventoryFolderFromStore(store, parentUuid, out var parentFolder))
-                {
-                    return Task.FromResult(BotToolResult.Fail($"Parent folder {parentUuid} was not found in local inventory store."));
-                }
-
-                parentUuid = parentFolder.UUID;
+                return Task.FromResult(BotToolResult.Fail(resolveError));
             }
 
             var createdId = client.Inventory.CreateFolder(parentUuid, normalizedName, parsedType);
@@ -1855,13 +1878,8 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> InventoryRenameFolderAsync(string folderId, string newName, CancellationToken cancellationToken)
+    public async Task<BotToolResult> InventoryRenameFolderAsync(string folderIdOrPath, string newName, CancellationToken cancellationToken)
     {
-        if (!UUID.TryParse(folderId, out var folderUuid))
-        {
-            return BotToolResult.Fail("folderId is not a valid UUID.");
-        }
-
         var normalizedName = (newName ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(normalizedName))
         {
@@ -1871,7 +1889,17 @@ internal sealed partial class BotSession
         return await ExecuteLockedAsync((client, token) =>
         {
             var store = client.Inventory.Store;
-            if (store == null || !TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
+            if (store == null)
+            {
+                return Task.FromResult(BotToolResult.Fail("Inventory store is not initialized."));
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: false, parameterName: "folderIdOrPath", out var folderUuid, out var resolveError))
+            {
+                return Task.FromResult(BotToolResult.Fail(resolveError));
+            }
+
+            if (!TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
             {
                 return Task.FromResult(BotToolResult.Fail($"Inventory folder {folderUuid} was not found in local store."));
             }
@@ -1920,18 +1948,8 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> InventoryMoveFolderAsync(string folderId, string destinationParentFolderId, CancellationToken cancellationToken)
+    public async Task<BotToolResult> InventoryMoveFolderAsync(string folderIdOrPath, string destinationParentFolderIdOrPath, CancellationToken cancellationToken)
     {
-        if (!UUID.TryParse(folderId, out var folderUuid))
-        {
-            return BotToolResult.Fail("folderId is not a valid UUID.");
-        }
-
-        if (!UUID.TryParse(destinationParentFolderId, out var destinationParentUuid))
-        {
-            return BotToolResult.Fail("destinationParentFolderId is not a valid UUID.");
-        }
-
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
@@ -1939,6 +1957,16 @@ internal sealed partial class BotSession
             if (store == null || rootFolder == null)
             {
                 return BotToolResult.Fail("Inventory store is not initialized.");
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: false, parameterName: "folderIdOrPath", out var folderUuid, out var folderResolveError))
+            {
+                return BotToolResult.Fail(folderResolveError);
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, destinationParentFolderIdOrPath, allowEmptyForRoot: false, parameterName: "destinationParentFolderIdOrPath", out var destinationParentUuid, out var destinationResolveError))
+            {
+                return BotToolResult.Fail(destinationResolveError);
             }
 
             if (!TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
@@ -1972,22 +2000,27 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> InventoryMoveItemAsync(string itemId, string destinationFolderId, CancellationToken cancellationToken)
+    public async Task<BotToolResult> InventoryMoveItemAsync(string itemId, string destinationFolderIdOrPath, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(itemId, out var itemUuid))
         {
             return BotToolResult.Fail("itemId is not a valid UUID.");
         }
 
-        if (!UUID.TryParse(destinationFolderId, out var destinationFolderUuid))
-        {
-            return BotToolResult.Fail("destinationFolderId is not a valid UUID.");
-        }
-
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
-            if (store == null || !TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
+            if (store == null)
+            {
+                return BotToolResult.Fail("Inventory store is not initialized.");
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, destinationFolderIdOrPath, allowEmptyForRoot: false, parameterName: "destinationFolderIdOrPath", out var destinationFolderUuid, out var destinationResolveError))
+            {
+                return BotToolResult.Fail(destinationResolveError);
+            }
+
+            if (!TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
             {
                 return BotToolResult.Fail($"Destination folder {destinationFolderUuid} was not found in local store.");
             }
@@ -2003,16 +2036,11 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> InventoryMoveManyAsync(string itemIdsCsv, string destinationFolderId, CancellationToken cancellationToken)
+    public async Task<BotToolResult> InventoryMoveManyAsync(string itemIdsCsv, string destinationFolderIdOrPath, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(itemIdsCsv))
         {
             return BotToolResult.Fail("itemIdsCsv is required (comma-separated UUIDs).");
-        }
-
-        if (!UUID.TryParse(destinationFolderId, out var destinationFolderUuid))
-        {
-            return BotToolResult.Fail("destinationFolderId is not a valid UUID.");
         }
 
         var ids = new List<UUID>();
@@ -2039,7 +2067,17 @@ internal sealed partial class BotSession
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
-            if (store == null || !TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
+            if (store == null)
+            {
+                return BotToolResult.Fail("Inventory store is not initialized.");
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, destinationFolderIdOrPath, allowEmptyForRoot: false, parameterName: "destinationFolderIdOrPath", out var destinationFolderUuid, out var destinationResolveError))
+            {
+                return BotToolResult.Fail(destinationResolveError);
+            }
+
+            if (!TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
             {
                 return BotToolResult.Fail($"Destination folder {destinationFolderUuid} was not found in local store.");
             }
@@ -2079,7 +2117,7 @@ internal sealed partial class BotSession
 
     public async Task<BotToolResult> InventoryCopyItemAsync(
         string itemId,
-        string destinationFolderId,
+        string destinationFolderIdOrPath,
         string? newName,
         CancellationToken cancellationToken)
     {
@@ -2088,17 +2126,22 @@ internal sealed partial class BotSession
             return BotToolResult.Fail("itemId is not a valid UUID.");
         }
 
-        if (!UUID.TryParse(destinationFolderId, out var destinationFolderUuid))
-        {
-            return BotToolResult.Fail("destinationFolderId is not a valid UUID.");
-        }
-
         var normalizedNewName = string.IsNullOrWhiteSpace(newName) ? null : newName.Trim();
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
-            if (store == null || !TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
+            if (store == null)
+            {
+                return BotToolResult.Fail("Inventory store is not initialized.");
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, destinationFolderIdOrPath, allowEmptyForRoot: false, parameterName: "destinationFolderIdOrPath", out var destinationFolderUuid, out var destinationResolveError))
+            {
+                return BotToolResult.Fail(destinationResolveError);
+            }
+
+            if (!TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
             {
                 return BotToolResult.Fail($"Destination folder {destinationFolderUuid} was not found in local store.");
             }
@@ -2123,7 +2166,7 @@ internal sealed partial class BotSession
 
     public async Task<BotToolResult> InventoryLinkItemAsync(
         string itemId,
-        string destinationFolderId,
+        string destinationFolderIdOrPath,
         string? linkName,
         string? linkDescription,
         CancellationToken cancellationToken)
@@ -2133,15 +2176,20 @@ internal sealed partial class BotSession
             return BotToolResult.Fail("itemId is not a valid UUID.");
         }
 
-        if (!UUID.TryParse(destinationFolderId, out var destinationFolderUuid))
-        {
-            return BotToolResult.Fail("destinationFolderId is not a valid UUID.");
-        }
-
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
-            if (store == null || !TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
+            if (store == null)
+            {
+                return BotToolResult.Fail("Inventory store is not initialized.");
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, destinationFolderIdOrPath, allowEmptyForRoot: false, parameterName: "destinationFolderIdOrPath", out var destinationFolderUuid, out var destinationResolveError))
+            {
+                return BotToolResult.Fail(destinationResolveError);
+            }
+
+            if (!TryGetInventoryFolderFromStore(store, destinationFolderUuid, out var destinationFolder))
             {
                 return BotToolResult.Fail($"Destination folder {destinationFolderUuid} was not found in local store.");
             }
@@ -2211,16 +2259,11 @@ internal sealed partial class BotSession
     }
 
     public async Task<BotToolResult> InventoryGiveFolderAsync(
-        string folderId,
+        string folderIdOrPath,
         string recipientAgentId,
         bool withBeamEffect,
         CancellationToken cancellationToken)
     {
-        if (!UUID.TryParse(folderId, out var folderUuid))
-        {
-            return BotToolResult.Fail("folderId is not a valid UUID.");
-        }
-
         if (!UUID.TryParse(recipientAgentId, out var recipientUuid))
         {
             return BotToolResult.Fail("recipientAgentId is not a valid UUID.");
@@ -2229,7 +2272,17 @@ internal sealed partial class BotSession
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
-            if (store == null || !store.TryGetValue(folderUuid, out var node) || node is not InventoryFolder folder)
+            if (store == null)
+            {
+                return BotToolResult.Fail("Inventory store is not initialized.");
+            }
+
+            if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: false, parameterName: "folderIdOrPath", out var folderUuid, out var resolveError))
+            {
+                return BotToolResult.Fail(resolveError);
+            }
+
+            if (!TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
             {
                 return BotToolResult.Fail($"Inventory folder {folderUuid} was not found in local store.");
             }
@@ -2259,23 +2312,40 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> InventoryDeleteFolderAsync(string folderId, CancellationToken cancellationToken)
+    public async Task<BotToolResult> InventoryDeleteFolderAsync(string folderIdOrPath, CancellationToken cancellationToken)
     {
-        if (!UUID.TryParse(folderId, out var folderUuid))
-        {
-            return BotToolResult.Fail("folderId is not a valid UUID.");
-        }
-
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var store = client.Inventory.Store;
-            if (store == null || !store.TryGetValue(folderUuid, out var node) || node is not InventoryFolder folder)
+            if (store == null)
             {
-                return BotToolResult.Fail($"Inventory folder {folderUuid} was not found in local store.");
+                return BotToolResult.Fail("Inventory store is not initialized.");
             }
 
-            await client.Inventory.RemoveFolderAsync(folderUuid, token).ConfigureAwait(false);
-            return BotToolResult.OkResult($"Delete request sent for inventory folder '{folder.Name}' ({folderUuid}).");
+            if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: false, parameterName: "folderIdOrPath", out var folderUuid, out var folderResolveError))
+            {
+                return BotToolResult.Fail(folderResolveError);
+            }
+
+            await client.Inventory
+                .MoveFolderAsync(folderUuid, client.Inventory.FindFolderForType(FolderType.Trash), token)
+                .ConfigureAwait(false);
+
+            if (TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
+            {
+                return BotToolResult.OkResult($"Moved inventory folder '{folder.Name}' ({folderUuid}) to Trash.");
+            }
+
+            return BotToolResult.OkResult($"Moved inventory folder '{folderUuid}' to Trash.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> InventoryEmptyTrashAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            await client.Inventory.EmptyTrashAsync(token).ConfigureAwait(false);
+            return BotToolResult.OkResult("Trash empty request sent.");
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -2464,7 +2534,7 @@ internal sealed partial class BotSession
     public async Task<BotToolResult> TaskInventoryTakeAsync(
         uint objectLocalId,
         string taskItemId,
-        string? destinationFolderId,
+        string? destinationFolderIdOrPath,
         string? objectId,
         CancellationToken cancellationToken)
     {
@@ -2499,7 +2569,7 @@ internal sealed partial class BotSession
             }
 
             UUID destinationFolderUuid;
-            if (string.IsNullOrWhiteSpace(destinationFolderId))
+            if (string.IsNullOrWhiteSpace(destinationFolderIdOrPath))
             {
                 destinationFolderUuid = client.Inventory.FindFolderForType(taskItem.AssetType);
                 if (destinationFolderUuid == UUID.Zero)
@@ -2507,9 +2577,18 @@ internal sealed partial class BotSession
                     return BotToolResult.Fail($"No default destination folder was found for asset type {taskItem.AssetType}.");
                 }
             }
-            else if (!UUID.TryParse(destinationFolderId, out destinationFolderUuid))
+            else
             {
-                return BotToolResult.Fail("destinationFolderId is not a valid UUID.");
+                var store = client.Inventory.Store;
+                if (store == null)
+                {
+                    return BotToolResult.Fail("Inventory store is not initialized.");
+                }
+
+                if (!TryResolveInventoryFolderUuid(client, store, destinationFolderIdOrPath, allowEmptyForRoot: false, parameterName: "destinationFolderIdOrPath", out destinationFolderUuid, out var destinationResolveError))
+                {
+                    return BotToolResult.Fail(destinationResolveError);
+                }
             }
 
             client.Inventory.MoveTaskInventory(localId, taskItem.UUID, destinationFolderUuid, sim);
@@ -2582,7 +2661,7 @@ internal sealed partial class BotSession
         string inventoryType,
         string name,
         string description,
-        string? folderId,
+        string? folderIdOrPath,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(source))
@@ -2609,11 +2688,17 @@ internal sealed partial class BotSession
             }
 
             UUID folderUuid;
-            if (!string.IsNullOrWhiteSpace(folderId))
+            if (!string.IsNullOrWhiteSpace(folderIdOrPath))
             {
-                if (!UUID.TryParse(folderId, out folderUuid))
+                var store = client.Inventory.Store;
+                if (store == null)
                 {
-                    return AssetTransferResult.FailResult("folderId is not a valid UUID.");
+                    return AssetTransferResult.FailResult("Inventory store is not initialized.");
+                }
+
+                if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: false, parameterName: "folderIdOrPath", out folderUuid, out var folderResolveError))
+                {
+                    return AssetTransferResult.FailResult(folderResolveError);
                 }
             }
             else
@@ -3776,6 +3861,89 @@ internal sealed partial class BotSession
 
         folder = typed;
         return true;
+    }
+
+    private static bool TryResolveInventoryFolderUuid(
+        GridClient client,
+        Inventory store,
+        string? folderIdOrPath,
+        bool allowEmptyForRoot,
+        string parameterName,
+        out UUID folderUuid,
+        out string error)
+    {
+        folderUuid = UUID.Zero;
+        error = string.Empty;
+
+        if (store.RootFolder == null)
+        {
+            error = "Inventory root folder is not initialized.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(folderIdOrPath))
+        {
+            if (!allowEmptyForRoot)
+            {
+                error = $"{parameterName} is required.";
+                return false;
+            }
+
+            folderUuid = store.RootFolder.UUID;
+            return true;
+        }
+
+        var normalized = folderIdOrPath.Trim();
+        if (UUID.TryParse(normalized, out var parsedFolderId))
+        {
+            if (!TryGetInventoryFolderFromStore(store, parsedFolderId, out _))
+            {
+                error = $"Inventory folder {parsedFolderId} was not found in local store.";
+                return false;
+            }
+
+            folderUuid = parsedFolderId;
+            return true;
+        }
+
+        var segments = normalized
+            .Replace('\\', '/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+
+        if (segments.Count > 0 && segments[0].Equals("Inventory", StringComparison.OrdinalIgnoreCase))
+        {
+            segments.RemoveAt(0);
+        }
+
+        if (segments.Count == 0)
+        {
+            if (!allowEmptyForRoot)
+            {
+                    error = $"{parameterName} must include at least one folder name when using path syntax.";
+                return false;
+            }
+
+            folderUuid = store.RootFolder.UUID;
+            return true;
+        }
+
+        var found = client.Inventory.LocalFind(store.RootFolder.UUID, segments.ToArray(), 0, true);
+        var matchedFolders = found.OfType<InventoryFolder>().ToList();
+        if (matchedFolders.Count == 1)
+        {
+            folderUuid = matchedFolders[0].UUID;
+            return true;
+        }
+
+        if (matchedFolders.Count == 0)
+        {
+            error = $"Inventory folder path '{folderIdOrPath}' was not found in local store.";
+            return false;
+        }
+
+        error = $"Inventory folder path '{folderIdOrPath}' is ambiguous ({matchedFolders.Count} matches). Use a folder UUID instead.";
+        return false;
     }
 
     private static bool IsFolderDescendant(Inventory store, UUID ancestorFolderId, UUID possibleDescendantFolderId)

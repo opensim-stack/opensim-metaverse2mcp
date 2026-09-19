@@ -47,14 +47,14 @@ internal sealed class BotMcpTools
         [Description("Bot level (for example: GOVERNOR, BUILDER, ACTOR).")]
         string level,
         [Description("Optional email override. If omitted, spawner defaults to <first>.<last>@localhost.")]
-        string? email,
+        string? email = null,
         [Description("Optional 3D avatar model override. If omitted, spawner defaults to Ruth.")]
-        string? model,
+        string? model = null,
         [Description("Optional appearance name (for example: Cube Bot, Actor, Construction).")]
-        string? appearance,
+        string? appearance = null,
         [Description("Optional gender (male, female, neutral).")]
-        string? gender,
-        CancellationToken cancellationToken)
+        string? gender = null,
+        CancellationToken cancellationToken = default)
     {
         return _spawnerClient.CreateBotAsync(
             first,
@@ -285,8 +285,8 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> Chat(
         [Description("Message to send.")] string message,
         [Description("Chat channel number.")] int channel,
-        [Description("Optional chat modality (for example: Whisper, Normal, Shout). Defaults to Normal.")] string? chatType,
-        CancellationToken cancellationToken)
+        [Description("Optional chat modality (for example: Whisper, Normal, Shout). Defaults to Normal.")] string? chatType = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SayChatAsync(message, channel, chatType, cancellationToken);
     }
@@ -332,14 +332,14 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Synthesize text with Piper and play it through the configured voice backend.")]
     public Task<BotToolResult> Speak(
         [Description("Text to synthesize and speak.")] string text,
-        [Description("Optional Piper voice name; defaults to configured PIPER_DEFAULT_VOICE.")] string? voice,
-        [Description("Optional Piper speaker id.")] int? speaker,
-        [Description("Optional Piper speaker_id alias (used when speaker is omitted).") ] int? speakerId,
-        [Description("Optional Piper length_scale.")] float? lengthScale,
-        [Description("Optional Piper noise_scale.")] float? noiseScale,
-        [Description("Optional Piper noise_w.")] float? noiseW,
-        [Description("Optional Piper sentence_silence.")] float? sentenceSilence,
-        CancellationToken cancellationToken)
+        [Description("Optional Piper voice name; defaults to configured PIPER_DEFAULT_VOICE.")] string? voice = null,
+        [Description("Optional Piper speaker id.")] int? speaker = null,
+        [Description("Optional Piper speaker_id alias (used when speaker is omitted).") ] int? speakerId = null,
+        [Description("Optional Piper length_scale.")] float? lengthScale = null,
+        [Description("Optional Piper noise_scale.")] float? noiseScale = null,
+        [Description("Optional Piper noise_w.")] float? noiseW = null,
+        [Description("Optional Piper sentence_silence.")] float? sentenceSilence = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SayAsync(text, voice, speaker, speakerId, lengthScale, noiseScale, noiseW, sentenceSilence, cancellationToken);
     }
@@ -461,11 +461,11 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Edit parcel text/media fields (name, description, music URL, media URL).")]
     public Task<BotToolResult> ParcelSetInfo(
         [Description("Parcel local ID.")] int localId,
-        [Description("Optional new parcel name (null leaves unchanged).") ] string? name,
-        [Description("Optional new parcel description (null leaves unchanged).") ] string? description,
-        [Description("Optional new parcel music stream URL (null leaves unchanged).") ] string? musicUrl,
-        [Description("Optional new parcel media URL (null leaves unchanged).") ] string? mediaUrl,
-        CancellationToken cancellationToken)
+        [Description("Optional new parcel name (null leaves unchanged).") ] string? name = null,
+        [Description("Optional new parcel description (null leaves unchanged).") ] string? description = null,
+        [Description("Optional new parcel music stream URL (null leaves unchanged).") ] string? musicUrl = null,
+        [Description("Optional new parcel media URL (null leaves unchanged).") ] string? mediaUrl = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.ParcelSetInfoAsync(localId, name, description, musicUrl, mediaUrl, cancellationToken);
     }
@@ -474,13 +474,13 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> ParcelSetLanding(
         [Description("Parcel local ID.")] int localId,
         [Description("Landing type: none, landingpoint, direct.")] string landingType,
-        [Description("Optional landing X (required for landingpoint).") ] float? x,
-        [Description("Optional landing Y (required for landingpoint).") ] float? y,
-        [Description("Optional landing Z (required for landingpoint).") ] float? z,
-        [Description("Optional look-at X.") ] float? lookAtX,
-        [Description("Optional look-at Y.") ] float? lookAtY,
-        [Description("Optional look-at Z.") ] float? lookAtZ,
-        CancellationToken cancellationToken)
+        [Description("Optional landing X (required for landingpoint).") ] float? x = null,
+        [Description("Optional landing Y (required for landingpoint).") ] float? y = null,
+        [Description("Optional landing Z (required for landingpoint).") ] float? z = null,
+        [Description("Optional look-at X.") ] float? lookAtX = null,
+        [Description("Optional look-at Y.") ] float? lookAtY = null,
+        [Description("Optional look-at Z.") ] float? lookAtZ = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.ParcelSetLandingAsync(localId, landingType, x, y, z, lookAtX, lookAtY, lookAtZ, cancellationToken);
     }
@@ -527,9 +527,9 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Inspect parcel permission signals and likely authorization blockers for parcel operations.")]
     public Task<DataToolResult> ParcelPermissionDiagnostics(
-        [Description("Optional parcel local ID. If omitted, uses current parcel under the bot.")] int? localId,
         [Description("If true, refresh parcel map cache before diagnostics.")] bool forceRefresh,
-        CancellationToken cancellationToken)
+        [Description("Optional parcel local ID. If omitted, uses current parcel under the bot.")] int? localId = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.ParcelPermissionDiagnosticsAsync(localId, forceRefresh, cancellationToken);
     }
@@ -544,8 +544,8 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Export current terrain heightmap as 256x256 float32 RAW (.r32) file.")]
     public Task<DataToolResult> TerrainHeightmapExportRaw(
-        [Description("Optional output path. If omitted, a temp file path is generated.")] string? outputPath,
-        CancellationToken cancellationToken)
+        [Description("Optional output path. If omitted, a temp file path is generated.")] string? outputPath = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TerrainHeightmapExportRawAsync(outputPath, cancellationToken);
     }
@@ -553,8 +553,8 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Import and upload a 256x256 float32 RAW terrain heightmap (.r32) to the current region.")]
     public Task<BotToolResult> TerrainHeightmapImportRaw(
         [Description("Source file path or HTTP/HTTPS URL for .r32 data.")] string source,
-        [Description("Optional uploaded file name hint; '.r32' is appended if missing.")] string? fileNameHint,
-        CancellationToken cancellationToken)
+        [Description("Optional uploaded file name hint; '.r32' is appended if missing.")] string? fileNameHint = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TerrainHeightmapImportRawAsync(source, fileNameHint, cancellationToken);
     }
@@ -587,10 +587,10 @@ internal sealed class BotMcpTools
         [Description("East bound (0..256).") ] float east,
         [Description("North bound (0..256).") ] float north,
         [Description("Height delta in meters (positive raises, negative lowers).") ] float deltaMeters,
-        [Description("Optional minimum clamp height after offset.")] float? minHeight,
-        [Description("Optional maximum clamp height after offset.")] float? maxHeight,
-        [Description("Optional upload filename hint; '.r32' is appended if missing.")] string? fileNameHint,
-        CancellationToken cancellationToken)
+        [Description("Optional minimum clamp height after offset.")] float? minHeight = null,
+        [Description("Optional maximum clamp height after offset.")] float? maxHeight = null,
+        [Description("Optional upload filename hint; '.r32' is appended if missing.")] string? fileNameHint = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TerrainPatchApplyOffsetAsync(west, south, east, north, deltaMeters, minHeight, maxHeight, fileNameHint, cancellationToken);
     }
@@ -603,25 +603,25 @@ internal sealed class BotMcpTools
         [Description("East bound (0..256).") ] float east,
         [Description("North bound (0..256).") ] float north,
         [Description("Height delta in meters (positive raises, negative lowers).") ] float deltaMeters,
-        [Description("Optional minimum clamp height after offset.")] float? minHeight,
-        [Description("Optional maximum clamp height after offset.")] float? maxHeight,
-        [Description("Optional upload filename hint; '.r32' is appended if missing.")] string? fileNameHint,
-        CancellationToken cancellationToken)
+        [Description("Optional minimum clamp height after offset.")] float? minHeight = null,
+        [Description("Optional maximum clamp height after offset.")] float? maxHeight = null,
+        [Description("Optional upload filename hint; '.r32' is appended if missing.")] string? fileNameHint = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TerrainPatchApplyOffsetRawAsync(source, west, south, east, north, deltaMeters, minHeight, maxHeight, fileNameHint, cancellationToken);
     }
 
     [McpServerTool, Description("Run a terrain terraform operation on a parcel local ID or explicit area bounds.")]
     public Task<BotToolResult> TerrainTerraform(
-        [Description("Optional parcel local ID. If omitted, west/south/east/north are required.")] int? localId,
-        [Description("Optional west bound when localId is omitted.")] float? west,
-        [Description("Optional south bound when localId is omitted.")] float? south,
-        [Description("Optional east bound when localId is omitted.")] float? east,
-        [Description("Optional north bound when localId is omitted.")] float? north,
         [Description("Action: level, raise, lower, smooth, noise, revert.")] string action,
         [Description("Brush size: small, medium, large.")] string brushSize,
         [Description("Terraform duration/intensity seconds (1..120).") ] int seconds,
-        CancellationToken cancellationToken)
+        [Description("Optional parcel local ID. If omitted, west/south/east/north are required.")] int? localId = null,
+        [Description("Optional west bound when localId is omitted.")] float? west = null,
+        [Description("Optional south bound when localId is omitted.")] float? south = null,
+        [Description("Optional east bound when localId is omitted.")] float? east = null,
+        [Description("Optional north bound when localId is omitted.")] float? north = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TerrainTerraformAsync(localId, west, south, east, north, action, brushSize, seconds, cancellationToken);
     }
@@ -670,9 +670,9 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Set or clear the region automatic restart schedule.")]
     public Task<BotToolResult> EstateRestartScheduleSet(
         [Description("Mode: daily, weekly, off.")] string mode,
-        [Description("CSV day list for weekly mode (sun,mon,tue,wed,thu,fri,sat).") ] string? daysCsv,
-        [Description("UTC time as HH:mm or HH:mm:ss.")] string timeUtc,
-        CancellationToken cancellationToken)
+        [Description("CSV day list for weekly mode (sun,mon,tue,wed,thu,fri,sat).") ] string? daysCsv = null,
+        [Description("UTC time as HH:mm or HH:mm:ss.")] string timeUtc = "",
+        CancellationToken cancellationToken = default)
     {
         return _bot.EstateRestartScheduleSetAsync(mode, daysCsv, timeUtc, cancellationToken);
     }
@@ -694,9 +694,9 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Offer friendship to an avatar UUID.")]
     public Task<BotToolResult> FriendOfferSend(
         [Description("Target avatar UUID.")] string targetAgentId,
-        [Description("Optional message to include with the offer.")] string? message,
-        [Description("Seconds to wait for accept/decline response (0 = do not wait, max 60).") ] int waitForResponseSeconds,
-        CancellationToken cancellationToken)
+        [Description("Optional message to include with the offer.")] string? message = null,
+        [Description("Seconds to wait for accept/decline response (0 = do not wait, max 60).") ] int waitForResponseSeconds = default,
+        CancellationToken cancellationToken = default)
     {
         return _bot.FriendOfferSendAsync(targetAgentId, message, waitForResponseSeconds, cancellationToken);
     }
@@ -759,8 +759,8 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Send a teleport offer (lure) to an avatar UUID.")]
     public Task<BotToolResult> TeleportOfferSend(
         [Description("Target avatar UUID.")] string targetAgentId,
-        [Description("Optional lure message.")] string? message,
-        CancellationToken cancellationToken)
+        [Description("Optional lure message.")] string? message = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TeleportOfferSendAsync(targetAgentId, message, cancellationToken);
     }
@@ -768,8 +768,8 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Request a teleport invite from another avatar UUID.")]
     public Task<BotToolResult> TeleportRequestSend(
         [Description("Target avatar UUID.")] string targetAgentId,
-        [Description("Optional request message.")] string? message,
-        CancellationToken cancellationToken)
+        [Description("Optional request message.")] string? message = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TeleportRequestSendAsync(targetAgentId, message, cancellationToken);
     }
@@ -1127,8 +1127,8 @@ internal sealed class BotMcpTools
         [Description("Local X coordinate (0..256).") ] float x,
         [Description("Local Y coordinate (0..256).") ] float y,
         [Description("Local Z coordinate.")] float z,
-        [Description("Optional destination region name. If omitted, current region is used.")] string? regionName,
-        CancellationToken cancellationToken)
+        [Description("Optional destination region name. If omitted, current region is used.")] string? regionName = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TeleportToAsync(x, y, z, regionName, cancellationToken);
     }
@@ -1154,8 +1154,8 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> StartMovement(
         [Description("Axis: forward, back, left, right, up, down.")] string axis,
         [Description("True for fast/run speed, false for normal walk speed.")] bool fast,
-        [Description("Optional auto-stop duration in seconds (0.25-300). Omit or 0 to run until StopMovement.")] float? durationSeconds,
-        CancellationToken cancellationToken)
+        [Description("Optional auto-stop duration in seconds (0.25-300). Omit or 0 to run until StopMovement.")] float? durationSeconds = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.StartMovementAsync(axis, fast, durationSeconds, cancellationToken);
     }
@@ -1213,9 +1213,9 @@ internal sealed class BotMcpTools
         [Description("Pitch in degrees.")] float pitchDegrees,
         [Description("Yaw in degrees.")] float yawDegrees,
         [Description("Material: Stone, Metal, Glass, Wood, Flesh, Plastic, Rubber, Light.")] string material,
-        [Description("Optional object name.")] string? name,
-        [Description("Optional object description.")] string? description,
-        CancellationToken cancellationToken)
+        [Description("Optional object name.")] string? name = null,
+        [Description("Optional object description.")] string? description = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.CreatePrimAsync(
             shape,
@@ -1285,20 +1285,20 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> PrimSetFaceParams(
         [Description("Prim local ID.")] uint localId,
         [Description("Face index (0..44), or -1 for default face.")] int faceIndex,
-        [Description("Optional red tint (0..1).") ] float? red,
-        [Description("Optional green tint (0..1).") ] float? green,
-        [Description("Optional blue tint (0..1).") ] float? blue,
-        [Description("Optional alpha (0..1).") ] float? alpha,
-        [Description("Optional texture repeat U (scale).") ] float? repeatU,
-        [Description("Optional texture repeat V (scale).") ] float? repeatV,
-        [Description("Optional texture offset U (-1..1).") ] float? offsetU,
-        [Description("Optional texture offset V (-1..1).") ] float? offsetV,
-        [Description("Optional texture rotation in radians.") ] float? rotationRadians,
-        [Description("Optional glow amount (0..1).") ] float? glow,
-        [Description("Optional fullbright toggle.") ] bool? fullbright,
-        [Description("Optional shiny value: None, Low, Medium, High.") ] string? shiny,
-        [Description("Optional bump value from Bumpiness enum (e.g. None, Brightness, Darkness).") ] string? bump,
-        CancellationToken cancellationToken)
+        [Description("Optional red tint (0..1).") ] float? red = null,
+        [Description("Optional green tint (0..1).") ] float? green = null,
+        [Description("Optional blue tint (0..1).") ] float? blue = null,
+        [Description("Optional alpha (0..1).") ] float? alpha = null,
+        [Description("Optional texture repeat U (scale).") ] float? repeatU = null,
+        [Description("Optional texture repeat V (scale).") ] float? repeatV = null,
+        [Description("Optional texture offset U (-1..1).") ] float? offsetU = null,
+        [Description("Optional texture offset V (-1..1).") ] float? offsetV = null,
+        [Description("Optional texture rotation in radians.") ] float? rotationRadians = null,
+        [Description("Optional glow amount (0..1).") ] float? glow = null,
+        [Description("Optional fullbright toggle.") ] bool? fullbright = null,
+        [Description("Optional shiny value: None, Low, Medium, High.") ] string? shiny = null,
+        [Description("Optional bump value from Bumpiness enum (e.g. None, Brightness, Darkness).") ] string? bump = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SetPrimFaceParamsAsync(
             localId,
@@ -1323,12 +1323,12 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> PrimNudgeFaceUv(
         [Description("Prim local ID.")] uint localId,
         [Description("Face index (0..44), or -1 for default face.")] int faceIndex,
-        [Description("Optional delta for repeatU (scale U).") ] float? deltaRepeatU,
-        [Description("Optional delta for repeatV (scale V).") ] float? deltaRepeatV,
-        [Description("Optional delta for offsetU.") ] float? deltaOffsetU,
-        [Description("Optional delta for offsetV.") ] float? deltaOffsetV,
-        [Description("Optional delta for rotation in radians.") ] float? deltaRotationRadians,
-        CancellationToken cancellationToken)
+        [Description("Optional delta for repeatU (scale U).") ] float? deltaRepeatU = null,
+        [Description("Optional delta for repeatV (scale V).") ] float? deltaRepeatV = null,
+        [Description("Optional delta for offsetU.") ] float? deltaOffsetU = null,
+        [Description("Optional delta for offsetV.") ] float? deltaOffsetV = null,
+        [Description("Optional delta for rotation in radians.") ] float? deltaRotationRadians = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.NudgePrimFaceUvAsync(
             localId,
@@ -1436,15 +1436,15 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Bulk-adjust selected links by optional position delta, rotation delta, and scale multiplier.")]
     public Task<BotToolResult> PrimBulkAdjustLinks(
         [Description("Comma-separated local IDs to adjust.")] string localIdsCsv,
-        [Description("Optional position delta X.") ] float? deltaX,
-        [Description("Optional position delta Y.") ] float? deltaY,
-        [Description("Optional position delta Z.") ] float? deltaZ,
-        [Description("Optional rotation delta roll in degrees.") ] float? deltaRollDegrees,
-        [Description("Optional rotation delta pitch in degrees.") ] float? deltaPitchDegrees,
-        [Description("Optional rotation delta yaw in degrees.") ] float? deltaYawDegrees,
-        [Description("Optional scale multiplier (>0).") ] float? scaleMultiplier,
-        [Description("True to apply as child-only edits (recommended for linked children).") ] bool childOnly,
-        CancellationToken cancellationToken)
+        [Description("Optional position delta X.") ] float? deltaX = null,
+        [Description("Optional position delta Y.") ] float? deltaY = null,
+        [Description("Optional position delta Z.") ] float? deltaZ = null,
+        [Description("Optional rotation delta roll in degrees.") ] float? deltaRollDegrees = null,
+        [Description("Optional rotation delta pitch in degrees.") ] float? deltaPitchDegrees = null,
+        [Description("Optional rotation delta yaw in degrees.") ] float? deltaYawDegrees = null,
+        [Description("Optional scale multiplier (>0).") ] float? scaleMultiplier = null,
+        [Description("True to apply as child-only edits (recommended for linked children).") ] bool childOnly = default,
+        CancellationToken cancellationToken = default)
     {
         return _bot.BulkAdjustLinksAsync(
             localIdsCsv,
@@ -1462,10 +1462,10 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Set next-owner copy/modify/transfer permissions on one or more prims.")]
     public Task<BotToolResult> PrimSetNextOwnerPermissions(
         [Description("Comma-separated local IDs.")] string localIdsCsv,
-        [Description("Optional next-owner copy permission. Omit to leave unchanged.")] bool? allowCopy,
-        [Description("Optional next-owner modify permission. Omit to leave unchanged.")] bool? allowModify,
-        [Description("Optional next-owner transfer permission. Omit to leave unchanged.")] bool? allowTransfer,
-        CancellationToken cancellationToken)
+        [Description("Optional next-owner copy permission. Omit to leave unchanged.")] bool? allowCopy = null,
+        [Description("Optional next-owner modify permission. Omit to leave unchanged.")] bool? allowModify = null,
+        [Description("Optional next-owner transfer permission. Omit to leave unchanged.")] bool? allowTransfer = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SetPrimNextOwnerPermissionsAsync(localIdsCsv, allowCopy, allowModify, allowTransfer, cancellationToken);
     }
@@ -1528,22 +1528,22 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Edit core prim build shape parameters (cut, hollow, taper, twist, shear, skew, revolutions, and profile hole).")]
     public Task<BotToolResult> PrimSetBuildParams(
         [Description("Prim local ID.")] uint localId,
-        [Description("Optional path begin cut (0..1).") ] float? pathBegin,
-        [Description("Optional path end cut (0..1).") ] float? pathEnd,
-        [Description("Optional profile begin cut (0..1).") ] float? profileBegin,
-        [Description("Optional profile end cut (0..1).") ] float? profileEnd,
-        [Description("Optional profile hollow amount (0..0.95).") ] float? hollow,
-        [Description("Optional taper X (-1..1).") ] float? taperX,
-        [Description("Optional taper Y (-1..1).") ] float? taperY,
-        [Description("Optional twist (-1..1).") ] float? twist,
-        [Description("Optional twist begin (-1..1).") ] float? twistBegin,
-        [Description("Optional shear X (-2..2).") ] float? shearX,
-        [Description("Optional shear Y (-2..2).") ] float? shearY,
-        [Description("Optional skew (-1..1).") ] float? skew,
-        [Description("Optional radius offset (-1..1).") ] float? radiusOffset,
-        [Description("Optional revolutions (1..4).") ] float? revolutions,
-        [Description("Optional profile hole type from HoleType enum (e.g. Same, Circle, Square, Triangle).") ] string? profileHole,
-        CancellationToken cancellationToken)
+        [Description("Optional path begin cut (0..1).") ] float? pathBegin = null,
+        [Description("Optional path end cut (0..1).") ] float? pathEnd = null,
+        [Description("Optional profile begin cut (0..1).") ] float? profileBegin = null,
+        [Description("Optional profile end cut (0..1).") ] float? profileEnd = null,
+        [Description("Optional profile hollow amount (0..0.95).") ] float? hollow = null,
+        [Description("Optional taper X (-1..1).") ] float? taperX = null,
+        [Description("Optional taper Y (-1..1).") ] float? taperY = null,
+        [Description("Optional twist (-1..1).") ] float? twist = null,
+        [Description("Optional twist begin (-1..1).") ] float? twistBegin = null,
+        [Description("Optional shear X (-2..2).") ] float? shearX = null,
+        [Description("Optional shear Y (-2..2).") ] float? shearY = null,
+        [Description("Optional skew (-1..1).") ] float? skew = null,
+        [Description("Optional radius offset (-1..1).") ] float? radiusOffset = null,
+        [Description("Optional revolutions (1..4).") ] float? revolutions = null,
+        [Description("Optional profile hole type from HoleType enum (e.g. Same, Circle, Square, Triangle).") ] string? profileHole = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SetPrimBuildParamsAsync(
             localId,
@@ -1569,15 +1569,15 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> PrimSetFlexible(
         [Description("Prim local ID.")] uint localId,
         [Description("True to enable/update flexible settings; false disables flexible data.")] bool enabled,
-        [Description("Optional softness (0..3).") ] int? softness,
-        [Description("Optional tension (0..10).") ] float? tension,
-        [Description("Optional drag (0..10).") ] float? drag,
-        [Description("Optional gravity (-10..10).") ] float? gravity,
-        [Description("Optional wind sensitivity (0..10).") ] float? wind,
-        [Description("Optional force X.") ] float? forceX,
-        [Description("Optional force Y.") ] float? forceY,
-        [Description("Optional force Z.") ] float? forceZ,
-        CancellationToken cancellationToken)
+        [Description("Optional softness (0..3).") ] int? softness = null,
+        [Description("Optional tension (0..10).") ] float? tension = null,
+        [Description("Optional drag (0..10).") ] float? drag = null,
+        [Description("Optional gravity (-10..10).") ] float? gravity = null,
+        [Description("Optional wind sensitivity (0..10).") ] float? wind = null,
+        [Description("Optional force X.") ] float? forceX = null,
+        [Description("Optional force Y.") ] float? forceY = null,
+        [Description("Optional force Z.") ] float? forceZ = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SetPrimFlexibleParamsAsync(localId, enabled, softness, tension, drag, gravity, wind, forceX, forceY, forceZ, cancellationToken);
     }
@@ -1586,14 +1586,14 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> PrimSetLight(
         [Description("Prim local ID.")] uint localId,
         [Description("True to enable/update light settings; false disables light data.")] bool enabled,
-        [Description("Optional light color red (0..1).") ] float? red,
-        [Description("Optional light color green (0..1).") ] float? green,
-        [Description("Optional light color blue (0..1).") ] float? blue,
-        [Description("Optional light intensity (0..1).") ] float? intensity,
-        [Description("Optional light radius (0..20).") ] float? radius,
-        [Description("Optional light cutoff angle (0..180).") ] float? cutoff,
-        [Description("Optional light falloff (0..2).") ] float? falloff,
-        CancellationToken cancellationToken)
+        [Description("Optional light color red (0..1).") ] float? red = null,
+        [Description("Optional light color green (0..1).") ] float? green = null,
+        [Description("Optional light color blue (0..1).") ] float? blue = null,
+        [Description("Optional light intensity (0..1).") ] float? intensity = null,
+        [Description("Optional light radius (0..20).") ] float? radius = null,
+        [Description("Optional light cutoff angle (0..180).") ] float? cutoff = null,
+        [Description("Optional light falloff (0..2).") ] float? falloff = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SetPrimLightParamsAsync(localId, enabled, red, green, blue, intensity, radius, cutoff, falloff, cancellationToken);
     }
@@ -1602,11 +1602,11 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> PrimSetSculpt(
         [Description("Prim local ID.")] uint localId,
         [Description("True to enable/update sculpt settings; false disables sculpt data.")] bool enabled,
-        [Description("Optional sculpt or mesh texture UUID.")] string? textureId,
-        [Description("Optional base sculpt type: None, Sphere, Torus, Plane, Cylinder, Mesh.") ] string? sculptType,
-        [Description("Optional invert sculpt normals flag.") ] bool? invert,
-        [Description("Optional mirror sculpt flag.") ] bool? mirror,
-        CancellationToken cancellationToken)
+        [Description("Optional sculpt or mesh texture UUID.")] string? textureId = null,
+        [Description("Optional base sculpt type: None, Sphere, Torus, Plane, Cylinder, Mesh.") ] string? sculptType = null,
+        [Description("Optional invert sculpt normals flag.") ] bool? invert = null,
+        [Description("Optional mirror sculpt flag.") ] bool? mirror = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.SetPrimSculptParamsAsync(localId, enabled, textureId, sculptType, invert, mirror, cancellationToken);
     }
@@ -1656,8 +1656,8 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> PrimTake(
         [Description("Comma-separated local IDs to take.")] string localIdsCsv,
         [Description("True = take copy, false = take (move).") ] bool takeCopy,
-        [Description("Optional destination inventory folder UUID. If omitted, default Objects folder is used.")] string? destinationFolderId,
-        CancellationToken cancellationToken)
+        [Description("Optional destination inventory folder UUID. If omitted, default Objects folder is used.")] string? destinationFolderId = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.PrimTakeAsync(localIdsCsv, takeCopy, destinationFolderId, cancellationToken);
     }
@@ -1673,10 +1673,10 @@ internal sealed class BotMcpTools
         [Description("Yaw in degrees.")] float yawDegrees,
         [Description("Select the object after rez when true (requires waitForObject).") ] bool selectAfterRez,
         [Description("Wait for simulator object confirmation before returning.")] bool waitForObject,
-        [Description("Optional post-rez scale X. Set all scale fields together or leave all null.")] float? scaleX,
-        [Description("Optional post-rez scale Y. Set all scale fields together or leave all null.")] float? scaleY,
-        [Description("Optional post-rez scale Z. Set all scale fields together or leave all null.")] float? scaleZ,
-        CancellationToken cancellationToken)
+        [Description("Optional post-rez scale X. Set all scale fields together or leave all null.")] float? scaleX = null,
+        [Description("Optional post-rez scale Y. Set all scale fields together or leave all null.")] float? scaleY = null,
+        [Description("Optional post-rez scale Z. Set all scale fields together or leave all null.")] float? scaleZ = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.PrimRezFromInventoryAsync(
             itemId,
@@ -1715,13 +1715,13 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Discover objects by parcel and ownership/status filters (owner, scripted, physical).")]
     public Task<DataToolResult> PrimQueryObjects(
-        [Description("Optional parcel local ID filter.")] int? parcelLocalId,
-        [Description("Optional owner avatar UUID filter.")] string? ownerId,
-        [Description("Optional scripted filter: true=only scripted, false=only non-scripted, null=either.")] bool? scriptedOnly,
-        [Description("Optional physics filter: true=only physical, false=only non-physical, null=either.")] bool? physicalOnly,
         [Description("Maximum results to return (1..2000).") ] int maxResults,
         [Description("When parcelLocalId is set, refresh parcel map first.")] bool forceRefreshParcelMap,
-        CancellationToken cancellationToken)
+        [Description("Optional parcel local ID filter.")] int? parcelLocalId = null,
+        [Description("Optional owner avatar UUID filter.")] string? ownerId = null,
+        [Description("Optional scripted filter: true=only scripted, false=only non-scripted, null=either.")] bool? scriptedOnly = null,
+        [Description("Optional physics filter: true=only physical, false=only non-physical, null=either.")] bool? physicalOnly = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.PrimQueryObjectsAsync(
             parcelLocalId,
@@ -1736,9 +1736,9 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Request pay price information for an in-world object so payment options can be validated before paying/buying.")]
     public Task<DataToolResult> PrimRequestPayPrice(
         [Description("Prim local ID in current simulator cache.")] uint localId,
-        [Description("Optional object UUID override. If omitted, resolves from localId.")] string? objectId,
-        [Description("Wait timeout for pay price reply in milliseconds (250..15000).") ] int waitTimeoutMs,
-        CancellationToken cancellationToken)
+        [Description("Optional object UUID override. If omitted, resolves from localId.")] string? objectId = null,
+        [Description("Wait timeout for pay price reply in milliseconds (250..15000).") ] int waitTimeoutMs = default,
+        CancellationToken cancellationToken = default)
     {
         return _bot.PrimRequestPayPriceAsync(localId, objectId, waitTimeoutMs, cancellationToken);
     }
@@ -1748,9 +1748,9 @@ internal sealed class BotMcpTools
         [Description("Prim local ID in current simulator cache.")] uint localId,
         [Description("Sale type expected on the object: Original, Copy, or Contents.")] string saleType,
         [Description("Expected sale price in L$ (0 allowed).") ] int price,
-        [Description("Optional destination inventory folder UUID.")] string? categoryFolderId,
-        [Description("Optional group UUID to associate with the purchase; defaults to active group.")] string? activeGroupId,
-        CancellationToken cancellationToken)
+        [Description("Optional destination inventory folder UUID.")] string? categoryFolderId = null,
+        [Description("Optional group UUID to associate with the purchase; defaults to active group.")] string? activeGroupId = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.PrimBuyAsync(localId, saleType, price, categoryFolderId, activeGroupId, cancellationToken);
     }
@@ -1769,28 +1769,28 @@ internal sealed class BotMcpTools
         [Description("Target type: avatar, object, or group.")] string targetType,
         [Description("Target UUID.")] string targetId,
         [Description("Amount in L$ (must be > 0).") ] int amount,
-        [Description("Optional transaction description/memo.")] string? description,
-        CancellationToken cancellationToken)
+        [Description("Optional transaction description/memo.")] string? description = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.PayAsync(targetType, targetId, amount, description, cancellationToken);
     }
 
-    [McpServerTool, Description("List inventory entries under a folder UUID (or root if omitted), with optional filtering and cursor pagination.")]
+    [McpServerTool, Description("List inventory entries under a folder UUID/path (or root if omitted), with optional filtering and cursor pagination.")]
     public Task<InventoryQueryResult> InventoryList(
-        [Description("Optional folder UUID. Leave empty for inventory root.")] string? folderId,
-        [Description("True to recurse into subfolders.")] bool recursive,
-        [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults,
-        [Description("Optional case-insensitive substring filter applied to entry names.")] string? nameContains,
-        [Description("Optional type filter (matches kind/assetType/inventoryType, case-insensitive).") ] string? type,
-        [Description("Optional lower-bound creation timestamp (ISO-8601 UTC).")] string? createdAfterUtc,
-        [Description("Optional upper-bound creation timestamp (ISO-8601 UTC).")] string? createdBeforeUtc,
-        [Description("Optional creator avatar UUID filter (items only).") ] string? creatorId,
-        [Description("Optional cursor from a prior InventoryList response.")] string? cursor,
-        [Description("Page size for this response (1..500).") ] int pageSize,
-        CancellationToken cancellationToken)
+        [Description("True to recurse into subfolders.")] bool recursive = false,
+        [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults = 25,
+        [Description("Page size for this response (1..500).") ] int pageSize = 25,
+        [Description("Optional inventory folder UUID or slash-separated path (e.g. 'My Folder/Sub Folder'). Leave empty for inventory root.")] string? folderIdOrPath = null,
+        [Description("Optional case-insensitive substring filter applied to entry names.")] string? nameContains = null,
+        [Description("Optional type filter (matches kind/assetType/inventoryType, case-insensitive).") ] string? type = null,
+        [Description("Optional lower-bound creation timestamp (ISO-8601 UTC).") ] string? createdAfterUtc = null,
+        [Description("Optional upper-bound creation timestamp (ISO-8601 UTC).") ] string? createdBeforeUtc = null,
+        [Description("Optional creator avatar UUID filter (items only).") ] string? creatorId = null,
+        [Description("Optional cursor from a prior InventoryList response.")] string? cursor = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.InventoryListAsync(
-            folderId,
+            folderIdOrPath,
             recursive,
             maxResults,
             nameContains,
@@ -1803,23 +1803,23 @@ internal sealed class BotMcpTools
             cancellationToken);
     }
 
-    [McpServerTool, Description("Create a new inventory folder under a parent folder (or root if omitted).")]
+    [McpServerTool, Description("Create a new inventory folder under a parent folder UUID/path (or root if omitted).")]
     public Task<BotToolResult> InventoryCreateFolder(
-        [Description("Optional parent folder UUID. Leave empty for inventory root.")] string? parentFolderId,
         [Description("Folder name.")] string name,
-        [Description("Preferred folder type (optional, defaults to None).") ] string? preferredType,
-        CancellationToken cancellationToken)
+        [Description("Optional parent folder UUID or slash-separated path. Leave empty for inventory root.")] string? parentFolderIdOrPath = null,
+        [Description("Preferred folder type (optional, defaults to None).") ] string? preferredType = null,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.InventoryCreateFolderAsync(parentFolderId, name, preferredType, cancellationToken);
+        return _bot.InventoryCreateFolderAsync(parentFolderIdOrPath, name, preferredType, cancellationToken);
     }
 
-    [McpServerTool, Description("Rename an inventory folder by UUID.")]
+    [McpServerTool, Description("Rename an inventory folder by UUID or slash-separated path.")]
     public Task<BotToolResult> InventoryRenameFolder(
-        [Description("Inventory folder UUID to rename.")] string folderId,
+        [Description("Inventory folder UUID or slash-separated path to rename.")] string folderIdOrPath,
         [Description("New folder name.")] string newName,
         CancellationToken cancellationToken)
     {
-        return _bot.InventoryRenameFolderAsync(folderId, newName, cancellationToken);
+        return _bot.InventoryRenameFolderAsync(folderIdOrPath, newName, cancellationToken);
     }
 
     [McpServerTool, Description("Rename an inventory item by UUID.")]
@@ -1831,52 +1831,52 @@ internal sealed class BotMcpTools
         return _bot.InventoryRenameItemAsync(itemId, newName, cancellationToken);
     }
 
-    [McpServerTool, Description("Move an inventory folder to a new parent folder.")]
+    [McpServerTool, Description("Move an inventory folder (UUID/path) to a new parent folder (UUID/path).")]
     public Task<BotToolResult> InventoryMoveFolder(
-        [Description("Inventory folder UUID to move.")] string folderId,
-        [Description("Destination parent folder UUID.")] string destinationParentFolderId,
+        [Description("Inventory folder UUID or slash-separated path to move.")] string folderIdOrPath,
+        [Description("Destination parent folder UUID or slash-separated path.")] string destinationParentFolderIdOrPath,
         CancellationToken cancellationToken)
     {
-        return _bot.InventoryMoveFolderAsync(folderId, destinationParentFolderId, cancellationToken);
+        return _bot.InventoryMoveFolderAsync(folderIdOrPath, destinationParentFolderIdOrPath, cancellationToken);
     }
 
-    [McpServerTool, Description("Move an inventory item to a destination folder.")]
+    [McpServerTool, Description("Move an inventory item to a destination folder UUID/path.")]
     public Task<BotToolResult> InventoryMoveItem(
         [Description("Inventory item UUID to move.")] string itemId,
-        [Description("Destination folder UUID.")] string destinationFolderId,
+        [Description("Destination folder UUID or slash-separated path.")] string destinationFolderIdOrPath,
         CancellationToken cancellationToken)
     {
-        return _bot.InventoryMoveItemAsync(itemId, destinationFolderId, cancellationToken);
+        return _bot.InventoryMoveItemAsync(itemId, destinationFolderIdOrPath, cancellationToken);
     }
 
-    [McpServerTool, Description("Move multiple inventory items to a destination folder.")]
+    [McpServerTool, Description("Move multiple inventory items to a destination folder UUID/path.")]
     public Task<BotToolResult> InventoryMoveMany(
         [Description("Comma-separated inventory item UUIDs.")] string itemIdsCsv,
-        [Description("Destination folder UUID.")] string destinationFolderId,
+        [Description("Destination folder UUID or slash-separated path.")] string destinationFolderIdOrPath,
         CancellationToken cancellationToken)
     {
-        return _bot.InventoryMoveManyAsync(itemIdsCsv, destinationFolderId, cancellationToken);
+        return _bot.InventoryMoveManyAsync(itemIdsCsv, destinationFolderIdOrPath, cancellationToken);
     }
 
-    [McpServerTool, Description("Copy an inventory item to another folder, optionally with a new name.")]
+    [McpServerTool, Description("Copy an inventory item to another folder UUID/path, optionally with a new name.")]
     public Task<BotToolResult> InventoryCopyItem(
         [Description("Source inventory item UUID.")] string itemId,
-        [Description("Destination folder UUID.")] string destinationFolderId,
-        [Description("Optional new name for the copied item.")] string? newName,
-        CancellationToken cancellationToken)
+        [Description("Destination folder UUID or slash-separated path.")] string destinationFolderIdOrPath,
+        [Description("Optional new name for the copied item.")] string? newName = null,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.InventoryCopyItemAsync(itemId, destinationFolderId, newName, cancellationToken);
+        return _bot.InventoryCopyItemAsync(itemId, destinationFolderIdOrPath, newName, cancellationToken);
     }
 
     [McpServerTool, Description("Create an inventory link item pointing to another inventory item.")]
     public Task<BotToolResult> InventoryLinkItem(
         [Description("Source inventory item UUID to link to.")] string itemId,
-        [Description("Destination folder UUID for the link item.")] string destinationFolderId,
-        [Description("Optional link item name. Defaults to source item name.")] string? linkName,
-        [Description("Optional link item description. Defaults to source item description.")] string? linkDescription,
-        CancellationToken cancellationToken)
+        [Description("Destination folder UUID or slash-separated path for the link item.")] string destinationFolderIdOrPath,
+        [Description("Optional link item name. Defaults to source item name.")] string? linkName = null,
+        [Description("Optional link item description. Defaults to source item description.")] string? linkDescription = null,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.InventoryLinkItemAsync(itemId, destinationFolderId, linkName, linkDescription, cancellationToken);
+        return _bot.InventoryLinkItemAsync(itemId, destinationFolderIdOrPath, linkName, linkDescription, cancellationToken);
     }
 
     [McpServerTool, Description("Give one inventory item to another avatar UUID.")]
@@ -1889,27 +1889,29 @@ internal sealed class BotMcpTools
         return _bot.InventoryGiveItemAsync(itemId, recipientAgentId, withBeamEffect, cancellationToken);
     }
 
-    [McpServerTool, Description("Give an inventory folder to another avatar UUID.")]
+    [McpServerTool, Description("Give an inventory folder (UUID/path) to another avatar UUID.")]
     public Task<BotToolResult> InventoryGiveFolder(
-        [Description("Inventory folder UUID to send.")] string folderId,
+        [Description("Inventory folder UUID or slash-separated path to send.")] string folderIdOrPath,
         [Description("Recipient avatar UUID.")] string recipientAgentId,
         [Description("True to show transfer beam effect.")] bool withBeamEffect,
         CancellationToken cancellationToken)
     {
-        return _bot.InventoryGiveFolderAsync(folderId, recipientAgentId, withBeamEffect, cancellationToken);
+        return _bot.InventoryGiveFolderAsync(folderIdOrPath, recipientAgentId, withBeamEffect, cancellationToken);
     }
 
     [McpServerTool, Description("Import an IAR (Inventory Archive) file from a URL into bot inventory, with optional transfer to another agent.")]
     public async Task<BotToolResult> ImportIarUrl(
-        [Description("URL where the IAR file will be imported from (can be anything, doesn't have to end in .oar).")]
+        [Description("URL where the IAR file will be imported from (can be anything, doesn't have to end in .oar). OutWorldz URLs are treated specially to extract the real filename from the File= query parameter.")]
         string url,
-        [Description("Optional inventory folder path where the IAR contents will be imported; defaults to 'Inventory/Imports/<filename>' if blank.")]
-        string? inventoryPath,
+        [Description("Optional inventory folder path where the IAR contents will be imported; defaults to 'Imports/[filename]' if blank.")]
+        string? inventoryPath = null,
         [Description("Optional target agent UUID; if provided, the imported folder will be given to this agent with a beam effect.")]
-        string? targetAgentId,
+        string? targetAgentId = null,
         [Description("Optional boolean; if true and folder is given to another agent, the folder will be deleted from bot's inventory after transfer.")]
-        bool? deleteAfterSending,
-        CancellationToken cancellationToken)
+        bool? deleteAfterSending = null,
+        [Description("Optional boolean; if true and target path exists, it will be moved to Trash, otherwise an error will be returned.")]
+        bool? replaceExistingFolder = null,
+        CancellationToken cancellationToken = default)
     {
         var botFirst = _options.BotFirstName?.Trim() ?? string.Empty;
         var botLast = _options.BotLastName?.Trim() ?? string.Empty;
@@ -1917,6 +1919,221 @@ internal sealed class BotMcpTools
         if (botFirst.Length == 0 || botLast.Length == 0)
         {
             return BotToolResult.Fail("Bot identity is not configured (BotFirstName/BotLastName missing).");
+        }
+        
+
+        // Extract the filename from the URL to determine the imported folder name.
+        // Outworldz can proxy IAR downloads via sculpt-save.plx?File=..., where File holds the real archive path.
+        static string? TryGetQueryParameter(string query, string key)
+        {
+            foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var split = pair.Split('=', 2);
+                if (split.Length == 0)
+                {
+                    continue;
+                }
+
+                var name = Uri.UnescapeDataString(split[0].Replace('+', ' '));
+                if (!name.Equals(key, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (split.Length == 1)
+                {
+                    return string.Empty;
+                }
+
+                return Uri.UnescapeDataString(split[1].Replace('+', ' '));
+            }
+
+            return null;
+        }
+
+        var urlTrim = url.Trim();
+        var filename = string.Empty;
+
+        if (Uri.TryCreate(urlTrim, UriKind.Absolute, out var parsedUrl))
+        {
+            filename = Path.GetFileName(parsedUrl.AbsolutePath);
+
+            if (filename.Equals("sculpt-save.plx", StringComparison.OrdinalIgnoreCase))
+            {
+                var fileParam = TryGetQueryParameter(parsedUrl.Query.TrimStart('?'), "File");
+                if (!string.IsNullOrWhiteSpace(fileParam))
+                {
+                    filename = Path.GetFileName(fileParam);
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(filename))
+        {
+            filename = Path.GetFileName(urlTrim.Split('?')[0]);
+        }
+
+        // Fallback for non-absolute URLs that still use sculpt-save.plx?File=...
+        if (filename.Equals("sculpt-save.plx", StringComparison.OrdinalIgnoreCase))
+        {
+            var queryStart = urlTrim.IndexOf('?');
+            if (queryStart >= 0 && queryStart < urlTrim.Length - 1)
+            {
+                var fileParam = TryGetQueryParameter(urlTrim[(queryStart + 1)..], "File");
+                if (!string.IsNullOrWhiteSpace(fileParam))
+                {
+                    filename = Path.GetFileName(fileParam);
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(filename))
+        {
+            return BotToolResult.Fail("Could not extract filename from URL for folder lookup.");
+        }
+
+        // Remove .oar extension if present for folder name
+        var folderName = filename.EndsWith(".iar", StringComparison.OrdinalIgnoreCase)
+            ? filename.Substring(0, filename.Length - 4)
+            : filename;
+        
+        if (string.IsNullOrWhiteSpace(inventoryPath))
+        {
+            inventoryPath = $"Imports/{folderName}";
+        }
+
+        inventoryPath = inventoryPath.Trim().Replace('\\', '/');
+
+        var pathParts = inventoryPath
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+
+        if (pathParts.Count == 0)
+        {
+            return BotToolResult.Fail("inventoryPath must contain at least one folder name.");
+        }
+
+        async Task<InventoryQueryResult> ListFolderAsync(string? parentFolderId)
+        {
+            return await _bot.InventoryListAsync(
+                parentFolderId,
+                false,
+                1000,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                200,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        async Task<(bool Exists, string? FolderId, string? Error)> TryResolveFolderPathAsync(IReadOnlyList<string> segments)
+        {
+            string? parentFolderId = null;
+
+            foreach (var segment in segments)
+            {
+                var listing = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
+                if (!listing.Ok)
+                {
+                    return (false, null, listing.Message);
+                }
+
+                var child = listing.Entries.FirstOrDefault(e =>
+                    e.Kind == "folder" &&
+                    string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
+
+                if (child == null)
+                {
+                    return (false, null, null);
+                }
+
+                parentFolderId = child.Id;
+            }
+
+            return (true, parentFolderId, null);
+        }
+
+        async Task<BotToolResult?> EnsureFolderPathExistsAsync(IReadOnlyList<string> segments)
+        {
+            string? parentFolderId = null;
+
+            foreach (var segment in segments)
+            {
+                var listing = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
+                if (!listing.Ok)
+                {
+                    return BotToolResult.Fail($"Failed to list inventory folder while preparing import path: {listing.Message}");
+                }
+
+                var child = listing.Entries.FirstOrDefault(e =>
+                    e.Kind == "folder" &&
+                    string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
+
+                if (child != null)
+                {
+                    parentFolderId = child.Id;
+                    continue;
+                }
+
+                var createResult = await _bot.InventoryCreateFolderAsync(parentFolderId, segment, null, cancellationToken).ConfigureAwait(false);
+                if (!createResult.Ok)
+                {
+                    return BotToolResult.Fail($"Failed to create inventory folder '{segment}' in '{inventoryPath}': {createResult.Message}");
+                }
+
+                // Re-list to resolve the UUID of the newly created folder for the next path segment.
+                var afterCreate = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
+                if (!afterCreate.Ok)
+                {
+                    return BotToolResult.Fail($"Created folder '{segment}', but failed to verify it in inventory: {afterCreate.Message}");
+                }
+
+                var createdChild = afterCreate.Entries.FirstOrDefault(e =>
+                    e.Kind == "folder" &&
+                    string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
+
+                if (createdChild == null)
+                {
+                    return BotToolResult.Fail($"Created folder '{segment}', but it could not be resolved in local inventory.");
+                }
+
+                parentFolderId = createdChild.Id;
+            }
+
+            return null;
+        }
+
+        var existingPath = await TryResolveFolderPathAsync(pathParts).ConfigureAwait(false);
+        if (existingPath.Error != null)
+        {
+            return BotToolResult.Fail($"Failed to inspect inventory path '{inventoryPath}': {existingPath.Error}");
+        }
+
+        if (existingPath.Exists)
+        {
+            if (replaceExistingFolder != true)
+            {
+                return BotToolResult.Fail(
+                    $"Import path '{inventoryPath}' already exists. Set replaceExistingFolder=true to move it to Trash before import.");
+            }
+
+            var deleteExisting = await _bot.InventoryDeleteFolderAsync(existingPath.FolderId!, cancellationToken).ConfigureAwait(false);
+            if (!deleteExisting.Ok)
+            {
+                return BotToolResult.Fail($"Failed to replace existing inventory path '{inventoryPath}': {deleteExisting.Message}");
+            }
+        }
+
+        var ensurePath = await EnsureFolderPathExistsAsync(pathParts).ConfigureAwait(false);
+        if (ensurePath != null)
+        {
+            return ensurePath;
         }
 
         // Call spawner API to import OAR
@@ -1938,24 +2155,6 @@ internal sealed class BotMcpTools
             return BotToolResult.Fail("targetAgentId is not a valid UUID.");
         }
 
-        // Extract the filename from the URL to determine the imported folder name
-        var urlTrim = url.Trim();
-        var filename = Path.GetFileName(urlTrim);
-        if (string.IsNullOrWhiteSpace(filename) || filename.Contains("?"))
-        {
-            filename = Path.GetFileName(urlTrim.Split('?')[0]);
-        }
-
-        if (string.IsNullOrWhiteSpace(filename))
-        {
-            return BotToolResult.Fail("Could not extract filename from URL for folder lookup.");
-        }
-
-        // Remove .oar extension if present for folder name
-        var folderName = filename.EndsWith(".oar", StringComparison.OrdinalIgnoreCase)
-            ? filename.Substring(0, filename.Length - 4)
-            : filename;
-
         // Wait a moment for inventory to update
         await Task.Delay(500, cancellationToken).ConfigureAwait(false);
 
@@ -1964,7 +2163,7 @@ internal sealed class BotMcpTools
             null,
             true,
             1000,
-            folderName,
+            inventoryPath,
             null,
             null,
             null,
@@ -1978,11 +2177,10 @@ internal sealed class BotMcpTools
             return BotToolResult.Fail($"IAR imported successfully, but could not locate imported folder: {inventory.Message}");
         }
 
-        // Find the imported folder in entries
+        // Find the first imported folder in entries
         string? importedFolderId = null;
         var folderEntry = inventory.Entries.FirstOrDefault(e =>
-            e.Kind == "folder" &&
-            string.Equals(e.Name, folderName, StringComparison.OrdinalIgnoreCase));
+            e.Kind == "folder");
 
         if (folderEntry != null)
         {
@@ -2018,7 +2216,7 @@ internal sealed class BotMcpTools
                 return BotToolResult.Fail($"IAR imported and transferred, but folder deletion failed: {deleteResult.Message}");
             }
 
-            return BotToolResult.OkResult($"IAR imported from URL, transferred to agent {targetAgentId.Trim()}, and folder deleted.");
+            return BotToolResult.OkResult($"IAR imported from URL, transferred to agent {targetAgentId.Trim()}, and folder moved to Trash.");
         }
 
         return BotToolResult.OkResult($"IAR imported from URL and transferred to agent {targetAgentId.Trim()}.");
@@ -2032,12 +2230,18 @@ internal sealed class BotMcpTools
         return _bot.InventoryDeleteItemAsync(itemId, cancellationToken);
     }
 
-    [McpServerTool, Description("Delete an inventory folder by UUID.")]
+    [McpServerTool, Description("Move an inventory folder to Trash by slash-separated path or UUID. This is a soft delete; items are moved to Trash before being fully deleted.")]
     public Task<BotToolResult> InventoryDeleteFolder(
-        [Description("Inventory folder UUID to delete.")] string folderId,
-        CancellationToken cancellationToken)
+        [Description("Inventory folder UUID or slash-separated path (e.g. 'My Folder/Sub Folder').")] string folderIdOrPath,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.InventoryDeleteFolderAsync(folderId, cancellationToken);
+        return _bot.InventoryDeleteFolderAsync(folderIdOrPath, cancellationToken);
+    }
+
+    [McpServerTool, Description("Permanently delete all contents of the inventory Trash folder.")]
+    public Task<BotToolResult> InventoryEmptyTrash(CancellationToken cancellationToken)
+    {
+        return _bot.InventoryEmptyTrashAsync(cancellationToken);
     }
 
     [McpServerTool, Description("Delete multiple inventory items by comma-separated UUID list.")]
@@ -2051,9 +2255,9 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("List task inventory (contents) for an in-world object. Provide objectLocalId, objectId, or both.")]
     public Task<InventoryQueryResult> TaskInventoryList(
         [Description("Object local ID in current simulator (0 allowed when objectId is provided).") ] uint objectLocalId,
-        [Description("Optional object UUID; when local ID is omitted or stale, this is used to resolve the current local ID from simulator cache.")] string? objectId,
-        [Description("Maximum number of results (1..2000).") ] int maxResults,
-        CancellationToken cancellationToken)
+        [Description("Optional object UUID; when local ID is omitted or stale, this is used to resolve the current local ID from simulator cache.")] string? objectId = null,
+        [Description("Maximum number of results (1..2000).") ] int maxResults = default,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TaskInventoryListAsync(objectLocalId, objectId, maxResults, cancellationToken);
     }
@@ -2062,11 +2266,11 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> TaskInventoryTake(
         [Description("Object local ID in current simulator (0 allowed when objectId is provided).") ] uint objectLocalId,
         [Description("Task-inventory item UUID on the object.")] string taskItemId,
-        [Description("Optional destination folder UUID. If omitted, uses default folder for item asset type.")] string? destinationFolderId,
-        [Description("Optional object UUID; when local ID is omitted or stale, this is used to resolve the current local ID from simulator cache.")] string? objectId,
-        CancellationToken cancellationToken)
+        [Description("Optional destination folder UUID or slash-separated path. If omitted, uses default folder for item asset type.")] string? destinationFolderIdOrPath = null,
+        [Description("Optional object UUID; when local ID is omitted or stale, this is used to resolve the current local ID from simulator cache.")] string? objectId = null,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.TaskInventoryTakeAsync(objectLocalId, taskItemId, destinationFolderId, objectId, cancellationToken);
+        return _bot.TaskInventoryTakeAsync(objectLocalId, taskItemId, destinationFolderIdOrPath, objectId, cancellationToken);
     }
 
     [McpServerTool, Description("Upload a local file path or HTTP/HTTPS URL as a new inventory item asset.")]
@@ -2076,10 +2280,10 @@ internal sealed class BotMcpTools
         [Description("Inventory type (e.g. texture, notecard, lsl, animation, sound) or 'auto' to infer from extension.") ] string inventoryType,
         [Description("New inventory item name.")] string name,
         [Description("New inventory item description (empty allowed).") ] string description,
-        [Description("Optional destination folder UUID.")] string? folderId,
-        CancellationToken cancellationToken)
+        [Description("Optional destination folder UUID or slash-separated path.")] string? folderIdOrPath = null,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.AssetUploadInventoryAsync(source, assetType, inventoryType, name, description, folderId, cancellationToken);
+        return _bot.AssetUploadInventoryAsync(source, assetType, inventoryType, name, description, folderIdOrPath, cancellationToken);
     }
 
     [McpServerTool, Description("Upload a glTF/glb model as a mesh object using a Collada-free pipeline.")]
@@ -2107,8 +2311,8 @@ internal sealed class BotMcpTools
         [Description("Asset UUID.")] string assetId,
         [Description("Asset type name.")] string assetType,
         [Description("Output mode: both, base64, tempfile.")] string outputMode,
-        [Description("Optional filename hint when output includes tempfile.")] string? fileNameHint,
-        CancellationToken cancellationToken)
+        [Description("Optional filename hint when output includes tempfile.")] string? fileNameHint = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.AssetDownloadAsync(assetId, assetType, outputMode, fileNameHint, cancellationToken);
     }
@@ -2117,8 +2321,8 @@ internal sealed class BotMcpTools
     public Task<AssetDownloadResult> TextureDownload(
         [Description("Texture UUID.")] string textureId,
         [Description("Output mode: both, base64, tempfile.")] string outputMode,
-        [Description("Optional filename hint when output includes tempfile.")] string? fileNameHint,
-        CancellationToken cancellationToken)
+        [Description("Optional filename hint when output includes tempfile.")] string? fileNameHint = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.TextureDownloadAsync(textureId, outputMode, fileNameHint, cancellationToken);
     }
@@ -2127,11 +2331,11 @@ internal sealed class BotMcpTools
     public BotToolResult InventoryOfferPolicyRuleAdd(
         [Description("Rule name.")] string name,
         [Description("Action: accept or decline.")] string action,
-        [Description("Optional exact sender avatar UUID match.")] string? senderAgentId,
-        [Description("Optional sender name substring match (case-insensitive).") ] string? senderNameContains,
-        [Description("Optional exact asset type match.")] string? assetType,
-        [Description("Optional match on task-origin offers (true/false).") ] bool? fromTask,
-        [Description("Optional destination folder UUID override for accepted offers.")] string? destinationFolderId)
+        [Description("Optional exact sender avatar UUID match.")] string? senderAgentId = null,
+        [Description("Optional sender name substring match (case-insensitive).") ] string? senderNameContains = null,
+        [Description("Optional exact asset type match.")] string? assetType = null,
+        [Description("Optional match on task-origin offers (true/false).") ] bool? fromTask = null,
+        [Description("Optional destination folder UUID override for accepted offers.")] string? destinationFolderId = null)
     {
         return _bot.InventoryOfferPolicyRuleAdd(name, action, senderAgentId, senderNameContains, assetType, fromTask, destinationFolderId);
     }
@@ -2157,12 +2361,12 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Create an MCP runtime event subscription for filtered channels/types.")]
     public EventStreamSubscriptionResult EventStreamSubscribe(
-        [Description("Optional channels list: general, object, teleport, all. Delimit with comma/space/pipe.")] string? channels,
-        [Description("Optional event-type filter list. Delimit with comma/space/pipe.")] string? eventTypes,
-        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters,
-        [Description("Optional object UUID filter list (comma/pipe/semicolon delimited).") ] string? objectIds,
-        [Description("Optional object local ID filter list (comma/pipe/semicolon delimited).") ] string? objectLocalIds,
-        [Description("Optional chat source filter list (name or UUID; comma/pipe/semicolon delimited).") ] string? chatSources)
+        [Description("Optional channels list: general, object, teleport, all. Delimit with comma/space/pipe.")] string? channels = null,
+        [Description("Optional event-type filter list. Delimit with comma/space/pipe.")] string? eventTypes = null,
+        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
+        [Description("Optional object UUID filter list (comma/pipe/semicolon delimited).") ] string? objectIds = null,
+        [Description("Optional object local ID filter list (comma/pipe/semicolon delimited).") ] string? objectLocalIds = null,
+        [Description("Optional chat source filter list (name or UUID; comma/pipe/semicolon delimited).") ] string? chatSources = null)
     {
         return _bot.EventStreamSubscribe(channels, eventTypes, radiusMeters, objectIds, objectLocalIds, chatSources);
     }
@@ -2176,17 +2380,17 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Poll MCP runtime events with cursoring; supports long-poll wait for reactive workflows.")]
     public Task<EventStreamPollResult> EventStreamPoll(
-        [Description("Optional subscription ID. If provided, defaults to that subscription's channels/types/cursor.")] string? subscriptionId,
-        [Description("Optional cursor returned by prior poll. Omit to use subscription cursor (or 0).") ] string? cursor,
-        [Description("Optional channels override: general, object, teleport, all.")] string? channels,
-        [Description("Optional event-type filter override.")] string? eventTypes,
-        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters,
-        [Description("Optional object UUID filter override list.")] string? objectIds,
-        [Description("Optional object local ID filter override list.")] string? objectLocalIds,
-        [Description("Optional chat source filter override list.")] string? chatSources,
         [Description("Maximum events to return (1..500).") ] int maxResults,
         [Description("Long-poll wait timeout in milliseconds (0..30000).") ] int waitMs,
-        CancellationToken cancellationToken)
+        [Description("Optional subscription ID. If provided, defaults to that subscription's channels/types/cursor.")] string? subscriptionId = null,
+        [Description("Optional cursor returned by prior poll. Omit to use subscription cursor (or 0).") ] string? cursor = null,
+        [Description("Optional channels override: general, object, teleport, all.")] string? channels = null,
+        [Description("Optional event-type filter override.")] string? eventTypes = null,
+        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
+        [Description("Optional object UUID filter override list.")] string? objectIds = null,
+        [Description("Optional object local ID filter override list.")] string? objectLocalIds = null,
+        [Description("Optional chat source filter override list.")] string? chatSources = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.EventStreamPollAsync(
             subscriptionId,
@@ -2205,13 +2409,13 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Query a short historical window of retained runtime events for debugging.")]
     public EventStreamHistoryResult EventStreamHistory(
         [Description("Window size in seconds (1..1800).") ] int lastSeconds,
-        [Description("Optional channels list: general, object, teleport, all.")] string? channels,
-        [Description("Optional event-type filter list.")] string? eventTypes,
-        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters,
-        [Description("Optional object UUID filter list.")] string? objectIds,
-        [Description("Optional object local ID filter list.")] string? objectLocalIds,
-        [Description("Optional chat source filter list.")] string? chatSources,
-        [Description("Maximum events to return (1..500).") ] int maxResults)
+        [Description("Optional channels list: general, object, teleport, all.")] string? channels = null,
+        [Description("Optional event-type filter list.")] string? eventTypes = null,
+        [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
+        [Description("Optional object UUID filter list.")] string? objectIds = null,
+        [Description("Optional object local ID filter list.")] string? objectLocalIds = null,
+        [Description("Optional chat source filter list.")] string? chatSources = null,
+        [Description("Maximum events to return (1..500).") ] int maxResults = default)
     {
         return _bot.EventStreamHistory(channels, eventTypes, radiusMeters, objectIds, objectLocalIds, chatSources, lastSeconds, maxResults);
     }
@@ -2224,17 +2428,17 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Persist inventory-offer policy rules to JSON file.")]
     public Task<InventoryOfferPolicyResult> InventoryOfferPolicyRulesSave(
-        [Description("Optional target JSON file path; defaults to configured policy file.")] string? filePath,
-        CancellationToken cancellationToken)
+        [Description("Optional target JSON file path; defaults to configured policy file.")] string? filePath = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.InventoryOfferPolicyRulesSaveAsync(filePath, cancellationToken);
     }
 
     [McpServerTool, Description("Load inventory-offer policy rules from JSON file.")]
     public Task<InventoryOfferPolicyResult> InventoryOfferPolicyRulesLoad(
-        [Description("Optional source JSON file path; defaults to configured policy file.")] string? filePath,
         [Description("If true, replaces existing in-memory rules before loading.")] bool replaceExisting,
-        CancellationToken cancellationToken)
+        [Description("Optional source JSON file path; defaults to configured policy file.")] string? filePath = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.InventoryOfferPolicyRulesLoadAsync(filePath, replaceExisting, cancellationToken);
     }
@@ -2257,8 +2461,8 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Save the current outfit links into a new inventory folder snapshot.")]
     public Task<OutfitSaveResult> AppearanceSaveCurrentOutfit(
         [Description("Name for the new snapshot folder.")] string folderName,
-        [Description("Optional parent folder UUID. Empty uses Clothing folder when available.")] string? parentFolderId,
-        CancellationToken cancellationToken)
+        [Description("Optional parent folder UUID. Empty uses Clothing folder when available.")] string? parentFolderId = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceSaveCurrentOutfitAsync(folderName, parentFolderId, cancellationToken);
     }
@@ -2266,9 +2470,9 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Attach an inventory attachment/object item.")]
     public Task<BotToolResult> AppearanceAttachItem(
         [Description("Inventory item UUID.")] string itemId,
-        [Description("Optional attachment point enum name (e.g. Chest, RightHand).") ] string? attachmentPoint,
-        [Description("True to replace existing item on the point.")] bool replace,
-        CancellationToken cancellationToken)
+        [Description("Optional attachment point enum name (e.g. Chest, RightHand).") ] string? attachmentPoint = null,
+        [Description("True to replace existing item on the point.")] bool replace = default,
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceAttachItemAsync(itemId, attachmentPoint, replace, cancellationToken);
     }
@@ -2342,18 +2546,18 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Request transform updates for a worn attachment item (position/scale/rotation in euler degrees).")]
     public Task<AttachmentTransformResult> AppearanceSetAttachedItemTransform(
         [Description("Worn attachment inventory item UUID.")] string itemId,
-        [Description("Optional target position X.")] float? positionX,
-        [Description("Optional target position Y.")] float? positionY,
-        [Description("Optional target position Z.")] float? positionZ,
-        [Description("Optional target scale X.")] float? scaleX,
-        [Description("Optional target scale Y.")] float? scaleY,
-        [Description("Optional target scale Z.")] float? scaleZ,
-        [Description("Optional target roll in degrees.")] float? rollDegrees,
-        [Description("Optional target pitch in degrees.")] float? pitchDegrees,
-        [Description("Optional target yaw in degrees.")] float? yawDegrees,
-        [Description("True to edit only this child prim; false for whole linked object.")] bool childOnly,
-        [Description("True to request uniform scale when scale values are set.")] bool uniformScale,
-        CancellationToken cancellationToken)
+        [Description("Optional target position X.")] float? positionX = null,
+        [Description("Optional target position Y.")] float? positionY = null,
+        [Description("Optional target position Z.")] float? positionZ = null,
+        [Description("Optional target scale X.")] float? scaleX = null,
+        [Description("Optional target scale Y.")] float? scaleY = null,
+        [Description("Optional target scale Z.")] float? scaleZ = null,
+        [Description("Optional target roll in degrees.")] float? rollDegrees = null,
+        [Description("Optional target pitch in degrees.")] float? pitchDegrees = null,
+        [Description("Optional target yaw in degrees.")] float? yawDegrees = null,
+        [Description("True to edit only this child prim; false for whole linked object.")] bool childOnly = default,
+        [Description("True to request uniform scale when scale values are set.")] bool uniformScale = default,
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceSetAttachedItemTransformAsync(
             itemId,
@@ -2381,22 +2585,22 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("List avatar visual parameters (shape sliders and related values), including ranges and current values.")]
     public Task<AppearanceVisualParamsResult> AppearanceVisualParamsList(
-        [Description("Optional wearable category filter (e.g. shape, eyes, hair).") ] string? wearable,
-        [Description("Optional case-insensitive name filter (substring).") ] string? nameContains,
         [Description("True to return only directly editable group-0 parameters.") ] bool editableOnly,
-        CancellationToken cancellationToken)
+        [Description("Optional wearable category filter (e.g. shape, eyes, hair).") ] string? wearable = null,
+        [Description("Optional case-insensitive name filter (substring).") ] string? nameContains = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceVisualParamsListAsync(wearable, nameContains, editableOnly, cancellationToken);
     }
 
     [McpServerTool, Description("Set one avatar visual parameter by id or exact name and request a rebake.")]
     public Task<AppearanceVisualParamSetResult> AppearanceVisualParamSet(
-        [Description("Optional visual param ID. If not provided, paramName is required.") ] int? paramId,
-        [Description("Optional exact visual param name. Case-insensitive.") ] string? paramName,
-        [Description("Optional wearable filter when resolving paramName (e.g. shape).") ] string? wearable,
         [Description("Target value to apply.") ] float value,
         [Description("True to clamp out-of-range values to min/max; false to return validation error.") ] bool clampToRange,
-        CancellationToken cancellationToken)
+        [Description("Optional visual param ID. If not provided, paramName is required.") ] int? paramId = null,
+        [Description("Optional exact visual param name. Case-insensitive.") ] string? paramName = null,
+        [Description("Optional wearable filter when resolving paramName (e.g. shape).") ] string? wearable = null,
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceVisualParamSetAsync(paramId, paramName, wearable, value, clampToRange, cancellationToken);
     }
