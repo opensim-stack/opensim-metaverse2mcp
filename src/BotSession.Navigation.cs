@@ -106,8 +106,6 @@ internal sealed partial class BotSession
 
     public async Task<BotToolResult> TeleportToAsync(float x, float y, float z, string? regionName, CancellationToken cancellationToken)
     {
-        var target = ClampLocalPosition(new Vector3(x, y, z));
-
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var currentSim = client.Network.CurrentSim;
@@ -118,8 +116,12 @@ internal sealed partial class BotSession
 
             bool ok;
             string destinationLabel;
+            Vector3 target;
             if (string.IsNullOrWhiteSpace(regionName) || string.Equals(regionName, currentSim.Name, StringComparison.OrdinalIgnoreCase))
             {
+                // Clamp against the destination region's actual size
+                // (varregions exceed the legacy 256m bounds).
+                target = ClampLocalPosition(new Vector3(x, y, z), currentSim.SizeX, currentSim.SizeY);
                 destinationLabel = currentSim.Name;
                 ok = await client.Self.TeleportAsync(currentSim.Name, target, token).ConfigureAwait(false);
             }
@@ -131,6 +133,11 @@ internal sealed partial class BotSession
                     return BotToolResult.Fail($"Unable to resolve region '{regionName}' to a region handle.");
                 }
 
+                // GridRegion carries no size fields in LibreMetaverse 3.1.6, so
+                // the destination's extent is unknown before connecting. Clamp
+                // to the maximum varregion extent and let the destination
+                // simulator resolve the final landing point (viewer behavior).
+                target = ClampLocalPosition(new Vector3(x, y, z), MaxRegionExtent, MaxRegionExtent);
                 destinationLabel = $"{region.Value.Name} ({region.Value.RegionHandle})";
                 ok = await client.Self.TeleportAsync(region.Value.RegionHandle, target, token).ConfigureAwait(false);
             }
@@ -1750,11 +1757,29 @@ internal sealed partial class BotSession
         return false;
     }
 
-    private static Vector3 ClampLocalPosition(Vector3 pos)
+    private const uint MaxRegionExtent = 4096;
+
+    private Vector3 ClampLocalPosition(Vector3 pos)
     {
+        // Varregion-aware bounds for operations within the current
+        // region. Fall back to legacy 256m bounds when the size is unknown.
+        var sim = _client?.Network?.CurrentSim;
+        return ClampLocalPosition(pos, sim?.SizeX ?? 0, sim?.SizeY ?? 0);
+    }
+
+    private static Vector3 ClampLocalPosition(Vector3 pos, uint sizeX, uint sizeY)
+    {
+        var maxX = 255f;
+        var maxY = 255f;
+        if (sizeX > 0 && sizeY > 0)
+        {
+            maxX = Math.Max(1f, sizeX - 1f);
+            maxY = Math.Max(1f, sizeY - 1f);
+        }
+
         return new Vector3(
-            Math.Clamp(pos.X, 1f, 255f),
-            Math.Clamp(pos.Y, 1f, 255f),
+            Math.Clamp(pos.X, 1f, maxX),
+            Math.Clamp(pos.Y, 1f, maxY),
             Math.Clamp(pos.Z, 0f, 4096f));
     }
 
