@@ -27,6 +27,7 @@ internal static class ConfigLoader
             BotLoginTimeoutSeconds = ParseInt(FirstDefined("OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30),
             WearFolderName = Env("WEAR_FOLDER_NAME") ?? string.Empty,
             OpencodeScheme = Env("OPENCODE_SCHEME") ?? "http",
+            OpencodeEnabled = ParseBool(Env("OPENCODE_ENABLED"), true),
             OpencodeHost = Env("OPENCODE_HOST") ?? "opensim-opencode",
             OpencodePort = ParseInt(Env("OPENCODE_PORT"), 8998),
             OpencodeUsername = Env("OPENCODE_SERVER_USERNAME"),
@@ -98,6 +99,7 @@ internal static class ConfigLoader
             "  --spawner-token <token>        Optional Spawner API bearer token (env: SPAWNER_TOKEN)",
             string.Empty,
             "Opencode chat bridge:",
+            "  --opencode-enabled <bool>      Enable built-in opencode brain (env: OPENCODE_ENABLED, default: true)",
             "  --opencode-scheme <http|https> Opencode URL scheme (env: OPENCODE_SCHEME, default: http)",
             "  --opencode-host <host>         Opencode server host (env: OPENCODE_HOST, default: opensim-opencode)",
             "  --opencode-port <port>         Opencode server port (env: OPENCODE_PORT, default: 8998)",
@@ -234,6 +236,9 @@ internal static class ConfigLoader
                     break;
                 case "--spawner-token":
                     options.SpawnerToken = RequireValue(args, ref i, arg);
+                    break;
+                case "--opencode-enabled":
+                    options.OpencodeEnabled = ParseBool(RequireValue(args, ref i, arg), options.OpencodeEnabled);
                     break;
                 case "--opencode-scheme":
                     options.OpencodeScheme = RequireValue(args, ref i, arg);

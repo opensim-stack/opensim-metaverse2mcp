@@ -57,8 +57,21 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             Timeout = Timeout.InfiniteTimeSpan
         };
         _eventHttp.DefaultRequestHeaders.Authorization = _http.DefaultRequestHeaders.Authorization;
-        _eventLoopCts = new CancellationTokenSource();
-        _eventLoopTask = Task.Run(() => ObserveEventStreamsLoopAsync(_eventLoopCts.Token));
+        if (options.OpencodeEnabled)
+        {
+            _eventLoopCts = new CancellationTokenSource();
+            _eventLoopTask = Task.Run(() => ObserveEventStreamsLoopAsync(_eventLoopCts.Token));
+        }
+        else
+        {
+            // Standalone MCP-driven bots have no opencode host, so the /event
+            // observer would retry forever and flood the logs. Construction and
+            // disposal stay unconditional (Dispose tolerates a never-started
+            // event loop), so harness wiring, status surfaces, and re-enabling
+            // at runtime config level keep working.
+            Console.WriteLine("[opencode] disabled (OPENCODE_ENABLED=false); event-stream observer not started");
+        }
+
 
         Console.WriteLine("[opencode] model payload strategy: session + per-message explicit provider/model");
     }

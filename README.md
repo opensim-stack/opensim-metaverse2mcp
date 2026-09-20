@@ -94,6 +94,7 @@ docker run --rm \
 
 ### Opencode chat bridge
 
+- `OPENCODE_ENABLED` (`true`/`false`, default: `true`) — master switch for the built-in opencode brain. Set `false` for standalone MCP-driven bots that bring their own mind: the `/event` observer loop and IM/group auto-routing (including fallback replies) are skipped, while bridge-side MCP events (`chat.im.received`, `chat.local.received`) keep flowing.
 - `OPENCODE_SCHEME` (`http` or `https`, default: `http`)
 - `OPENCODE_HOST` (default: `opensim-opencode`)
 - `OPENCODE_PORT` (default: `8998`)
