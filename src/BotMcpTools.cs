@@ -1628,6 +1628,26 @@ internal sealed class BotMcpTools
         return _bot.DeselectPrimAsync(localId, cancellationToken);
     }
 
+    [McpServerTool, Description("Touch a prim by local ID to trigger scripted interactions.")]
+    public Task<BotToolResult> PrimTouch(
+        [Description("Prim local ID.")] uint localId,
+        [Description("Optional settle delay in milliseconds after sending touch (0..5000).") ] int settleMs = 0,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.TouchPrimAsync(localId, settleMs, cancellationToken);
+    }
+
+    [McpServerTool, Description("Touch a prim resolved by object name (nearest match in current simulator cache).")]
+    public Task<BotToolResult> PrimTouchByName(
+        [Description("Name to match against prim object names.")] string name,
+        [Description("True for exact name match; false for contains match.")] bool exactMatch = false,
+        [Description("True for case-sensitive matching.")] bool caseSensitive = false,
+        [Description("Optional settle delay in milliseconds after sending touch (0..5000).") ] int settleMs = 0,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.TouchPrimByNameAsync(name, exactMatch, caseSensitive, settleMs, cancellationToken);
+    }
+
     [McpServerTool, Description("Delete (de-rez) a prim by local ID back to inventory.")]
     public Task<BotToolResult> PrimDelete(
         [Description("Prim local ID.")] uint localId,

@@ -923,6 +923,101 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<BotToolResult> TouchPrimAsync(uint localId, int settleMs, CancellationToken cancellationToken)
+    {
+        if (settleMs < 0 || settleMs > 5000)
+        {
+            return BotToolResult.Fail("settleMs must be between 0 and 5000.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            if (!sim.ObjectsPrimitives.ContainsKey(localId))
+            {
+                return BotToolResult.Fail($"Prim {localId} was not found in the current simulator object cache.");
+            }
+
+            client.Self.Touch(localId);
+            if (settleMs > 0)
+            {
+                await Task.Delay(settleMs, token).ConfigureAwait(false);
+            }
+
+            return BotToolResult.OkResult(
+                settleMs > 0
+                    ? $"Touch request sent for prim {localId}; waited {settleMs}ms for settle."
+                    : $"Touch request sent for prim {localId}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> TouchPrimByNameAsync(
+        string name,
+        bool exactMatch,
+        bool caseSensitive,
+        int settleMs,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return BotToolResult.Fail("name is required.");
+        }
+
+        if (settleMs < 0 || settleMs > 5000)
+        {
+            return BotToolResult.Fail("settleMs must be between 0 and 5000.");
+        }
+
+        var matchText = name.Trim();
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+            var at = client.Self.SimPosition;
+            var matches = sim.ObjectsPrimitives.Values
+                .Where(p => !string.IsNullOrWhiteSpace(p.Properties?.Name))
+                .Where(p => exactMatch
+                    ? string.Equals(p.Properties!.Name.Trim(), matchText, comparison)
+                    : p.Properties!.Name.Contains(matchText, comparison))
+                .OrderBy(p => Vector3.Distance(at, p.Position))
+                .ThenBy(p => p.LocalID)
+                .ToList();
+
+            if (matches.Count == 0)
+            {
+                var mode = exactMatch ? "exact" : "contains";
+                return BotToolResult.Fail($"No prim name match found for '{matchText}' ({mode}, caseSensitive={caseSensitive}).");
+            }
+
+            var selected = matches[0];
+            client.Self.Touch(selected.LocalID);
+            if (settleMs > 0)
+            {
+                await Task.Delay(settleMs, token).ConfigureAwait(false);
+            }
+
+            var selectedName = string.IsNullOrWhiteSpace(selected.Properties?.Name) ? "(unnamed)" : selected.Properties!.Name.Trim();
+            var settleText = settleMs > 0 ? $"; waited {settleMs}ms for settle" : string.Empty;
+            if (matches.Count == 1)
+            {
+                return BotToolResult.OkResult($"Touch request sent for prim {selected.LocalID} ('{selectedName}'){settleText}.");
+            }
+
+            return BotToolResult.OkResult(
+                $"Matched {matches.Count} prims; touched nearest prim {selected.LocalID} ('{selectedName}'){settleText}. Narrow the name or set exactMatch=true for stricter targeting.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<BotToolResult> DeletePrimAsync(uint localId, CancellationToken cancellationToken)
     {
         return await ExecuteLockedAsync((client, _) =>

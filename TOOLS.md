@@ -54,18 +54,36 @@ The server publishes tools including:
 - `PrimSetDescription`
 - `PrimLink`
 - `PrimUnlink`
+- `PrimInspectLinkset`
+- `PrimSetLinksetRoot`
+- `PrimReorderLinkset`
+- `PrimBulkAdjustLinks`
+- `PrimSetNextOwnerPermissions`
+- `PrimSetSaleInfo`
+- `PrimSetGroupOwnership`
 - `PrimClone`
 - `PrimInspect`
+- `PrimFetchProperties`
+- `PrimSetBuildParams`
+- `PrimSetFlexible`
+- `PrimSetLight`
+- `PrimSetSculpt`
+- `PrimSelect`
+- `PrimDeselect`
+- `PrimTouch`
+- `PrimTouchByName`
+- `PrimDelete`
+- `PrimDeleteMany`
+- `PrimReturnToOwner`
+- `PrimTake`
+- `PrimRezFromInventory`
 - `PrimFindByName`
 - `PrimListNearby`
+- `PrimQueryObjects`
 - `PrimRequestPayPrice`
 - `PrimBuy`
 - `WalletGetBalance`
 - `Pay`
-- `PrimSelect`
-- `PrimDeselect`
-- `PrimDelete`
-- `PrimDeleteMany`
 - `InventoryList`
 - `InventoryGiveItem`
 - `InventoryGiveFolder`
@@ -184,6 +202,8 @@ Chat notes:
 - TODO: add a security policy to control which users the AI may respond to.
 
 UV preset notes:
+- `PrimTouch` sends `client.Self.Touch(localId)` and supports optional `settleMs` (0..5000) for short post-touch waits.
+- `PrimTouchByName` resolves by object name from current simulator cache (nearest match wins when multiple prims match).
 - `PrimApplyUvPreset` supports: `fit`, `reset`, `tile2x2`, `tile4x4`, `flipU`, `flipV`, `rotate90`, `rotate180`, `rotate270`, `center`.
 - `PrimTileUv` sets U/V repeat to the same numeric tiling factor (`NxN`).
 - `PrimTileUvNonUniform` sets independent U/V repeat values.
