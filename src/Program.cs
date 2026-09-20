@@ -2,6 +2,9 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
+using System.Text.Json;
 using Opensim.Metaverse2Mcp;
 
 var (options, startupExitCode) = LoadOptions(args);
@@ -43,6 +46,20 @@ builder.Services.AddSingleton<SpawnerClient>();
 builder.Services
     .AddMcpServer()
     .WithHttpTransport(_ => { })
+    .WithRequestFilters(filters =>
+    {
+        filters.AddCallToolFilter(next => async ValueTask<CallToolResult> (request, cancellationToken) =>
+        {
+            try
+            {
+                return await next(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new McpException(BuildCallToolArgumentErrorMessage(request?.Params?.Name, request?.Params?.Arguments, ex.Message), ex);
+            }
+        });
+    })
     .WithTools<BotMcpTools>()
     .WithTools<RLVMcpTools>();
 
@@ -161,4 +178,18 @@ static bool IsAuthorizedBearer(string? authorizationHeader, string expectedToken
 
     var token = authorizationHeader[prefix.Length..].Trim();
     return string.Equals(token, expectedToken, StringComparison.Ordinal);
+}
+
+static string BuildCallToolArgumentErrorMessage(
+    string? toolName,
+    IDictionary<string, JsonElement>? arguments,
+    string? originalMessage)
+{
+    var normalizedToolName = string.IsNullOrWhiteSpace(toolName) ? "(unknown)" : toolName.Trim();
+    var normalizedCause = string.IsNullOrWhiteSpace(originalMessage) ? "Invalid tool arguments." : originalMessage.Trim();
+    var providedKeys = arguments == null || arguments.Count == 0
+        ? "(none)"
+        : string.Join(", ", arguments.Keys.OrderBy(static key => key, StringComparer.OrdinalIgnoreCase));
+
+    return $"Tool '{normalizedToolName}' argument error: {normalizedCause} Provided arguments: {providedKeys}. Check tools/list for required and optional parameter names.";
 }
