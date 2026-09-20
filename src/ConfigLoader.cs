@@ -58,7 +58,8 @@ internal static class ConfigLoader
             PromptMaxChars = ParseInt(Env("PROMPT_MAX_CHARS"), 16000),
             RequesterContextDebugLogging = ParseBool(Env("REQUESTER_CONTEXT_DEBUG_LOGGING"), false),
             ReceiveChatAllowedTypes = Env("LOCAL_CHAT_ALLOWED_TYPES") ?? "Normal,Whisper,Shout,StartTyping,StopTyping,Debug,OwnerSay,RegionSayTo,RegionSay",
-            AllowIarImport = ParseBool(Env("ALLOW_IAR_IMPORT"), true)
+            AllowIarImport = ParseBool(Env("ALLOW_IAR_IMPORT"), true),
+            AllowRlv = ParseBool(Env("ALLOW_RLV"), false)
         };
 
         options.McpPort = ParseInt(Env("METAVERSE_MCP_PORT"), 8999);
@@ -186,6 +187,7 @@ internal static class ConfigLoader
              string.Empty,
             "Permissions:",
             "  --allow-iar-import <bool>     Allow IAR import (env: ALLOW_IAR_IMPORT, default: true)",
+            "  --allow-rlv <bool>            Allow RLV tools/runtime control (env: ALLOW_RLV, default: false)",
             string.Empty,
             "General:",
             "  -h, --help                     Show help"
@@ -205,6 +207,9 @@ internal static class ConfigLoader
                     break;
                 case "--allow-iar-import":
                     options.AllowIarImport  = ParseBool(RequireValue(args, ref i, arg), options.AllowIarImport);
+                    break;
+                case "--allow-rlv":
+                    options.AllowRlv = ParseBool(RequireValue(args, ref i, arg), options.AllowRlv);
                     break;
                 case "--first-name":
                     options.BotFirstName = RequireValue(args, ref i, arg);

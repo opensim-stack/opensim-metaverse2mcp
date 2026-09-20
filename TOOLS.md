@@ -109,6 +109,10 @@ The server publishes tools including:
 - `EnvGetLegacy`
 - `EnvSetLegacyRaw`
 - `EnvResetLegacy`
+- `RlvGetStatus`
+- `RlvSetRuntimeEnabled`
+- `RlvProcessCommand`
+- `RlvListRestrictions`
 
 Chat notes:
 - `Chat` accepts optional `chatType` (case-insensitive) and defaults to `Normal`.
@@ -198,6 +202,13 @@ Environment notes:
 - `EnvSetRegionRaw`/`EnvSetParcelRaw` accept `payloadFormat` of `auto`, `json`, or `xml`.
 - For EEP raw set, payload can be either a direct `EnvironmentData` map or a wrapper object containing `environment`.
 - `EnvSetLegacyRaw` expects a legacy `EnvironmentSettings` LLSD map payload.
+
+RLV notes:
+- RLV behavior is startup-gated by `ALLOW_RLV` (default `false`) and runtime-gated by `RlvSetRuntimeEnabled`.
+- Runtime RLV state is session-local and resets to disabled on restart.
+- `RlvProcessCommand` is MCP-driven test/control input for command strings (IM-driven command intake remains disabled in this stage).
+- `RlvProcessCommand` accepts commands with or without `@`; it normalizes before submission.
+- `RlvListRestrictions` lists active restrictions and supports optional filtering by behavior, sender UUID, and sender name contains match.
 
 Inventory and asset notes:
 - `AssetUploadInventory` accepts either a local file path or an `http/https` URL as `source`.

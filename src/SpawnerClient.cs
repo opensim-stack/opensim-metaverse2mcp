@@ -17,7 +17,11 @@ internal sealed class SpawnerClient : IDisposable
         _http = new HttpClient
         {
             BaseAddress = new Uri(baseUrl, UriKind.Absolute),
-            Timeout = TimeSpan.FromSeconds(30)
+            // TODO  this is a temporary workaround. An IAR / OAR import  can
+            // take a long time, and the spawner API currently blocking. An alternative
+            // would be to do the download ourselves to a workspace directory and then
+            // pass a file URL to the spawner API
+            Timeout = TimeSpan.FromSeconds(1800)
         };
         _token = string.IsNullOrWhiteSpace(options.SpawnerToken) ? null : options.SpawnerToken.Trim();
     }
@@ -240,7 +244,7 @@ internal sealed class SpawnerClient : IDisposable
         }
 
         var escaped  = Uri.EscapeDataString(regionName.Trim());
-        var path = $"api/import/iar-url/{escaped}";
+        var path = $"api/import/oar-url/{escaped}";
         
         var request = CreateRequest(HttpMethod.Get, path);
         

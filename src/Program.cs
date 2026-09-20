@@ -43,7 +43,8 @@ builder.Services.AddSingleton<SpawnerClient>();
 builder.Services
     .AddMcpServer()
     .WithHttpTransport(_ => { })
-    .WithTools<BotMcpTools>();
+    .WithTools<BotMcpTools>()
+    .WithTools<RLVMcpTools>();
 
 var app = builder.Build();
 

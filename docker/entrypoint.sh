@@ -15,6 +15,7 @@ esac
 
 set -- \
   --allow-iar-import "${ALLOW_IAR_IMPORT:-true}" \
+  --allow-rlv "${ALLOW_RLV:-false}" \
   --mcp-transport "$transport_lc" \
   --mcp-host "${METAVERSE_MCP_HOST:-0.0.0.0}" \
   --mcp-port "${METAVERSE_MCP_PORT:-8999}" \

@@ -1899,7 +1899,7 @@ internal sealed class BotMcpTools
         return _bot.InventoryGiveFolderAsync(folderIdOrPath, recipientAgentId, withBeamEffect, cancellationToken);
     }
 
-    [McpServerTool, Description("Queue an IAR (Inventory Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel.")]
+    [McpServerTool, Description("Queue an IAR (Inventory Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel. Caller should filter on this channel for progress updates and completion status to avoid hearbeat messages defeating timeouts")]
     public async Task<BotTaskHandle> ImportIarUrl(
         [Description("URL where the IAR file will be imported from (can be anything, doesn't have to end in .oar). OutWorldz URLs are treated specially to extract the real filename from the File= query parameter.")]
         string url,
@@ -2288,7 +2288,7 @@ internal sealed class BotMcpTools
     }
     
 
-    [McpServerTool, Description("Queue an OAR (OpenSim Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel.")]
+    [McpServerTool, Description("Queue an OAR (OpenSim Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel. Caller should filter on this channel for progress updates and completion status to avoid hearbeat messages defeating timeouts.")]
     public async Task<BotTaskHandle> ImportOarUrl(
         [Description("URL where the OAR file will be imported from (can be anything, doesn't have to end in .oar). OutWorldz URLs are treated specially to extract the real filename from the File= query parameter.")]
         string url,

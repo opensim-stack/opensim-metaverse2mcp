@@ -70,6 +70,7 @@ internal sealed class AppOptions
     public bool UseLegacySseCompatibility => string.Equals(McpTransport, "sse", StringComparison.OrdinalIgnoreCase);
 
     public bool AllowIarImport { get; set; } = true;
+    public bool AllowRlv { get; set; }
     
     public IReadOnlyList<string> Validate()
     {
