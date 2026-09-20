@@ -1,6 +1,7 @@
 # opensim-metaverse2mcp
 
-[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-bithatch%2Fopensim--metaverse2mcp-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/repository/docker/bithatch/opensim-metaverse2mcp)
+[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-bithatch%2Fopensim--metaverse2mcp-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/bithatch/opensim-metaverse2mcp)
+[![Docker Publish](https://github.com/opensim-stack/opensim-metaverse2mcp/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/opensim-stack/opensim-metaverse2mcp/actions/workflows/docker-publish.yml)
 
 `opensim-metaverse2mcp` is a LibreMetaverse-based OpenSim bot that exposes bot actions as MCP tools over **Streamable HTTP**.
 
@@ -128,6 +129,10 @@ This repository includes a starter project prompt file at `AGENTS.md`.
 Notes:
 - `MCP_TRANSPORT=sse` enables legacy SSE compatibility in the MCP HTTP transport.
 - This server always runs MCP over HTTP (streamable transport), not stdio.
+
+## Building and publishing
+
+See `BUILDING.md` for local build/run steps, manual multiarch publish commands, and automated GitHub Actions publish details.
 
 ## More
 
