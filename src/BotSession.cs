@@ -543,9 +543,23 @@ internal sealed partial class BotSession : IDisposable
             cancellationToken);
     }
 
+    public string GetCurrentSimName()
+    {
+        var client = _client;
+        if (!_connected || client == null)
+        {
+            EnsureReconnectLoop("get-current-sim");
+            return "(disconnected)";
+        }
+
+        var sim = client.Network.CurrentSim;
+        return sim.Name ?? "(unknown)";
+    }
 
     private static string DescribeSimulator(Simulator? sim)
         => sim == null ? "(null)" : $"{sim.Name} ({sim.Handle})";
+        
+        
     public void Dispose()
     {
         try

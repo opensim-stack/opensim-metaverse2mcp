@@ -2294,6 +2294,8 @@ internal sealed class BotMcpTools
         string url,
         [Description("Name of region  where the OAR file will be imported to.")]
         string regionName,
+        [Description("Optional Name of simulator where the regions is where the OAR file will be imported to.")]
+        string? simulatorName = null,
         [Description("Optional boolean; if true region will be merged with existing region. Default is true")]
         bool? merge = null,
         [Description("Optional boolean; if true assets will not be included in the archive. Default is false.")]
@@ -2317,6 +2319,12 @@ internal sealed class BotMcpTools
         {
             return QueueImmediateFailure("Could not extract filename from URL for folder lookup.");
         }
+        
+        if (string.IsNullOrWhiteSpace(simulatorName))
+        {
+            simulatorName = _bot.GetCurrentSimName();
+        }
+        
 
         return _bot.StartBotTask(
             $"Import OAR URL into '{regionName}'.",
@@ -2327,7 +2335,7 @@ internal sealed class BotMcpTools
                     _bot.EmitRegionImportProgressEvent(taskHandle.Handle, "Starting OAR import.", 5);
 
                     // Call spawner API to import OAR.
-                    var importResult = await _spawnerClient.ImportOarUrlAsync(regionName, url, merge, skipAssets, taskCancellationToken).ConfigureAwait(false);
+                    var importResult = await _spawnerClient.ImportOarUrlAsync(simulatorName, regionName, url, merge, skipAssets, taskCancellationToken).ConfigureAwait(false);
                     if (!importResult.Ok)
                     {
                         _bot.EmitRegionImportCompleteEvent(taskHandle.Handle, false, $"OAR import failed: {importResult.Message}");

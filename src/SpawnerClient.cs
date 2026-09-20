@@ -227,6 +227,7 @@ internal sealed class SpawnerClient : IDisposable
     }
     
     public Task<DataToolResult> ImportOarUrlAsync(
+        string simulatorName,
         string regionName,
         string url,
         bool? merge,
@@ -243,11 +244,10 @@ internal sealed class SpawnerClient : IDisposable
             return Task.FromResult(DataToolResult.FailResult("url is required."));
         }
 
-        var escaped  = Uri.EscapeDataString(regionName.Trim());
-        var path = $"api/import/oar-url/{escaped}";
-        
-        var request = CreateRequest(HttpMethod.Get, path);
-        
+        var escapedRegionName = Uri.EscapeDataString(regionName.Trim());
+        var escapedSimulatorName = Uri.EscapeDataString(simulatorName.Trim());
+        var path = $"api/import/oar-url/{escapedSimulatorName}/{escapedRegionName}";        
+        var request = CreateRequest(HttpMethod.Get, path);        
         var queryParams = new List<string>
         {
             $"url={Uri.EscapeDataString(url.Trim())}"
