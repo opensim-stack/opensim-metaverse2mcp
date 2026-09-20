@@ -31,6 +31,7 @@ internal sealed class AppOptions
     public long CacheMaxSize { get; set; } = 1024L * 1024 * 1024;
     public int BotLoginTimeoutSeconds { get; set; } = 30;
 
+    public bool OpencodeEnabled { get; set; } = true;
     public string OpencodeScheme { get; set; } = "http";
     public string OpencodeHost { get; set; } = "opensim-opencode";
     public int OpencodePort { get; set; } = 8998;
@@ -115,25 +116,28 @@ internal sealed class AppOptions
             errors.Add("Bot login timeout must be at least 1 second.");
         }
 
-        var scheme = (OpencodeScheme ?? string.Empty).Trim().ToLowerInvariant();
-        if (scheme != "http" && scheme != "https")
+        if (OpencodeEnabled)
         {
-            errors.Add("Opencode scheme must be 'http' or 'https'.");
-        }
+            var scheme = (OpencodeScheme ?? string.Empty).Trim().ToLowerInvariant();
+            if (scheme != "http" && scheme != "https")
+            {
+                errors.Add("Opencode scheme must be 'http' or 'https'.");
+            }
 
-        if (string.IsNullOrWhiteSpace(OpencodeHost))
-        {
-            errors.Add("Opencode host is required when chat bridge is enabled.");
-        }
+            if (string.IsNullOrWhiteSpace(OpencodeHost))
+            {
+                errors.Add("Opencode host is required when chat bridge is enabled.");
+            }
 
-        if (OpencodePort < 1 || OpencodePort > 65535)
-        {
-            errors.Add("Opencode port must be in range 1..65535.");
-        }
+            if (OpencodePort < 1 || OpencodePort > 65535)
+            {
+                errors.Add("Opencode port must be in range 1..65535.");
+            }
 
-        if (OpencodeRequestTimeoutSeconds < 1)
-        {
-            errors.Add("Opencode timeout must be at least 1 second.");
+            if (OpencodeRequestTimeoutSeconds < 1)
+            {
+                errors.Add("Opencode timeout must be at least 1 second.");
+            }
         }
 
         if (PromptHandlingEnabled) 

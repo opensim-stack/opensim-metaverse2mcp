@@ -176,6 +176,20 @@ internal sealed partial class BotSession
         var priorAmbientConversationKey = _ambientConversationKey.Value;
         _ambientConversationKey.Value = conversationKey;
         var channelLabel = GetConversationChannelLabel(conversationKey);
+        if (!_options.OpencodeEnabled)
+        {
+            // Standalone MCP-driven bots bring their own mind: don't route
+            // inbound messages to the absent opencode backend, which would
+            // answer with the canned "Sorry, I could not reach the AI service
+            // right now." fallback. Bridge-side MCP events
+            // (chat.im.received / chat.local.received) are emitted before this
+            // handler runs, so external minds keep hearing everything and own
+            // the reply.
+            Console.WriteLine($"[{channelLabel}] opencode disabled; skipping built-in brain routing: from={from} ({conversationKey}).");
+            _ambientConversationKey.Value = priorAmbientConversationKey;
+            return;
+        }
+
         if (!TryNormalizeConversationTextForRouting(conversationKey, text, out var routedText))
         {
             Console.WriteLine($"[{channelLabel}] ignored message without wake word from {from} ({conversationKey}).");
