@@ -988,11 +988,11 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> AppearanceRebakeAsync(bool forceRebake, CancellationToken cancellationToken)
+    public async Task<BotToolResult> AppearanceRebakeAsync(bool? forceRebake, CancellationToken cancellationToken)
     {
         return await ExecuteLockedAsync(async (client, token) =>
         {
-            await client.Appearance.RequestSetAppearance(forceRebake).ConfigureAwait(false);
+            await client.Appearance.RequestSetAppearance(forceRebake.HasValue && forceRebake.Value).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             return BotToolResult.OkResult($"Appearance update requested (forceRebake={forceRebake}).");
         }, cancellationToken).ConfigureAwait(false);

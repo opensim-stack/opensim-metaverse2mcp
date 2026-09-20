@@ -26,6 +26,9 @@ internal sealed class AppOptions
     public string BotLoginUri { get; set; } = "http://opensim:9000";
     public string BotStartLocation { get; set; } = "last";
     public string WearFolderName { get; set; } = "";
+    public string CacheDir { get; set; } = "";
+    public bool CacheEnabled { get; set; } = true;
+    public long CacheMaxSize { get; set; } = 1024L * 1024 * 1024;
     public int BotLoginTimeoutSeconds { get; set; } = 30;
 
     public string OpencodeScheme { get; set; } = "http";
@@ -48,12 +51,8 @@ internal sealed class AppOptions
     public int PiperRequestTimeoutSeconds { get; set; } = 60;
     public string PiperDefaultVoice { get; set; } = "en_US-lessac-medium";
     public string? BridgeTrustStateFile { get; set; } = "/workspace/state/dialog-bridge-trust.json";
-
-    // When true, the bot will check for a present dialog bridge when it first
-    // enters a new region and attempt to auto-install the bridge if missing.
-    public bool DialogBridgeAutoProvisionOnRegionEnter { get; set; } = true;
-    public int DialogBridgePromptResponseTimeoutSeconds { get; set; } = 120;
-
+    public bool BridgeAutoProvisionOnRegionEnter { get; set; } = true;
+    public int BridgePromptResponseTimeoutSeconds { get; set; } = 120;
     public bool PromptHandlingEnabled { get; set; } = true;
     public bool PromptBuiltInEnabled { get; set; } = true;
     public string? OpencodeDefaultPromptPath { get; set; }
@@ -173,7 +172,7 @@ internal sealed class AppOptions
             }
         }
 
-        if (DialogBridgePromptResponseTimeoutSeconds < 5)
+        if (BridgePromptResponseTimeoutSeconds < 5)
         {
             errors.Add("Dialog bridge prompt response timeout must be at least 5 seconds.");
         }
@@ -307,5 +306,10 @@ internal sealed class AppOptions
     public static bool TryParseInt(string? raw, out int value)
     {
         return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+    }
+
+    public static bool TryParseLong(string? raw, out long value)
+    {
+        return long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
     }
 }

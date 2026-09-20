@@ -26,6 +26,9 @@ internal static class ConfigLoader
             BotStartLocation = FirstDefined("OPENSIM_LOGIN_START", "BOT_LOGIN_START") ?? "last",
             BotLoginTimeoutSeconds = ParseInt(FirstDefined("OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30),
             WearFolderName = Env("WEAR_FOLDER_NAME") ?? string.Empty,
+            CacheDir = Env("OPENSIM_CACHE") ?? string.Empty,
+            CacheMaxSize = ParseLong(Env("OPENSIM_CACHE_MAXSIZE"), 1024L * 1024 * 1024),
+            CacheEnabled = ParseBool(Env("OENSIM_CACHE_ENABLED"), true),
             OpencodeScheme = Env("OPENCODE_SCHEME") ?? "http",
             OpencodeHost = Env("OPENCODE_HOST") ?? "opensim-opencode",
             OpencodePort = ParseInt(Env("OPENCODE_PORT"), 8998),
@@ -45,9 +48,9 @@ internal static class ConfigLoader
             PiperVoicesPath = Env("PIPER_VOICES_PATH") ?? "/voices",
             PiperRequestTimeoutSeconds = ParseInt(Env("PIPER_TIMEOUT_SECONDS"), 60),
             PiperDefaultVoice = Env("PIPER_DEFAULT_VOICE") ?? "en_US-lessac-medium",
-            BridgeTrustStateFile = FirstDefined("METAVERSE_BRIDGE_TRUST_STATE_FILE") ?? "/workspace/bridges/{bot_uuid}.json",
-            DialogBridgeAutoProvisionOnRegionEnter = ParseBool(Env("DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER"), true),
-            DialogBridgePromptResponseTimeoutSeconds = ParseInt(Env("DIALOG_BRIDGE_PROMPT_RESPONSE_TIMEOUT_SECONDS"), 120),
+            BridgeTrustStateFile = FirstDefined("DIALOG_BRIDGE_TRUST_STATE_FILE", "METAVERSE_BRIDGE_TRUST_STATE_FILE") ?? "/workspace/bridges/{bot_uuid}.json",
+            BridgeAutoProvisionOnRegionEnter = ParseBool(Env("DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER"), true),
+            BridgePromptResponseTimeoutSeconds = ParseInt(Env("DIALOG_BRIDGE_PROMPT_RESPONSE_TIMEOUT_SECONDS"), 120),
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
             PromptBuiltInEnabled = ParseBool(Env("PROMPT_BUILTIN_ENABLED"), true),
             OpencodeDefaultPromptPath = Env("OPENCODE_DEFAULT_PROMPT_PATH"),
@@ -93,6 +96,9 @@ internal static class ConfigLoader
             "  --start-location <value>       Start location (env: OPENSIM_LOGIN_START, default: last)",
             "  --wear-folder-name <value>     Folder to wear on provision (env: WEAR_FOLDER_NAME, default: EMPTY)",
             "  --login-timeout-seconds <int>  Login timeout (env: OPENSIM_LOGIN_TIMEOUT_SECONDS, default: 30)",
+            "  --cache <path>                 Cache path (env: OPENSIM_CACHE, default: <resources>/cache)",
+            "  --no-cache                     Disable cache (env: OPENSIM_CACHE_ENABLED, default: true)",
+            "  --cache-max-size <bytes>       Cache max size (env: OPENSIM_CACHE_MAXSIZE, default: <resources>/cache)",
             "  --spawner-parent <name>        Parent bot full name (env: OPENSIM_SPAWNER_PARENT)",
             "  --spawner-level <value>        Spawner-assigned level hint (env: OPENSIM_SPAWNER_LEVEL)",
             "  --spawner-host <host>          Spawner API host (env: SPAWNER_HOST, default: opensim-ai-spawner)",
@@ -130,15 +136,6 @@ internal static class ConfigLoader
             "  --piper-voices-path <path>     Piper voices list path (env: PIPER_VOICES_PATH, default: /voices)",
             "  --piper-timeout-seconds <int>  Piper request timeout in seconds (env: PIPER_TIMEOUT_SECONDS, default: 60)",
             "  --piper-default-voice <name>   Default voice name used by Say when omitted (env: PIPER_DEFAULT_VOICE, default: en_US-lessac-medium)",
-            "  --lsl-dialog-bridge-trusted-object-id <uuid>",
-            "                                Optional trusted bridge object UUID for dialog replies",
-            "                                (env: LSL_DIALOG_BRIDGE_TRUSTED_OBJECT_ID)",
-            "  --lsl-dialog-bridge-trusted-owner-id <uuid>",
-            "                                Optional trusted owner UUID for bridge object replies",
-            "                                (env: LSL_DIALOG_BRIDGE_TRUSTED_OWNER_ID)",
-            "  --lsl-dialog-bridge-require-trusted-sender <bool>",
-            "                                Require trusted object/owner checks for bridge replies",
-            "                                (env: LSL_DIALOG_BRIDGE_REQUIRE_TRUSTED_SENDER, default: true)",
             "  --lsl-dialog-bridge-trust-state-file <path>",
             "                                Optional JSON file used to persist runtime bridge trust pins",
             "                                Supports {bot_uuid} in path templates for multi-bot deployments",
@@ -229,6 +226,15 @@ internal static class ConfigLoader
                 case "--wear-folder-name":
                     options.WearFolderName = RequireValue(args, ref i, arg);
                     break;
+                case "--cache":
+                    options.CacheDir  = RequireValue(args, ref i, arg);
+                    break;
+                case "--no-cache":
+                    options.CacheEnabled  = false;
+                    break;
+                case "--cache-maxsize":
+                    options.CacheMaxSize  = ParseLong(RequireValue(args, ref i, arg), options.CacheMaxSize);
+                    break;
                 case "--login-timeout-seconds":
                     options.BotLoginTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.BotLoginTimeoutSeconds);
                     break;
@@ -308,10 +314,13 @@ internal static class ConfigLoader
                     options.BridgeTrustStateFile = RequireValue(args, ref i, arg);
                     break;
                 case "--dialog-bridge-auto-provision-on-region-enter":
-                    options.DialogBridgeAutoProvisionOnRegionEnter = ParseBool(RequireValue(args, ref i, arg), options.DialogBridgeAutoProvisionOnRegionEnter);
+                    options.BridgeAutoProvisionOnRegionEnter = ParseBool(RequireValue(args, ref i, arg), options.BridgeAutoProvisionOnRegionEnter);
                     break;
                 case "--dialog-bridge-prompt-response-timeout-seconds":
-                    options.DialogBridgePromptResponseTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.DialogBridgePromptResponseTimeoutSeconds);
+                    options.BridgePromptResponseTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.BridgePromptResponseTimeoutSeconds);
+                    break;
+                case "--dialog-bridge-trust-state-file":
+                    options.BridgeTrustStateFile = RequireValue(args, ref i, arg);
                     break;
                 case "--prompt-handling-enabled":
                     options.PromptHandlingEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptHandlingEnabled);
@@ -413,6 +422,16 @@ internal static class ConfigLoader
     private static int ParseInt(string? raw, int fallback)
     {
         if (!AppOptions.TryParseInt(raw, out var value))
+        {
+            return fallback;
+        }
+
+        return value;
+    }
+
+    private static long ParseLong(string? raw, long fallback)
+    {
+        if (!AppOptions.TryParseLong(raw, out var value))
         {
             return fallback;
         }

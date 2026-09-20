@@ -2820,7 +2820,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Request appearance rebake/update.")]
     public Task<BotToolResult> AppearanceRebake(
         [Description("True to force a rebake, false (the default) for normal update.")] bool? forceRebake = false,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceRebakeAsync(forceRebake, cancellationToken);
     }

@@ -27,6 +27,7 @@ The server logs in the bot on startup (no separate login tool), then serves MCP 
 | Name | Description |
 | ---- | ----------- |
 | /config | Various configuration files |
+| /cache | Client cache |
 
 ## Configuration
 
@@ -40,6 +41,8 @@ The Bot can only be instructed by a *Handler*. You must define who the bot handl
   "handlerLast" : "McSim"
 } ]
 ```
+
+*Note, this only applies to instructions by chat. MCP tool calls are not restricted*
 
 ## Run
 
@@ -57,6 +60,7 @@ docker run --rm \
   -e MCP_HTTP_ENDPOINT=/mcp \
   -p 8999:8999 \
   -v config:/config \
+  -v cache:/cache \
   bithatch/opensim-metaverse2mcp:latest
 ```
 
@@ -73,6 +77,9 @@ docker run --rm \
 - `OPENSIM_LOGIN_URI` (default: `http://opensim:9000`)
 - `OPENSIM_LOGIN_START` (default: `last`)
 - `OPENSIM_LOGIN_TIMEOUT_SECONDS` (default: `30`)
+- `OPENSIM_CACHE` (default `/app/linden/cache`)
+- `OPENSIM_CACHE_ENABLED` (default `true`)
+- `OPENSIM_CACHE_MAXSIZE` (default `1073741824` - 1GB)
 
 ### Spawner API integration
 
@@ -123,6 +130,10 @@ docker run --rm \
 - `PROMPT_NOTECARD_ENABLED` (`true`/`false`, default: `true`)
 - `PROMPT_NOTECARD_REQUIRE_HANDLER` (`true`/`false`, default: `true`)
 - `PROMPT_MAX_CHARS` (default: `16000`, minimum effective clamp: `512`)
+
+### Dialog Bridge
+ - `DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER` (`true`/`false`, default: `true`)
+ - `DIALOG_BRIDGE_TRUST_STATE_FILE` (default: `/workspace/state/dialog-bridge-trust.json"`)
 
 This repository includes a starter project prompt file at `AGENTS.md`.
 

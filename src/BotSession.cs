@@ -354,6 +354,13 @@ internal sealed partial class BotSession : IDisposable
             client.Self.ScriptDialog += OnScriptDialog;
             client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
             client.Objects.ObjectUpdate += OnWorldObjectUpdateForEventStream;
+            
+            //  Cache setup            
+            client.Settings.AssetCache.Enabled = _options.CacheEnabled;
+            client.Settings.AssetCache.MaxSize = _options.CacheMaxSize;
+            if(!string.IsNullOrEmpty(_options.CacheDir)) {
+                client.Settings.AssetCache.Dir = _options.CacheDir;
+            }
 
             // Assign the field-backed client early so event handlers that run during
             // the login process (for example SimChanged) can reference a non-null
@@ -1721,7 +1728,7 @@ internal sealed partial class BotSession : IDisposable
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(_options.DialogBridgePromptResponseTimeoutSeconds), timeoutCts.Token).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(_options.BridgePromptResponseTimeoutSeconds), timeoutCts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -1740,7 +1747,7 @@ internal sealed partial class BotSession : IDisposable
                 return;
             }
 
-            Console.WriteLine($"[dialog-bridge] prompt fallback to text: timeout after {_options.DialogBridgePromptResponseTimeoutSeconds}s conversation={conversationKey} request={requestId}");
+            Console.WriteLine($"[dialog-bridge] prompt fallback to text: timeout after {_options.BridgePromptResponseTimeoutSeconds}s conversation={conversationKey} request={requestId}");
             ActivateTextPromptFallback(client, conversationKey, wait.AgentId, wait.From, wait.Kind, wait.SessionId, wait.RequestId, wait.Permission, wait.Question);
         });
     }
@@ -2229,13 +2236,13 @@ internal sealed partial class BotSession : IDisposable
             {
                 var client = _client;
                 if (client == null) {
-                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: no client! autoProvisionEnabled={_options.DialogBridgeAutoProvisionOnRegionEnter}");
+                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: no client! autoProvisionEnabled={_options.BridgeAutoProvisionOnRegionEnter}");
                     return;
                 }
 
                 // Diagnostic: report auto-provision option and current trusted pin state so we can
                 // understand why automatic install may be skipped.
-                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: autoProvisionEnabled={_options.DialogBridgeAutoProvisionOnRegionEnter}");
+                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: autoProvisionEnabled={_options.BridgeAutoProvisionOnRegionEnter}");
                 lock (_dialogBridgeTrustLock)
                 {
                     Console.WriteLine($"[dialog-bridge] current trusted bridge pin: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId}");
@@ -2436,7 +2443,7 @@ internal sealed partial class BotSession : IDisposable
                     Console.WriteLine($"[dialog-bridge] setup inventory lookup failed: {botItems.Error}");
                 }
 
-                if (!_options.DialogBridgeAutoProvisionOnRegionEnter)
+                if (!_options.BridgeAutoProvisionOnRegionEnter)
                 {
                     Console.WriteLine("[dialog-bridge] bridge missing in new region but auto-provision is disabled.");
                     return;

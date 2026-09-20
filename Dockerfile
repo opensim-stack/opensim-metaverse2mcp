@@ -17,6 +17,9 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends procps iputils-ping \
     && rm -rf /var/lib/apt/lists/*
+    
+RUN mkdir -p /app/linden/cache /workspace/state \
+    && chmod -R a+rwx /app/linden /workspace/state
 
 EXPOSE 8999
 ENTRYPOINT ["/entrypoint.sh"]

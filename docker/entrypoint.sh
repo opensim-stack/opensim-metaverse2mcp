@@ -37,6 +37,10 @@ set -- \
   --opencode-timeout-seconds "${OPENCODE_REQUEST_TIMEOUT_SECONDS:-1800}" \
   --handler-config "${OPENSIM_HANDLER_CONFIG:-/config/handlers.json}"
 
+if [ "${OPENSIM_CACHE_ENABLED:-true}" = "false" ]; then
+  set -- "$@" --no-cache
+fi
+
 if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then
   set -- "$@" --opencode-username "${OPENCODE_SERVER_USERNAME}"
 fi
@@ -51,6 +55,14 @@ fi
 
 if [ -n "${SPAWNER_TOKEN:-}" ]; then
   set -- "$@" --spawner-token "${SPAWNER_TOKEN}"
+fi
+
+if [ -n "${OPENSIM_CACHE:-}" ]; then
+  set -- "$@" --cache "${OPENSIM_CACHE}"
+fi
+
+if [ -n "${OPENSIM_CACHE_MAXSIZE:-}" ]; then
+  set -- "$@" --cache-maxsize "${OPENSIM_CACHE_MAXSIZE}"
 fi
 
 if [ "${MCP_HTTP_DISALLOW_DELETE:-false}" = "true" ]; then
