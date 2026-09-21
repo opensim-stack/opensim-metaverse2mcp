@@ -57,6 +57,11 @@ internal sealed class AppOptions
 
     public bool PromptHandlingEnabled { get; set; } = true;
     public bool PromptBuiltInEnabled { get; set; } = true;
+
+    // opensim-ai-docker#7: appearance auto-repair. Baseline state file supports
+    // {bot_uuid} templates so multi-bot deployments keep separate baselines.
+    public bool AppearanceAutoRepairEnabled { get; set; } = true;
+    public string AppearanceBaselineStateFile { get; set; } = "/workspace/state/appearance-autorepair-{bot_uuid}.json";
     public string? OpencodeDefaultPromptPath { get; set; }
     public bool PromptProjectAgentsEnabled { get; set; } = true;
     public string PromptProjectAgentsFile { get; set; } = "AGENTS.md";

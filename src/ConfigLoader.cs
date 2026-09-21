@@ -57,6 +57,8 @@ internal static class ConfigLoader
             PromptNotecardEnabled = ParseBool(Env("PROMPT_NOTECARD_ENABLED"), true),
             PromptNotecardRequireHandler = ParseBool(Env("PROMPT_NOTECARD_REQUIRE_HANDLER"), true),
             PromptMaxChars = ParseInt(Env("PROMPT_MAX_CHARS"), 16000),
+            AppearanceAutoRepairEnabled = ParseBool(Env("APPEARANCE_AUTO_REPAIR_ENABLED"), true),
+            AppearanceBaselineStateFile = Env("APPEARANCE_BASELINE_STATE_FILE") ?? "/workspace/state/appearance-autorepair-{bot_uuid}.json",
             RequesterContextDebugLogging = ParseBool(Env("REQUESTER_CONTEXT_DEBUG_LOGGING"), false),
             ReceiveChatAllowedTypes = Env("LOCAL_CHAT_ALLOWED_TYPES") ?? "Normal,Whisper,Shout,StartTyping,StopTyping,Debug,OwnerSay,RegionSayTo,RegionSay"
         };
@@ -146,6 +148,12 @@ internal static class ConfigLoader
             "  --dialog-bridge-auto-provision-on-region-enter <bool>",
             "                                When true, automatically install a dialog bridge when the bot first enters a new region",
             "                                (env: DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER, default: true)",
+            "  --appearance-auto-repair-enabled <bool>",
+            "                                When true, check visual-param pollution after region changes and auto-repair (opensim-ai-docker#7)",
+            "                                (env: APPEARANCE_AUTO_REPAIR_ENABLED, default: true)",
+            "  --appearance-baseline-state-file <path>",
+            "                                JSON file storing the healthy visual-param baseline; supports {bot_uuid}",
+            "                                (env: APPEARANCE_BASELINE_STATE_FILE, default: /workspace/state/appearance-autorepair-{bot_uuid}.json)",
             "  --dialog-bridge-prompt-response-timeout-seconds <int>",
             "                                Wait time before a dialog prompt falls back to text reply mode",
             "                                (env: DIALOG_BRIDGE_PROMPT_RESPONSE_TIMEOUT_SECONDS, default: 120)",
@@ -302,6 +310,12 @@ internal static class ConfigLoader
                     break;
                 case "--dialog-bridge-auto-provision-on-region-enter":
                     options.DialogBridgeAutoProvisionOnRegionEnter = ParseBool(RequireValue(args, ref i, arg), options.DialogBridgeAutoProvisionOnRegionEnter);
+                    break;
+                case "--appearance-auto-repair-enabled":
+                    options.AppearanceAutoRepairEnabled = ParseBool(RequireValue(args, ref i, arg), options.AppearanceAutoRepairEnabled);
+                    break;
+                case "--appearance-baseline-state-file":
+                    options.AppearanceBaselineStateFile = RequireValue(args, ref i, arg);
                     break;
                 case "--dialog-bridge-prompt-response-timeout-seconds":
                     options.DialogBridgePromptResponseTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.DialogBridgePromptResponseTimeoutSeconds);

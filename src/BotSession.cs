@@ -2190,6 +2190,12 @@ internal sealed partial class BotSession : IDisposable
                     Console.WriteLine($"[dialog-bridge] current trusted bridge pin: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId}");
                 }
 
+                // opensim-ai-docker#7: region transitions are the known trigger for
+                // server-side visual-param pollution; schedule the (guarded,
+                // self-delaying) appearance health check without blocking the
+                // network event loop.
+                RunAppearancePostSimChangeCheck();
+
                 // Wait until the client appears fully initialized before attempting any automatic
                 // provisioning. In containerized/docker startup scenarios the GridClient may have
                 // connected at the UDP level but higher-level subsystems (inventory store, agent
