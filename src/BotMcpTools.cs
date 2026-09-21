@@ -2869,26 +2869,48 @@ internal sealed class BotMcpTools
         return _bot.DialogBridgeUninstallAsync(true, cancellationToken);
     }
 
-    [McpServerTool, Description("Upload script source (path or URL) to an existing agent inventory script item.")]
+    [McpServerTool, Description("Upload a script (path or URL) to an existing agent inventory script item. Compiled result cannot be relied upon with OpenSimulator and YEngine and should be treated as advisory only. Also error messages will not be returned.")]
     public Task<ScriptUpdateResult> ScriptUploadAgent(
-        [Description("Source path or URL containing script text.")] string source,
+        [Description("Source path or URL containing script text.")] string sourcePathOrUrl,
         [Description("Script inventory item UUID.")] string itemId,
         [Description("True for mono target, false for lsl2 target.")] bool mono,
         CancellationToken cancellationToken)
     {
-        return _bot.ScriptUploadAgentAsync(source, itemId, mono, cancellationToken);
+        return _bot.ScriptUploadAgentAsync(sourcePathOrUrl, itemId, mono, cancellationToken);
     }
 
-    [McpServerTool, Description("Upload script source (path or URL) to an existing task/object inventory script item.")]
+    [McpServerTool, Description("Upload a script from direct script text to an existing agent inventory script item. Compiled result cannot be relied upon with OpenSimulator and YEngine and should be treated as advisory only. Also error messages will not be returned.")]
+    public Task<ScriptUpdateResult> ScriptContentUploadAgent(
+        [Description("Raw script source text content.")] string scriptContent,
+        [Description("Script inventory item UUID.")] string itemId,
+        [Description("True for mono target, false for lsl2 target.")] bool mono,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ScriptContentUploadAgentAsync(scriptContent, itemId, mono, cancellationToken);
+    }
+
+    [McpServerTool, Description("Upload a script (path or URL) to an existing task/object inventory script item. Compiled result cannot be relied upon with OpenSimulator and YEngine and should be treated as advisory only. Also error messages will not be returned.")]
     public Task<ScriptUpdateResult> ScriptUploadTask(
-        [Description("Source path or URL containing script text.")] string source,
+        [Description("Source path or URL containing script text.")] string sourcePathOrUrl,
         [Description("Script task-inventory item UUID.")] string itemId,
         [Description("Object UUID that contains the task script item.")] string objectId,
         [Description("True for mono target, false for lsl2 target.")] bool mono,
         [Description("Desired running state after upload.")] bool running,
         CancellationToken cancellationToken)
     {
-        return _bot.ScriptUploadTaskAsync(source, itemId, objectId, mono, running, cancellationToken);
+        return _bot.ScriptUploadTaskAsync(sourcePathOrUrl, itemId, objectId, mono, running, cancellationToken);
+    }
+
+    [McpServerTool, Description("Upload a script from direct script text to an existing task/object inventory script item. Compiled result cannot be relied upon with OpenSimulator and YEngine and should be treated as advisory only. Also error messages will not be returned.")]
+    public Task<ScriptUpdateResult> ScriptContentUploadTask(
+        [Description("Raw script source text content.")] string scriptContent,
+        [Description("Script task-inventory item UUID.")] string itemId,
+        [Description("Object UUID that contains the task script item.")] string objectId,
+        [Description("True for mono target, false for lsl2 target.")] bool mono,
+        [Description("Desired running state after upload.")] bool running,
+        CancellationToken cancellationToken)
+    {
+        return _bot.ScriptContentUploadTaskAsync(scriptContent, itemId, objectId, mono, running, cancellationToken);
     }
 
     [McpServerTool, Description("Copy a script from agent inventory into an object's task inventory.")]

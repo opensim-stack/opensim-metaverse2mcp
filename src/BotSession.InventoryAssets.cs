@@ -1293,7 +1293,38 @@ internal sealed partial class BotSession
             }
 
             var messages = result.compileMessages?.ToList() ?? new List<string>();
-            return ScriptUpdateResult.OkResult(
+            return BuildScriptUpdateResult(
+                client,
+                result.itemID.ToString(),
+                result.assetID.ToString(),
+                sourceBytes.Length,
+                result.uploadStatus,
+                result.compileSuccess,
+                messages,
+                "Script upload to agent inventory completed.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ScriptUpdateResult> ScriptContentUploadAgentAsync(string scriptContent, string itemId, bool mono, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var scriptItemId))
+        {
+            return ScriptUpdateResult.FailResult("itemId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sourceBytes = Encoding.UTF8.GetBytes(scriptContent ?? string.Empty);
+            var result = await client.Inventory.RequestUpdateScriptAgentInventoryAsync(sourceBytes, scriptItemId, mono, token).ConfigureAwait(false);
+
+            if (!result.uploadSuccess)
+            {
+                return ScriptUpdateResult.FailResult($"Script upload failed: {result.uploadStatus}");
+            }
+
+            var messages = result.compileMessages?.ToList() ?? new List<string>();
+            return BuildScriptUpdateResult(
+                client,
                 result.itemID.ToString(),
                 result.assetID.ToString(),
                 sourceBytes.Length,
@@ -1335,7 +1366,8 @@ internal sealed partial class BotSession
             }
 
             var messages = result.compileMessages?.ToList() ?? new List<string>();
-            return ScriptUpdateResult.OkResult(
+            return BuildScriptUpdateResult(
+                client,
                 result.itemID.ToString(),
                 result.assetID.ToString(),
                 sourceBytes.Length,
@@ -1344,6 +1376,113 @@ internal sealed partial class BotSession
                 messages,
                 "Script upload to task inventory completed.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ScriptUpdateResult> ScriptContentUploadTaskAsync(
+        string scriptContent,
+        string itemId,
+        string objectId,
+        bool mono,
+        bool running,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var scriptItemId))
+        {
+            return ScriptUpdateResult.FailResult("itemId is not a valid UUID.");
+        }
+
+        if (!UUID.TryParse(objectId, out var taskObjectId))
+        {
+            return ScriptUpdateResult.FailResult("objectId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sourceBytes = Encoding.UTF8.GetBytes(scriptContent ?? string.Empty);
+            var result = await client.Inventory
+                .RequestUpdateScriptTaskAsync(sourceBytes, scriptItemId, taskObjectId, mono, running, token)
+                .ConfigureAwait(false);
+
+            if (!result.uploadSuccess)
+            {
+                return ScriptUpdateResult.FailResult($"Task script upload failed: {result.uploadStatus}");
+            }
+
+            var messages = result.compileMessages?.ToList() ?? new List<string>();
+            return BuildScriptUpdateResult(
+                client,
+                result.itemID.ToString(),
+                result.assetID.ToString(),
+                sourceBytes.Length,
+                result.uploadStatus,
+                result.compileSuccess,
+                messages,
+                "Script upload to task inventory completed.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private ScriptUpdateResult BuildScriptUpdateResult(
+        GridClient client,
+        string itemId,
+        string assetId,
+        int sourceBytes,
+        string uploadStatus,
+        bool? compiledHint,
+        IReadOnlyList<string> compileMessages,
+        string message)
+    {
+        if (ShouldForceOpenSimCompiledHint(client, uploadStatus, compiledHint, compileMessages))
+        {
+            return ScriptUpdateResult.OkResult(
+                itemId,
+                assetId,
+                sourceBytes,
+                uploadStatus,
+                true,
+                compileMessages,
+                "OpenSimulator with YEngine script compilation results are unavailable, verify success independently");
+        }
+
+        return ScriptUpdateResult.OkResult(itemId, assetId, sourceBytes, uploadStatus, compiledHint, compileMessages, message);
+    }
+
+    private bool ShouldForceOpenSimCompiledHint(
+        GridClient client,
+        string uploadStatus,
+        bool? compiledHint,
+        IReadOnlyList<string> compileMessages)
+    {
+        return IsCurrentServerOpenSimulator(client)
+            && string.Equals(uploadStatus, "complete", StringComparison.OrdinalIgnoreCase)
+            && compiledHint == false
+            && (compileMessages.Count == 0);
+    }
+
+    private bool IsCurrentServerOpenSimulator(GridClient client)
+    {
+        if (Uri.TryCreate(_options.BotLoginUri, UriKind.Absolute, out var loginUri))
+        {
+            var host = loginUri.Host ?? string.Empty;
+            if (host.EndsWith("secondlife.com", StringComparison.OrdinalIgnoreCase)
+                || host.EndsWith("lindenlab.com", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // This bot targets OpenSimulator-style grids; non-Linden login hosts are treated as OpenSim.
+            return true;
+        }
+
+        var loginMessage = _lastLoginMessage ?? string.Empty;
+        if (loginMessage.Contains("OpenSim", StringComparison.OrdinalIgnoreCase)
+            || loginMessage.Contains("OpenSimulator", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var simName = client.Network.CurrentSim?.Name ?? string.Empty;
+        return simName.Contains("OpenSim", StringComparison.OrdinalIgnoreCase)
+            || simName.Contains("OpenSimulator", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<BotToolResult> ScriptCopyInventoryToTaskAsync(
@@ -5171,7 +5310,7 @@ internal sealed record ScriptUpdateResult(
     string? AssetId,
     int SourceBytes,
     string UploadStatus,
-    bool? CompileSuccess,
+    bool? CompiledHint,
     IReadOnlyList<string> CompileMessages)
 {
     public static ScriptUpdateResult OkResult(
@@ -5179,10 +5318,10 @@ internal sealed record ScriptUpdateResult(
         string assetId,
         int sourceBytes,
         string uploadStatus,
-        bool? compileSuccess,
+        bool? compiledHint,
         IReadOnlyList<string> compileMessages,
         string message)
-        => new(true, message, itemId, assetId, sourceBytes, uploadStatus, compileSuccess, compileMessages);
+        => new(true, message, itemId, assetId, sourceBytes, uploadStatus, compiledHint, compileMessages);
 
     public static ScriptUpdateResult FailResult(string message)
         => new(false, message, null, null, 0, string.Empty, null, Array.Empty<string>());
