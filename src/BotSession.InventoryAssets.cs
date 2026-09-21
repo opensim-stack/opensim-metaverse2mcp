@@ -2287,6 +2287,8 @@ internal sealed partial class BotSession
                 return BotToolResult.Fail($"Inventory folder {folderUuid} was not found in local store.");
             }
 
+            Console.WriteLine($"[inventory] Giving folder {folder.Name} ({folder.UUID}) to {recipientUuid}.");
+                
             await client.Inventory.GiveFolderAsync(folder.UUID, folder.Name, recipientUuid, withBeamEffect, token).ConfigureAwait(false);
             return BotToolResult.OkResult($"Gave folder '{folder.Name}' ({folder.UUID}) to {recipientUuid}.");
         }, cancellationToken).ConfigureAwait(false);

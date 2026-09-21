@@ -2264,7 +2264,7 @@ internal sealed class BotMcpTools
                         return;
                     }
 
-                    _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Transferring imported folder to target agent.", 85);
+                    _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, $"Transferring imported folder {importedFolderId} to target agent {targetAgentId.Trim()}.", 85);
                     var giveResult = await _bot.InventoryGiveFolderAsync(
                         importedFolderId,
                         targetAgentId.Trim(),
@@ -2594,7 +2594,7 @@ internal sealed class BotMcpTools
         return _bot.InventoryOfferPolicyRulesClear();
     }
 
-    [McpServerTool, Description("List recent incoming inventory-offer events and decisions.")]
+    [McpServerTool, Description("List recent incoming inventory-offer events and decisions that this bot has received (doesnt include sent offers).")]
     public InventoryOfferHistoryResult InventoryOfferHistoryList(
         [Description("Maximum entries to return (1..200).") ] int maxResults)
     {
