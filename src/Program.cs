@@ -7,6 +7,12 @@ using ModelContextProtocol.Protocol;
 using System.Text.Json;
 using Opensim.Metaverse2Mcp;
 
+var collectorExitCode = await ThreadDumpCollector.TryRunAsync(args).ConfigureAwait(false);
+if (collectorExitCode.HasValue)
+{
+    return collectorExitCode.Value;
+}
+
 var (options, startupExitCode) = LoadOptions(args);
 if (options == null)
 {
@@ -57,6 +63,10 @@ builder.Services
             catch (ArgumentException ex)
             {
                 throw new McpException(BuildCallToolArgumentErrorMessage(request?.Params?.Name, request?.Params?.Arguments, ex.Message), ex);
+            }
+            catch (Exception ex)
+            {
+                throw new McpException($"Tool '{request?.Params?.Name ?? "<unknown>"}' failed: {ex.Message}", ex);
             }
         });
     })

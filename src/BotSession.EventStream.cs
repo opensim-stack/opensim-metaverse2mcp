@@ -10,6 +10,7 @@ internal sealed partial class BotSession
     private const int EventStreamMaxObject = 2000;
     private const int EventStreamMaxTeleport = 500;
     private const int EventStreamMaxProgress = 1000;
+    private const int EventStreamMaxFollow = 1000;
     private const int EventStreamObjectMinIntervalMs = 250;
 
     private readonly object _eventStreamLock = new();
@@ -17,6 +18,7 @@ internal sealed partial class BotSession
     private readonly Queue<RuntimeEventInfo> _eventStreamObject = new();
     private readonly Queue<RuntimeEventInfo> _eventStreamTeleport = new();
     private readonly Queue<RuntimeEventInfo> _eventStreamProgress = new();
+    private readonly Queue<RuntimeEventInfo> _eventStreamFollow = new();
     private readonly SemaphoreSlim _eventStreamSignal = new(0, int.MaxValue);
     private readonly ConcurrentDictionary<string, EventStreamSubscriptionState> _eventSubscriptions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _objectEventThrottle = new(StringComparer.OrdinalIgnoreCase);
@@ -446,12 +448,13 @@ internal sealed partial class BotSession
             "object" => "object",
             "teleport" => "teleport",
             "progress" => "progress",
+            "follow" => "follow",
             _ => "general"
         };
     }
 
     private static HashSet<string> DefaultEventChannels()
-        => new(new[] { "general", "object", "teleport", "progress" }, StringComparer.OrdinalIgnoreCase);
+        => new(new[] { "general", "object", "teleport", "progress", "follow" }, StringComparer.OrdinalIgnoreCase);
 
     private static HashSet<string>? ParseEventTypes(string? raw)
     {
@@ -495,13 +498,13 @@ internal sealed partial class BotSession
         var accepted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var channel in requested)
         {
-            if (channel == "general" || channel == "object" || channel == "teleport" || channel == "progress")
+            if (channel == "general" || channel == "object" || channel == "teleport" || channel == "progress" || channel == "follow")
             {
                 accepted.Add(channel);
                 continue;
             }
 
-            error = "channels must use: general, object, teleport, progress, or all.";
+            error = "channels must use: general, object, teleport, progress, follow, or all.";
             return null;
         }
 
@@ -554,6 +557,7 @@ internal sealed partial class BotSession
                 : (Vector3?)null;
             var matchingAll = EnumerateChannelEvents(channels)
                 .OrderBy(e => e.EventId)
+                .Where(e => channels.Contains(e.Channel))
                 .Where(e => e.EventId > afterId)
                 .Where(e => EventTypeMatches(e.EventType, eventTypes))
                 .Where(e => EventMatchesFilter(e, filter, origin, notBeforeUtc))
@@ -612,6 +616,14 @@ internal sealed partial class BotSession
         if (channels.Contains("progress"))
         {
             foreach (var item in _eventStreamProgress)
+            {
+                yield return item;
+            }
+        }
+
+        if (channels.Contains("follow"))
+        {
+            foreach (var item in _eventStreamFollow)
             {
                 yield return item;
             }
@@ -826,6 +838,7 @@ internal sealed partial class BotSession
             "object" => _eventStreamObject,
             "teleport" => _eventStreamTeleport,
             "progress" => _eventStreamProgress,
+            "follow" => _eventStreamFollow,
             _ => _eventStreamGeneral,
         };
     }
@@ -837,6 +850,7 @@ internal sealed partial class BotSession
             "object" => EventStreamMaxObject,
             "teleport" => EventStreamMaxTeleport,
             "progress" => EventStreamMaxProgress,
+            "follow" => EventStreamMaxFollow,
             _ => EventStreamMaxGeneral,
         };
 
@@ -854,6 +868,9 @@ internal sealed partial class BotSession
                     break;
                 case "progress":
                     _eventStreamTrimmedProgress++;
+                    break;
+                case "follow":
+                    _eventStreamTrimmedGeneral++;
                     break;
                 default:
                     _eventStreamTrimmedGeneral++;

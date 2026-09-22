@@ -14,8 +14,7 @@ internal sealed partial class BotSession
     private const bool EnableWalkTeleportFallback = true;
     private readonly object _movementLock = new();
     private CancellationTokenSource? _movementAutoStopCts;
-    private CancellationTokenSource? _followCts;
-    private Task? _followTask;
+    private string? _activeFollowTaskHandle;
     private string? _followTargetDescription;
     private UUID _followTrackedAvatarId = UUID.Zero;
     private uint _followTrackedLocalId;
@@ -307,11 +306,22 @@ internal sealed partial class BotSession
         return Task.FromResult(new CameraStateResult(true, "OK", state));
     }
 
-    public async Task<BotToolResult> FollowAsync(string targetType, string target, float distanceBuffer, CancellationToken cancellationToken)
+    public Task<BotTaskHandle> FollowAsync(string targetType, string target, float distanceBuffer, CancellationToken cancellationToken)
     {
+        BotTaskHandle QueueImmediateFailure(string failureMessage)
+        {
+            return StartBotTask(
+                "Follow target.",
+                (taskHandle, _) =>
+                {
+                    EmitFollowCompleteEvent(taskHandle.Handle, false, failureMessage);
+                    return Task.CompletedTask;
+                });
+        }
+
         if (string.IsNullOrWhiteSpace(target))
         {
-            return BotToolResult.Fail("target is required.");
+            return Task.FromResult(QueueImmediateFailure("target is required."));
         }
 
         var buffer = distanceBuffer <= 0f ? 3.0f : Math.Clamp(distanceBuffer, 0.5f, 50f);
@@ -319,64 +329,122 @@ internal sealed partial class BotSession
         var isAvatar = string.Equals(targetType, "avatar", StringComparison.OrdinalIgnoreCase);
         if (!isObject && !isAvatar)
         {
-            return BotToolResult.Fail("targetType must be 'avatar' or 'object'.");
+            return Task.FromResult(QueueImmediateFailure("targetType must be 'avatar' or 'object'."));
         }
 
-        return await ExecuteLockedAsync((client, _) =>
+        var taskDescription = $"Follow {targetType} '{target.Trim()}'.";
+        var followTask = StartBotTask(
+            taskDescription,
+            async (taskHandle, taskCancellationToken) =>
+            {
+                try
+                {
+                    EmitFollowProgressEvent(taskHandle.Handle, "follow.starting", $"Resolving {targetType} target '{target.Trim()}' for follow.");
+
+                    FollowResolution? resolution = null;
+                    var setup = await ExecuteLockedAsync((client, _) =>
+                    {
+                        var sim = client.Network.CurrentSim;
+                        if (sim == null)
+                        {
+                            return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+                        }
+
+                        uint localId;
+                        string label;
+                        var trackedId = UUID.Zero;
+                        if (isAvatar)
+                        {
+                            if (!TryResolveAvatarAcrossSims(client, target, out sim, out localId, out label, out trackedId))
+                            {
+                                return Task.FromResult(BotToolResult.Fail(
+                                    $"Avatar '{target}' not found in visible simulators. Use full name or UUID."));
+                            }
+                        }
+                        else if (!TryResolveObject(sim, target, out localId, out label))
+                        {
+                            return Task.FromResult(BotToolResult.Fail(
+                                $"Object '{target}' not found in current simulator. Use name, local ID, or UUID."));
+                        }
+
+                        resolution = new FollowResolution(client, sim, isObject, trackedId, localId, label);
+                        StartFollowLoop(taskHandle.Handle, client, sim, isObject, trackedId, localId, label);
+                        return Task.FromResult(BotToolResult.OkResult($"Following {targetType} {label} (buffer {buffer:F1}m)."));
+                    }, taskCancellationToken).ConfigureAwait(false);
+
+                    if (!setup.Ok || resolution == null)
+                    {
+                        EmitFollowCompleteEvent(taskHandle.Handle, false, setup.Message);
+                        return;
+                    }
+
+                    EmitFollowProgressEvent(
+                        taskHandle.Handle,
+                        "follow.started",
+                        $"Following {targetType} {resolution.Label} (buffer {buffer:F1}m).",
+                        new Dictionary<string, string?>
+                        {
+                            ["targetType"] = targetType.Trim().ToLowerInvariant(),
+                            ["target"] = resolution.Label,
+                            ["bufferMeters"] = buffer.ToString("0.0", CultureInfo.InvariantCulture)
+                        });
+
+                    var followResult = await FollowLoopAsync(
+                        taskHandle.Handle,
+                        resolution.Client,
+                        resolution.Simulator,
+                        resolution.IsObject,
+                        resolution.TrackedId,
+                        resolution.LocalId,
+                        resolution.Label,
+                        buffer,
+                        taskCancellationToken).ConfigureAwait(false);
+
+                    EmitFollowCompleteEvent(taskHandle.Handle, followResult.Ok, followResult.Message);
+                }
+                catch (OperationCanceledException) when (taskCancellationToken.IsCancellationRequested)
+                {
+                    EmitFollowCompleteEvent(taskHandle.Handle, true, "Follow cancelled.");
+                }
+                catch (Exception ex)
+                {
+                    EmitFollowCompleteEvent(taskHandle.Handle, false, $"Follow failed: {ex.Message}");
+                }
+            });
+
+        cancellationToken.Register(() =>
         {
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
+            try
             {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+                CancelBotTask(followTask.Handle);
             }
+            catch
+            {
+                // Best effort if the caller timeout/cancels before task registration settles.
+            }
+        });
 
-            uint localId;
-            string label;
-            var trackedId = UUID.Zero;
-            if (isAvatar)
-            {
-                if (!TryResolveAvatarAcrossSims(client, target, out sim, out localId, out label, out trackedId))
-                {
-                    return Task.FromResult(BotToolResult.Fail(
-                        $"Avatar '{target}' not found in visible simulators. Use full name or UUID."));
-                }
-            }
-            else
-            {
-                if (!TryResolveObject(sim, target, out localId, out label))
-                {
-                    return Task.FromResult(BotToolResult.Fail(
-                        $"Object '{target}' not found in current simulator. Use name, local ID, or UUID."));
-                }
-            }
-
-            StartFollowLoop(client, sim, isObject, trackedId, localId, label, buffer);
-            return Task.FromResult(BotToolResult.OkResult(
-                $"Following {targetType} {label} (buffer {buffer:F1}m). Use StopFollow or StopMovement to end."));
-        }, cancellationToken).ConfigureAwait(false);
+        return Task.FromResult(followTask);
     }
 
-    public Task<BotToolResult> StopFollowAsync(CancellationToken cancellationToken)
-    {
-        var hadFollow = StopFollowInternal();
-        return Task.FromResult(hadFollow
-            ? BotToolResult.OkResult("Follow stopped.")
-            : BotToolResult.OkResult("No active follow to stop."));
-    }
+    private sealed record FollowResolution(
+        GridClient Client,
+        Simulator Simulator,
+        bool IsObject,
+        UUID TrackedId,
+        uint LocalId,
+        string Label);
 
-    private void StartFollowLoop(GridClient client, Simulator sim, bool isObject, UUID trackedId, uint localId, string label, float buffer)
+    private void StartFollowLoop(string followTaskHandle, GridClient client, Simulator sim, bool isObject, UUID trackedId, uint localId, string label)
     {
         StopFollowInternal();
-
-        var cts = new CancellationTokenSource();
         lock (_movementLock)
         {
-            _followCts = cts;
+            _activeFollowTaskHandle = followTaskHandle;
             _followTargetDescription = $"{(isObject ? "object" : "avatar")} {label}";
             _followTrackedAvatarId = isObject ? UUID.Zero : trackedId;
             _followTrackedLocalId = localId;
             _followAnchorSimHandle = sim.Handle;
-            _followTask = Task.Run(() => FollowLoopAsync(client, sim, isObject, trackedId, localId, label, buffer, cts.Token));
         }
 
         if (IsFollowDiagnosticsEnabled())
@@ -386,7 +454,8 @@ internal sealed partial class BotSession
         }
     }
 
-    private async Task FollowLoopAsync(
+    private async Task<BotToolResult> FollowLoopAsync(
+        string followTaskHandle,
         GridClient client,
         Simulator sim,
         bool isObject,
@@ -420,6 +489,8 @@ internal sealed partial class BotSession
         var lastKnownCrossRegionLocal = Vector3.Zero;
         var followStartRegionHandle = sim.Handle;
         var followStartLocal = ClampLocalPosition(client.Self.SimPosition);
+        var avatarLost = false;
+        var completion = BotToolResult.OkResult($"Follow ended for {label}.");
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -430,6 +501,8 @@ internal sealed partial class BotSession
                 if (botSim == null)
                 {
                     Console.WriteLine($"[follow] no active simulator; stopping follow of {label}.");
+                    EmitFollowProgressEvent(followTaskHandle, "follow.stopping", $"Lost active simulator while following {label}; stopping follow.");
+                    completion = BotToolResult.Fail($"Lost active simulator while following {label}.");
                     if (IsFollowDiagnosticsEnabled())
                     {
                         Console.WriteLine(
@@ -448,12 +521,14 @@ internal sealed partial class BotSession
                     if (!ReferenceEquals(botSim, targetSim))
                     {
                         Console.WriteLine($"[follow] object {label} changed region; stopping.");
+                        completion = BotToolResult.Fail($"Object {label} changed region; follow stopped.");
                         break;
                     }
 
                     if (!targetSim.ObjectsPrimitives.TryGetValue(targetLocalId, out var prim))
                     {
                         Console.WriteLine($"[follow] object {label} no longer in cache; stopping.");
+                        completion = BotToolResult.Fail($"Object {label} is no longer in cache; follow stopped.");
                         break;
                     }
 
@@ -608,6 +683,15 @@ internal sealed partial class BotSession
 
                     if (avatar == null)
                     {
+                        if (!avatarLost)
+                        {
+                            avatarLost = true;
+                            EmitFollowProgressEvent(
+                                followTaskHandle,
+                                "follow.target.lost",
+                                $"Lost avatar {label}; attempting to refind via cache/spawner/map.");
+                        }
+
                         if (hasFreshMapped)
                         {
                             crossRegionTargetHandle = lastMappedRegionHandle;
@@ -650,6 +734,7 @@ internal sealed partial class BotSession
                             }
 
                             Console.WriteLine($"[follow] avatar {label} no longer in cache; stopping.");
+                            completion = BotToolResult.Fail($"Avatar {label} is no longer in cache; follow stopped.");
                             if (IsFollowDiagnosticsEnabled())
                             {
                                 Console.WriteLine(
@@ -660,6 +745,15 @@ internal sealed partial class BotSession
                     }
                     else
                     {
+                        if (avatarLost)
+                        {
+                            avatarLost = false;
+                            EmitFollowProgressEvent(
+                                followTaskHandle,
+                                "follow.target.refound",
+                                $"Refound avatar {label}; resuming follow.");
+                        }
+
                         lastAvatarSeenAt = DateTime.UtcNow;
 
                         if (hasFreshMapped)
@@ -706,6 +800,10 @@ internal sealed partial class BotSession
                         lastCrossRegionProgressAt = DateTime.UtcNow;
                         crossRegionTeleportAttempts = 0;
                         teleportRequestSent = false;
+                        EmitFollowProgressEvent(
+                            followTaskHandle,
+                            "follow.cross_region.walk_border",
+                            $"Target {label} moved cross-region; walking to border waypoint.");
                     }
                     else if ((lastCrossRegionDistance - distance) >= 1.0f)
                     {
@@ -719,6 +817,10 @@ internal sealed partial class BotSession
                         crossRegionState = FollowCrossRegionState.TeleportingToTarget;
                         crossRegionStateSince = DateTime.UtcNow;
                         client.Self.AutoPilotCancel();
+                        EmitFollowProgressEvent(
+                            followTaskHandle,
+                            "follow.cross_region.teleport_attempt",
+                            $"Border pathing stalled while following {label}; attempting teleport.");
                     }
 
                     if (crossRegionState == FollowCrossRegionState.TeleportingToTarget
@@ -726,9 +828,17 @@ internal sealed partial class BotSession
                         && lastKnownCrossRegionHandle != 0)
                     {
                         crossRegionTeleportAttempts++;
+                        EmitFollowProgressEvent(
+                            followTaskHandle,
+                            "follow.cross_region.teleport_try",
+                            $"Teleport attempt {crossRegionTeleportAttempts} while following {label}.");
                         var teleported = await client.Self.TeleportAsync(lastKnownCrossRegionHandle, lastKnownCrossRegionLocal, cancellationToken).ConfigureAwait(false);
                         if (teleported)
                         {
+                            EmitFollowProgressEvent(
+                                followTaskHandle,
+                                "follow.cross_region.teleport_succeeded",
+                                $"Teleport succeeded; continuing follow of {label}.");
                             crossRegionState = FollowCrossRegionState.None;
                             crossRegionStateSince = DateTime.MinValue;
                             lastCrossRegionDistance = float.MaxValue;
@@ -740,6 +850,10 @@ internal sealed partial class BotSession
                         {
                             crossRegionState = FollowCrossRegionState.AwaitingTeleportAssist;
                             crossRegionStateSince = DateTime.UtcNow;
+                            EmitFollowProgressEvent(
+                                followTaskHandle,
+                                "follow.cross_region.awaiting_assist",
+                                $"Teleport attempts failed while following {label}; requesting teleport assist.");
                         }
                     }
 
@@ -751,6 +865,10 @@ internal sealed partial class BotSession
                             trackedId,
                             "Could you send me a teleport? I lost pathing while following you across regions.");
                         teleportRequestSent = true;
+                        EmitFollowProgressEvent(
+                            followTaskHandle,
+                            "follow.cross_region.assist_requested",
+                            $"Requested teleport assist from {label}.");
                     }
 
                     if (crossRegionState == FollowCrossRegionState.AwaitingTeleportAssist
@@ -772,6 +890,9 @@ internal sealed partial class BotSession
                             returnedToStart
                                 ? $"[follow] teleport assist timed out; returned to follow start and stopping follow of {label}."
                                 : $"[follow] teleport assist timed out; failed to return to follow start and stopping follow of {label}.");
+                        completion = BotToolResult.Fail(returnedToStart
+                            ? $"Teleport assist timed out while following {label}; returned to follow start and stopped."
+                            : $"Teleport assist timed out while following {label}; failed return to follow start and stopped.");
                         break;
                     }
                 }
@@ -815,11 +936,13 @@ internal sealed partial class BotSession
             }
             catch (OperationCanceledException)
             {
+                completion = BotToolResult.OkResult($"Follow cancelled for {label}.");
                 break;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[follow] error while following {label}: {ex.Message}");
+                completion = BotToolResult.Fail($"Follow error while tracking {label}: {ex.Message}");
                 break;
             }
         }
@@ -833,13 +956,8 @@ internal sealed partial class BotSession
             // Best-effort cleanup.
         }
 
-        lock (_movementLock)
-        {
-            _followTargetDescription = null;
-            _followTrackedAvatarId = UUID.Zero;
-            _followTrackedLocalId = 0;
-            _followAnchorSimHandle = 0;
-        }
+        ClearFollowTrackingState(followTaskHandle);
+        return completion;
     }
 
     private bool IsFollowDiagnosticsEnabled()
@@ -1188,36 +1306,85 @@ internal sealed partial class BotSession
         return false;
     }
 
-    private bool StopFollowInternal()
+    private void EmitFollowProgressEvent(
+        string handle,
+        string eventType,
+        string message,
+        IReadOnlyDictionary<string, string?>? attributes = null)
     {
-        CancellationTokenSource? cts;
+        var payload = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["handle"] = handle
+        };
+
+        if (attributes != null)
+        {
+            foreach (var pair in attributes)
+            {
+                payload[pair.Key] = pair.Value;
+            }
+        }
+
+        EmitRuntimeEvent(
+            "follow",
+            eventType,
+            "follow",
+            message,
+            payload);
+    }
+
+    private void EmitFollowCompleteEvent(string handle, bool success, string message)
+    {
+        _botTaskManager.TryReportCompletion(handle, success, message);
+        EmitRuntimeEvent(
+            "follow",
+            "follow.complete",
+            "follow",
+            message,
+            new Dictionary<string, string?>
+            {
+                ["handle"] = handle,
+                ["success"] = success ? "true" : "false"
+            });
+    }
+
+    private void ClearFollowTrackingState(string handle)
+    {
         lock (_movementLock)
         {
-            cts = _followCts;
-            _followCts = null;
-            _followTask = null;
+            if (string.IsNullOrWhiteSpace(_activeFollowTaskHandle)
+                || !_activeFollowTaskHandle.Equals(handle, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            _activeFollowTaskHandle = null;
+            _followTargetDescription = null;
+            _followTrackedAvatarId = UUID.Zero;
+            _followTrackedLocalId = 0;
+            _followAnchorSimHandle = 0;
+        }
+    }
+
+    private bool StopFollowInternal()
+    {
+        string? handle;
+        lock (_movementLock)
+        {
+            handle = _activeFollowTaskHandle;
+            _activeFollowTaskHandle = null;
             _followTargetDescription = null;
             _followTrackedAvatarId = UUID.Zero;
             _followTrackedLocalId = 0;
             _followAnchorSimHandle = 0;
         }
 
-        if (cts == null)
+        if (string.IsNullOrWhiteSpace(handle))
         {
             return false;
         }
 
-        try
-        {
-            cts.Cancel();
-        }
-        catch
-        {
-            // Ignore cancellation races.
-        }
-
-        cts.Dispose();
-        return true;
+        return _botTaskManager.TryCancel(handle, out _);
     }
 
     private void ScheduleMovementAutoStop(TimeSpan delay)

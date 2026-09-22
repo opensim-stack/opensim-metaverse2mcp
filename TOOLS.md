@@ -5,6 +5,8 @@
 The server publishes tools including:
 
 - `GetStatus`
+- `DiagnosticThreadStackDump`
+- `DiagnosticThreadStackDumpBlocked`
 - `BotList`
 - `BotGet`
 - `BotCreate`

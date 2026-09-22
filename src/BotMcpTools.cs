@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json;
 using LibreMetaverse;
 using ModelContextProtocol.Server;
@@ -24,6 +26,154 @@ internal sealed class BotMcpTools
     {
         return _bot.GetStatus();
     }
+
+    [McpServerTool, Description("Return a managed stack dump for all current runtime threads to diagnose hangs/deadlocks.")]
+    public Task<DataToolResult> DiagnosticThreadStackDump(
+        [Description("Maximum frames to include per thread (1..512).")]
+        int maxFramesPerThread = 128,
+        CancellationToken cancellationToken = default)
+    {
+        return CaptureManagedThreadStackDumpExternalAsync(maxFramesPerThread, blockedOnly: false, cancellationToken);
+    }
+
+    [McpServerTool, Description("Return a managed stack dump filtered to likely blocked/waiting threads to diagnose lock contention and deadlocks.")]
+    public Task<DataToolResult> DiagnosticThreadStackDumpBlocked(
+        [Description("Maximum frames to include per thread (1..512).")]
+        int maxFramesPerThread = 128,
+        CancellationToken cancellationToken = default)
+    {
+        return CaptureManagedThreadStackDumpExternalAsync(maxFramesPerThread, blockedOnly: true, cancellationToken);
+    }
+
+    private static async Task<DataToolResult> CaptureManagedThreadStackDumpExternalAsync(
+        int maxFramesPerThread,
+        bool blockedOnly,
+        CancellationToken cancellationToken)
+    {
+        if (maxFramesPerThread < 1 || maxFramesPerThread > 512)
+        {
+            return DataToolResult.FailResult("maxFramesPerThread must be between 1 and 512.");
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return DataToolResult.FailResult("Operation canceled.");
+        }
+
+        var startInfo = BuildThreadDumpCollectorStartInfo();
+        if (startInfo == null)
+        {
+            return DataToolResult.FailResult("Unable to resolve collector executable path for thread-dump launch.");
+        }
+
+        using var process = new Process();
+        process.StartInfo = startInfo;
+
+        process.StartInfo.ArgumentList.Add("--thread-dump-collector");
+        process.StartInfo.ArgumentList.Add("--pid");
+        process.StartInfo.ArgumentList.Add(Environment.ProcessId.ToString());
+        process.StartInfo.ArgumentList.Add("--max-frames");
+        process.StartInfo.ArgumentList.Add(maxFramesPerThread.ToString());
+        process.StartInfo.ArgumentList.Add("--blocked-only");
+        process.StartInfo.ArgumentList.Add(blockedOnly ? "true" : "false");
+
+        try
+        {
+            if (!process.Start())
+            {
+                return DataToolResult.FailResult("Failed to launch external thread-dump collector process.");
+            }
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                }
+                catch
+                {
+                    // Best-effort cleanup only.
+                }
+
+                return cancellationToken.IsCancellationRequested
+                    ? DataToolResult.FailResult("Operation canceled.")
+                    : DataToolResult.FailResult("Thread-dump collector timed out after 10 seconds.");
+            }
+
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
+
+            if (process.ExitCode != 0)
+            {
+                var error = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+                return DataToolResult.FailResult($"Thread-dump collector failed (exit {process.ExitCode}): {error.Trim()}");
+            }
+
+            var response = JsonSerializer.Deserialize<ThreadDumpCollectorResponse>(stdout);
+            if (response == null)
+            {
+                return DataToolResult.FailResult("Thread-dump collector returned an empty response.");
+            }
+
+            if (!response.Ok)
+            {
+                return DataToolResult.FailResult(response.Error ?? response.Message);
+            }
+
+            return DataToolResult.OkResult(response.Message, response.PayloadJson ?? "{}");
+        }
+        catch (Exception ex)
+        {
+            return DataToolResult.FailResult($"Failed to run thread-dump collector: {ex.Message}");
+        }
+    }
+
+    private static ProcessStartInfo? BuildThreadDumpCollectorStartInfo()
+    {
+        var hostPath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(hostPath))
+        {
+            return null;
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = hostPath,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        var hostName = Path.GetFileNameWithoutExtension(hostPath);
+        if (string.Equals(hostName, "dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            var entryAssemblyPath = Assembly.GetEntryAssembly()?.Location;
+            if (string.IsNullOrWhiteSpace(entryAssemblyPath))
+            {
+                return null;
+            }
+
+            startInfo.ArgumentList.Add(entryAssemblyPath);
+        }
+
+        return startInfo;
+    }
+
+    private sealed record ThreadDumpCollectorResponse(bool Ok, string Message, string? PayloadJson, string? Error);
 
     [McpServerTool, Description("List bot instances from the opensim-spawner API.")]
     public Task<DataToolResult> BotList(CancellationToken cancellationToken)
@@ -1184,20 +1334,14 @@ internal sealed class BotMcpTools
         return _bot.GetCameraStateAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("Follow a target avatar or object using autopilot. For avatar location checks, the follow loop prefers opensim-spawner local-grid agent lookup before map/cache fallbacks.")]
-    public Task<BotToolResult> Follow(
+    [McpServerTool, Description("Start following a target avatar or object as a background BotTask. Cancel via BotTaskCancel(handle). Follow lifecycle/action updates are emitted on the follow runtime-event channel.")]
+    public Task<BotTaskHandle> Follow(
         [Description("Target type: avatar or object.")] string targetType,
         [Description("Avatar full name or UUID, or object name, local ID, or UUID.")] string target,
         [Description("Distance buffer in meters; follow pauses inside this range (default 3).")] float distanceBuffer,
         CancellationToken cancellationToken)
     {
         return _bot.FollowAsync(targetType, target, distanceBuffer, cancellationToken);
-    }
-
-    [McpServerTool, Description("Stop an active follow started by Follow.")]
-    public Task<BotToolResult> StopFollow(CancellationToken cancellationToken)
-    {
-        return _bot.StopFollowAsync(cancellationToken);
     }
 
     [McpServerTool, Description("Create a new prim shape at a position with scale and rotation.")]
@@ -1909,7 +2053,7 @@ internal sealed class BotMcpTools
         return _bot.InventoryGiveItemAsync(itemId, recipientAgentId, withBeamEffect, cancellationToken);
     }
 
-    [McpServerTool, Description("Give an inventory folder (UUID/path) to another avatar UUID.")]
+    [McpServerTool, Description("Give an inventory folder (UUID/path) to another avatar UUID. Sending to another agent is limited to a maximum of 66 items at a time.")]
     public Task<BotToolResult> InventoryGiveFolder(
         [Description("Inventory folder UUID or slash-separated path to send.")] string folderIdOrPath,
         [Description("Recipient avatar UUID.")] string recipientAgentId,
@@ -1919,7 +2063,7 @@ internal sealed class BotMcpTools
         return _bot.InventoryGiveFolderAsync(folderIdOrPath, recipientAgentId, withBeamEffect, cancellationToken);
     }
 
-    [McpServerTool, Description("Queue an IAR (Inventory Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel. Caller should filter on this channel for progress updates and completion status to avoid hearbeat messages defeating timeouts")]
+    [McpServerTool, Description("Queue an IAR (Inventory Archive) URL import as a background BotTask. Progress/completion is emitted on the progress runtime-event channel. Caller should filter on this channel for progress updates and completion status to avoid hearbeat messages defeating timeouts. Sending to another agent is limited to a maximum of 66 items at a time.")]
     public async Task<BotTaskHandle> ImportIarUrl(
         [Description("URL where the IAR file will be imported from (can be anything, doesn't have to end in .oar). OutWorldz URLs are treated specially to extract the real filename from the File= query parameter.")]
         string url,
@@ -1981,199 +2125,7 @@ internal sealed class BotMcpTools
             return QueueImmediateFailure("inventoryPath must contain at least one folder name.");
         }
 
-        async Task<InventoryQueryResult> ListFolderAsync(string? parentFolderId)
-        {
-            return await _bot.InventoryListAsync(
-                parentFolderId,
-                false,
-                1000,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                200,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        static string DescribeFolderEntries(InventoryQueryResult listing, int maxEntries = 12)
-        {
-            if (listing.Entries.Count == 0)
-            {
-                return "<empty>";
-            }
-
-            var sample = listing.Entries
-                .Where(e => e.Kind == "folder")
-                .Take(maxEntries)
-                .Select(e => $"{e.Name} ({e.Id})")
-                .ToList();
-
-            if (sample.Count == 0)
-            {
-                return "<no-folders>";
-            }
-
-            var suffix = listing.Entries.Count > sample.Count ? $" ... +{listing.Entries.Count - sample.Count} more" : string.Empty;
-            return string.Join(", ", sample) + suffix;
-        }
-
-        static string? TryExtractCreatedFolderId(string createMessage)
-        {
-            if (string.IsNullOrWhiteSpace(createMessage))
-            {
-                return null;
-            }
-
-            var open = createMessage.IndexOf('(');
-            if (open < 0)
-            {
-                return null;
-            }
-
-            var close = createMessage.IndexOf(')', open + 1);
-            if (close <= open + 1)
-            {
-                return null;
-            }
-
-            var candidate = createMessage.Substring(open + 1, close - open - 1).Trim();
-            return UUID.TryParse(candidate, out var parsed) ? parsed.ToString() : null;
-        }
-
-        async Task<(bool Exists, string? FolderId, string? Error)> TryResolveFolderPathAsync(IReadOnlyList<string> segments)
-        {
-            string? parentFolderId = null;
-
-            foreach (var segment in segments)
-            {
-                var listing = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
-                if (!listing.Ok)
-                {
-                    return (false, null, listing.Message);
-                }
-
-                var child = listing.Entries.FirstOrDefault(e =>
-                    e.Kind == "folder" &&
-                    string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
-
-                if (child == null)
-                {
-                    return (false, null, null);
-                }
-
-                parentFolderId = child.Id;
-            }
-
-            return (true, parentFolderId, null);
-        }
-
-        async Task<BotToolResult?> EnsureFolderPathExistsAsync(IReadOnlyList<string> segments)
-        {
-            string? parentFolderId = null;
-            var segmentPath = new List<string>(segments.Count);
-
-            foreach (var segment in segments)
-            {
-                segmentPath.Add(segment);
-                var listing = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
-                if (!listing.Ok)
-                {
-                    return BotToolResult.Fail($"Failed to list inventory folder while preparing import path: {listing.Message}");
-                }
-
-                Console.WriteLine($"[iar-import] ensure-path inspect segment='{segment}' parent='{parentFolderId ?? "<root>"}' listingFolders={DescribeFolderEntries(listing)}");
-
-                var child = listing.Entries.FirstOrDefault(e =>
-                    e.Kind == "folder" &&
-                    string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
-
-                if (child != null)
-                {
-                    parentFolderId = child.Id;
-                    continue;
-                }
-
-                var createResult = await _bot.InventoryCreateFolderAsync(parentFolderId, segment, null, cancellationToken).ConfigureAwait(false);
-                if (!createResult.Ok)
-                {
-                    return BotToolResult.Fail($"Failed to create inventory folder '{segment}' in '{inventoryPath}': {createResult.Message}");
-                }
-
-                var createdFolderId = TryExtractCreatedFolderId(createResult.Message);
-                Console.WriteLine($"[iar-import] ensure-path created segment='{segment}' parent='{parentFolderId ?? "<root>"}' createdFolderId='{createdFolderId ?? "<unknown>"}' createMessage='{createResult.Message}'");
-
-                // Local inventory cache can lag after folder creation; retry resolution with short backoff.
-                const int resolveAttempts = 8;
-                const int resolveDelayMs = 250;
-                InventoryQueryResult? lastAfterCreate = null;
-                string? resolvedChildId = null;
-
-                for (var attempt = 1; attempt <= resolveAttempts; attempt++)
-                {
-                    var afterCreate = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
-                    if (!afterCreate.Ok)
-                    {
-                        return BotToolResult.Fail($"Created folder '{segment}', but failed to verify it in inventory: {afterCreate.Message}");
-                    }
-
-                    lastAfterCreate = afterCreate;
-                    var createdChild = afterCreate.Entries.FirstOrDefault(e =>
-                        e.Kind == "folder" &&
-                        string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
-
-                    if (createdChild != null)
-                    {
-                        resolvedChildId = createdChild.Id;
-                        Console.WriteLine($"[iar-import] ensure-path resolved segment='{segment}' as folderId='{resolvedChildId}' after attempt={attempt}");
-                        break;
-                    }
-
-                    // Fallback: if create returned a UUID, probe that folder directly and continue if it resolves.
-                    if (!string.IsNullOrWhiteSpace(createdFolderId))
-                    {
-                        var directProbe = await ListFolderAsync(createdFolderId).ConfigureAwait(false);
-                        if (directProbe.Ok)
-                        {
-                            resolvedChildId = createdFolderId;
-                            Console.WriteLine($"[iar-import] ensure-path fallback-resolved segment='{segment}' from createResult UUID='{resolvedChildId}' on attempt={attempt}");
-                            break;
-                        }
-
-                        Console.WriteLine($"[iar-import] ensure-path fallback probe failed for createdFolderId='{createdFolderId}' attempt={attempt}: {directProbe.Message}");
-                    }
-
-                    Console.WriteLine($"[iar-import] ensure-path unresolved segment='{segment}' attempt={attempt}/{resolveAttempts} parent='{parentFolderId ?? "<root>"}' listingFolders={DescribeFolderEntries(afterCreate)}");
-
-                    if (attempt < resolveAttempts)
-                    {
-                        await Task.Delay(resolveDelayMs, cancellationToken).ConfigureAwait(false);
-                    }
-                }
-
-                if (string.IsNullOrWhiteSpace(resolvedChildId))
-                {
-                    var attemptedPath = string.Join("/", segmentPath);
-                    var listingDebug = lastAfterCreate == null
-                        ? "<no listing captured>"
-                        : DescribeFolderEntries(lastAfterCreate);
-
-                    return BotToolResult.Fail(
-                        $"Created folder '{segment}' while preparing '{inventoryPath}', but it could not be resolved in local inventory after retries. " +
-                        $"Attempted path='{attemptedPath}', parentFolderId='{parentFolderId ?? "<root>"}', createdFolderId='{createdFolderId ?? "<unknown>"}', visibleFolders={listingDebug}");
-                }
-
-                parentFolderId = resolvedChildId;
-            }
-
-            return null;
-        }
-
-        var existingPath = await TryResolveFolderPathAsync(pathParts).ConfigureAwait(false);
+        var existingPath = await _bot.TryResolveFolderPathAsync(pathParts, cancellationToken).ConfigureAwait(false);
         if (existingPath.Error != null)
         {
             return QueueImmediateFailure($"Failed to inspect inventory path '{inventoryPath}': {existingPath.Error}");
@@ -2194,7 +2146,7 @@ internal sealed class BotMcpTools
             }
         }
 
-        var ensurePath = await EnsureFolderPathExistsAsync(pathParts).ConfigureAwait(false);
+        var ensurePath = await _bot.EnsureFolderPathExistsAsync(pathParts, cancellationToken).ConfigureAwait(false);
         if (ensurePath != null)
         {
             return QueueImmediateFailure(ensurePath.Message);
@@ -2238,10 +2190,10 @@ internal sealed class BotMcpTools
                     await Task.Delay(500, taskCancellationToken).ConfigureAwait(false);
 
                     var inventory = await _bot.InventoryListAsync(
-                        inventoryPath,
+                        BotSession.GetParentPath(inventoryPath),
                         false,
                         1000,
-                        null,
+                        BotSession.GetBasePath(inventoryPath),
                         null,
                         null,
                         null,
@@ -2252,6 +2204,7 @@ internal sealed class BotMcpTools
 
                     if (!inventory.Ok)
                     {
+                        Console.WriteLine($"Failed to locate imported folder '{inventoryPath}' in inventory: {inventory.Message}");
                         _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported successfully, but could not locate imported folder: {inventory.Message}");
                         return;
                     }
@@ -2260,25 +2213,59 @@ internal sealed class BotMcpTools
                     var importedFolderId = folderEntry?.Id;
                     if (string.IsNullOrWhiteSpace(importedFolderId))
                     {
+                        Console.WriteLine($"Failed to locate imported folder '{folderName}' in inventory after IAR import.");
                         _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported successfully, but could not find imported folder '{folderName}' in inventory.");
                         return;
                     }
 
                     _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, $"Transferring imported folder {importedFolderId} to target agent {targetAgentId.Trim()}.", 85);
-                    var giveResult = await _bot.InventoryGiveFolderAsync(
-                        importedFolderId,
-                        targetAgentId.Trim(),
-                        true,
-                        taskCancellationToken).ConfigureAwait(false);
+
+                    BotToolResult giveResult;
+                    var transferTimedOut = false;
+                    using (var giveTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(taskCancellationToken))
+                    {
+                        giveTimeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+                        try
+                        {
+                            giveResult = await _bot.InventoryGiveFolderAsync(
+                                importedFolderId,
+                                targetAgentId.Trim(),
+                                true,
+                                giveTimeoutCts.Token).ConfigureAwait(false);
+
+                            transferTimedOut = !taskCancellationToken.IsCancellationRequested && giveTimeoutCts.IsCancellationRequested;
+                            if (transferTimedOut)
+                            {
+                                _bot.EmitInventoryImportCompleteEvent(
+                                    taskHandle.Handle,
+                                    false,
+                                    $"IAR imported, but transfer timed out after 10 seconds for folder {importedFolderId}.");
+                                return;
+                            }
+                        }
+                        catch (OperationCanceledException) when (!taskCancellationToken.IsCancellationRequested && giveTimeoutCts.IsCancellationRequested)
+                        {
+                            _bot.EmitInventoryImportCompleteEvent(
+                                taskHandle.Handle,
+                                false,
+                                $"IAR imported, but transfer timed out after 10 seconds for folder {importedFolderId}.");
+                            return;
+                        }
+                    }
 
                     if (!giveResult.Ok)
                     {
+                        Console.WriteLine($"Failed to transfer imported folder {importedFolderId} to agent {targetAgentId.Trim()}: {giveResult.Message}");
                         _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported but transfer to agent failed: {giveResult.Message}");
                         return;
+                    }
+                    else {
+                        Console.WriteLine($"Successfully transferred imported folder {importedFolderId} to agent {targetAgentId.Trim()}.");
                     }
 
                     if (deleteAfterSending == true)
                     {
+                        Console.WriteLine($"Deleting imported folder {importedFolderId} from bot inventory after transfer to {targetAgentId.Trim()}.");
                         _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Transfer complete, deleting imported folder from bot inventory.", 95);
                         var deleteResult = await _bot.InventoryDeleteFolderAsync(
                             importedFolderId,
@@ -2286,22 +2273,27 @@ internal sealed class BotMcpTools
 
                         if (!deleteResult.Ok)
                         {
+                            Console.WriteLine($"Failed to delete imported folder {importedFolderId} from bot inventory after transfer: {deleteResult.Message}");
                             _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported and transferred, but folder deletion failed: {deleteResult.Message}");
                             return;
                         }
 
+                        Console.WriteLine($"Successfully deleted imported folder {importedFolderId} from bot inventory after transfer to {targetAgentId.Trim()}.");
                         _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, true, $"IAR imported from URL, transferred to agent {targetAgentId.Trim()}, and folder moved to Trash.");
                         return;
                     }
 
+                    Console.WriteLine($"IAR import and transfer to agent {targetAgentId.Trim()} completed successfully.");
                     _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, true, $"IAR imported from URL and transferred to agent {targetAgentId.Trim()}.");
                 }
                 catch (OperationCanceledException) when (taskCancellationToken.IsCancellationRequested)
                 {
+                    Console.WriteLine("IAR import task was cancelled.");
                     _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, "IAR import task was cancelled.");
                 }
                 catch (Exception ex)
                 {
+                    Console.WriteLine($"IAR import task failed: {ex}");
                     _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR import task failed: {ex.Message}");
                 }
             });
@@ -2603,7 +2595,7 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Create an MCP runtime event subscription for filtered channels/types.")]
     public EventStreamSubscriptionResult EventStreamSubscribe(
-        [Description("Optional channels list: general, object, teleport, progress, all. Delimit with comma/space/pipe.")] string? channels = null,
+        [Description("Optional channels list: general, object, teleport, progress, follow, all. Delimit with comma/space/pipe.")] string? channels = null,
         [Description("Optional event-type filter list. Delimit with comma/space/pipe.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter list (comma/pipe/semicolon delimited).") ] string? objectIds = null,
@@ -2626,7 +2618,7 @@ internal sealed class BotMcpTools
         [Description("Long-poll wait timeout in milliseconds (0..30000).") ] int waitMs,
         [Description("Optional subscription ID. If provided, defaults to that subscription's channels/types/cursor.")] string? subscriptionId = null,
         [Description("Optional cursor returned by prior poll. Omit to use subscription cursor (or 0).") ] string? cursor = null,
-        [Description("Optional channels override: general, object, teleport, progress, all.")] string? channels = null,
+        [Description("Optional channels override: general, object, teleport, progress, follow, all.")] string? channels = null,
         [Description("Optional event-type filter override.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter override list.")] string? objectIds = null,

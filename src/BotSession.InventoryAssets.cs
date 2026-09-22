@@ -2360,6 +2360,31 @@ internal sealed partial class BotSession
                 $"Created link '{createdLink.Name}' ({createdLink.UUID}) in folder '{destinationFolder.Name}' ({destinationFolder.UUID}) -> item '{item.Name}' ({item.UUID}).");
         }, cancellationToken).ConfigureAwait(false);
     }
+    
+    public static string GetBasePath(string path) {
+        var pathParts = path
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+        if(pathParts.Count == 0) {
+            return string.Empty;
+        }
+        else {
+            return pathParts[pathParts.Count - 1];
+        }
+    }
+    
+    public static string GetParentPath(string path) {
+        var pathParts = path
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+        if(pathParts.Count < 2) {
+            return string.Empty;
+        }
+        else {
+            pathParts.RemoveAt(pathParts.Count - 1);
+            return string.Join('/', pathParts);
+        }
+    }
 
     public async Task<BotToolResult> InventoryGiveItemAsync(
         string itemId,
@@ -3318,6 +3343,199 @@ internal sealed partial class BotSession
 
             return InventoryOfferHistoryResult.OkResult(entries, $"Returned {entries.Count} inventory-offer events.");
         }
+    }
+
+    public async Task<(bool Exists, string? FolderId, string? Error)> TryResolveFolderPathAsync(IReadOnlyList<string> segments, CancellationToken cancellationToken)
+    {
+        string? parentFolderId = null;
+
+        foreach (var segment in segments)
+        {
+            var listing = await ListFolderAsync(parentFolderId, cancellationToken).ConfigureAwait(false);
+            if (!listing.Ok)
+            {
+                return (false, null, listing.Message);
+            }
+
+            var child = listing.Entries.FirstOrDefault(e =>
+                e.Kind == "folder" &&
+                string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
+
+            if (child == null)
+            {
+                return (false, null, null);
+            }
+
+            parentFolderId = child.Id;
+        }
+
+        return (true, parentFolderId, null);
+    }
+
+    public async Task<BotToolResult?> EnsureFolderPathExistsAsync(IReadOnlyList<string> segments,
+        CancellationToken cancellationToken)
+    {
+        string? parentFolderId = null;
+        var segmentPath = new List<string>(segments.Count);
+
+        foreach (var segment in segments)
+        {
+            segmentPath.Add(segment);
+            var listing = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
+            if (!listing.Ok)
+            {
+                return BotToolResult.Fail($"Failed to list inventory folder while preparing import path: {listing.Message}");
+            }
+
+            Console.WriteLine($"[folders] ensure-path inspect segment='{segment}' parent='{parentFolderId ?? "<root>"}' listingFolders={DescribeFolderEntries(listing)}");
+
+            var child = listing.Entries.FirstOrDefault(e =>
+                e.Kind == "folder" &&
+                string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
+
+            if (child != null)
+            {
+                parentFolderId = child.Id;
+                continue;
+            }
+
+            var createResult = await InventoryCreateFolderAsync(parentFolderId, segment, null, cancellationToken).ConfigureAwait(false);
+            if (!createResult.Ok)
+            {
+                return BotToolResult.Fail($"Failed to create inventory folder '{segment}' in '{string.Join("/", segments)}': {createResult.Message}");
+            }
+
+            var createdFolderId = TryExtractCreatedFolderId(createResult.Message);
+            Console.WriteLine($"[folders] ensure-path created segment='{segment}' parent='{parentFolderId ?? "<root>"}' createdFolderId='{createdFolderId ?? "<unknown>"}' createMessage='{createResult.Message}'");
+
+            // Local inventory cache can lag after folder creation; retry resolution with short backoff.
+            const int resolveAttempts = 8;
+            const int resolveDelayMs = 250;
+            InventoryQueryResult? lastAfterCreate = null;
+            string? resolvedChildId = null;
+
+            for (var attempt = 1; attempt <= resolveAttempts; attempt++)
+            {
+                var afterCreate = await ListFolderAsync(parentFolderId).ConfigureAwait(false);
+                if (!afterCreate.Ok)
+                {
+                    return BotToolResult.Fail($"Created folder '{segment}', but failed to verify it in inventory: {afterCreate.Message}");
+                }
+
+                lastAfterCreate = afterCreate;
+                var createdChild = afterCreate.Entries.FirstOrDefault(e =>
+                    e.Kind == "folder" &&
+                    string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
+
+                if (createdChild != null)
+                {
+                    resolvedChildId = createdChild.Id;
+                    Console.WriteLine($"[folders] ensure-path resolved segment='{segment}' as folderId='{resolvedChildId}' after attempt={attempt}");
+                    break;
+                }
+
+                // Fallback: if create returned a UUID, probe that folder directly and continue if it resolves.
+                if (!string.IsNullOrWhiteSpace(createdFolderId))
+                {
+                    var directProbe = await ListFolderAsync(createdFolderId).ConfigureAwait(false);
+                    if (directProbe.Ok)
+                    {
+                        resolvedChildId = createdFolderId;
+                        Console.WriteLine($"[folders] ensure-path fallback-resolved segment='{segment}' from createResult UUID='{resolvedChildId}' on attempt={attempt}");
+                        break;
+                    }
+
+                    Console.WriteLine($"[folders] ensure-path fallback probe failed for createdFolderId='{createdFolderId}' attempt={attempt}: {directProbe.Message}");
+                }
+
+                Console.WriteLine($"[folders] ensure-path unresolved segment='{segment}' attempt={attempt}/{resolveAttempts} parent='{parentFolderId ?? "<root>"}' listingFolders={DescribeFolderEntries(afterCreate)}");
+
+                if (attempt < resolveAttempts)
+                {
+                    await Task.Delay(resolveDelayMs, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(resolvedChildId))
+            {
+                var attemptedPath = string.Join("/", segmentPath);
+                var listingDebug = lastAfterCreate == null
+                    ? "<no listing captured>"
+                    : DescribeFolderEntries(lastAfterCreate);
+
+                return BotToolResult.Fail(
+                    $"Created folder '{segment}' while preparing '{string.Join("/", segments)}', but it could not be resolved in local inventory after retries. " +
+                    $"Attempted path='{attemptedPath}', parentFolderId='{parentFolderId ?? "<root>"}', createdFolderId='{createdFolderId ?? "<unknown>"}', visibleFolders={listingDebug}");
+            }
+
+            parentFolderId = resolvedChildId;
+        }
+
+        return null;
+    }
+
+    private async Task<InventoryQueryResult> ListFolderAsync(string? parentFolderId, CancellationToken cancellationToken = default)
+    {
+        return await InventoryListAsync(
+            parentFolderId,
+            false,
+            1000,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            200,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string DescribeFolderEntries(InventoryQueryResult listing, int maxEntries = 12)
+    {
+        if (listing.Entries.Count == 0)
+        {
+            return "<empty>";
+        }
+
+        var sample = listing.Entries
+            .Where(e => e.Kind == "folder")
+            .Take(maxEntries)
+            .Select(e => $"{e.Name} ({e.Id})")
+            .ToList();
+
+        if (sample.Count == 0)
+        {
+            return "<no-folders>";
+        }
+
+        var suffix = listing.Entries.Count > sample.Count ? $" ... +{listing.Entries.Count - sample.Count} more" : string.Empty;
+        return string.Join(", ", sample) + suffix;
+    }
+
+    private static string? TryExtractCreatedFolderId(string createMessage)
+    {
+        if (string.IsNullOrWhiteSpace(createMessage))
+        {
+            return null;
+        }
+
+        var open = createMessage.IndexOf('(');
+        if (open < 0)
+        {
+            return null;
+        }
+
+        var close = createMessage.IndexOf(')', open + 1);
+        if (close <= open + 1)
+        {
+            return null;
+        }
+
+        var candidate = createMessage.Substring(open + 1, close - open - 1).Trim();
+        return UUID.TryParse(candidate, out var parsed) ? parsed.ToString() : null;
     }
 
     private async Task<InventoryQueryResult> ExecuteLockedAsync(
