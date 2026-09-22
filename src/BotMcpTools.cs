@@ -2856,6 +2856,24 @@ internal sealed class BotMcpTools
         return _bot.AppearanceBakeDiagnosticsAsync(requestCacheProbe, cacheProbeTimeoutMs, cancellationToken);
     }
 
+    [McpServerTool, Description("Compare live visual-param count against the stored healthy baseline (appearance pollution detector).")]
+    public Task<AppearanceHealthCheckResult> AppearanceHealthCheck(
+        [Description("True to store the current count as the new healthy baseline (requires outfitFolderId when none is stored). Defaults to false.")] bool? rebaseline = null,
+        [Description("Optional complete-outfit folder UUID; stored with the baseline and re-worn by appearance_auto_repair.")] string? outfitFolderId = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.AppearanceHealthCheckAsync(rebaseline ?? false, outfitFolderId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Run the verified appearance repair: re-wear complete-outfit folder (replaceItems), settle ~12s, force rebake; returns before/after param counts.")]
+    public Task<AppearanceAutoRepairResult> AppearanceAutoRepair(
+        [Description("True to run even when the count is within the healthy margin. Defaults to false.")] bool? force = null,
+        [Description("Optional complete-outfit folder UUID; defaults to the one stored with the baseline.")] string? outfitFolderId = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.AppearanceAutoRepairAsync(force ?? false, outfitFolderId, cancellationToken);
+    }
+
     [McpServerTool, Description("Bootstrap-install the dialog bridge by uploading and attaching prim containing scripts.")]
     public Task<DialogBridgeInstallResult> DialogBridgeInstall(CancellationToken cancellationToken)
     {
