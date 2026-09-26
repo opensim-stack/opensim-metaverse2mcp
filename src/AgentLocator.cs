@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using LibreMetaverse;
 
 namespace Opensim.Metaverse2Mcp;
@@ -13,6 +14,7 @@ internal sealed class AgentLocator
     private readonly BotSession _bot;
     private readonly SpawnerClient _spawnerClient;
     private readonly bool _allowExternalFallback;
+    private readonly ConcurrentDictionary<string, AgentMonitorSnapshot> _latestStatusByHandle = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastExternalProbeAtUtc = DateTime.MinValue;
 
     public AgentLocator(BotSession bot, SpawnerClient spawnerClient)
@@ -25,7 +27,7 @@ internal sealed class AgentLocator
             StringComparison.OrdinalIgnoreCase);
     }
 
-    public Task<BotTaskHandle> MonitorAgent(string targetAgentId, CancellationToken cancellationToken)
+    public async Task<BotTaskHandle> MonitorAgent(string targetAgentId, CancellationToken cancellationToken)
     {
         BotTaskHandle QueueImmediateFailure(string failureMessage)
         {
@@ -40,65 +42,136 @@ internal sealed class AgentLocator
 
         if (string.IsNullOrWhiteSpace(targetAgentId))
         {
-            return Task.FromResult(QueueImmediateFailure("targetAgentId is required."));
+            return QueueImmediateFailure("targetAgentId is required.");
         }
 
         if (!UUID.TryParse(targetAgentId.Trim(), out var targetId) || targetId == UUID.Zero)
         {
-            return Task.FromResult(QueueImmediateFailure("targetAgentId must be a valid non-zero UUID."));
+            return QueueImmediateFailure("targetAgentId must be a valid non-zero UUID.");
         }
+
+        Console.WriteLine($"[agent-monitor] request target={targetId} callerCancelled={cancellationToken.IsCancellationRequested}");
+
+        // Perform one best-effort capture on the caller thread so initial status is available immediately.
+        var initialStatus = await CaptureInitialStatusBestEffortAsync(targetId, cancellationToken).ConfigureAwait(false);
 
         var task = _bot.StartBotTask(
             $"Monitor agent '{targetId}'.",
             async (taskHandle, taskCancellationToken) =>
             {
-                AgentMonitorStatus? previous = null;
+                AgentMonitorStatus? previous = initialStatus;
                 using var avatarUpdates = new AvatarUpdateTracker(targetId);
 
-                EmitStatusChangedEvent(taskHandle.Handle, targetId, AgentMonitorStatus.Unknown, "Starting agent monitor.");
+                Console.WriteLine($"[agent-monitor] task-start handle={taskHandle.Handle} target={targetId} taskCancelled={taskCancellationToken.IsCancellationRequested}");
 
-                while (!taskCancellationToken.IsCancellationRequested)
+                _latestStatusByHandle[taskHandle.Handle] = ToSnapshot(targetId, initialStatus);
+
+                try
                 {
-                    try
+                    while (!taskCancellationToken.IsCancellationRequested)
                     {
-                        var current = await CaptureStatusAsync(targetId, avatarUpdates, previous, taskCancellationToken).ConfigureAwait(false);
-                        current = current with
+                        try
                         {
-                            HeadingDegrees = TryComputeHeading(previous, current)
-                        };
+                            var current = await CaptureStatusAsync(targetId, avatarUpdates, previous, taskCancellationToken).ConfigureAwait(false);
+                            current = current with
+                            {
+                                HeadingDegrees = TryComputeHeading(previous, current)
+                            };
 
-                        if (previous == null || !AreEquivalent(previous, current))
-                        {
-                            EmitStatusChangedEvent(taskHandle.Handle, targetId, current, "Agent monitor status changed.");
-                            previous = current;
+                            _latestStatusByHandle[taskHandle.Handle] = ToSnapshot(targetId, current);
+
+                            if (!AreEquivalent(previous, current))
+                            {
+                                EmitStatusChangedEvent(taskHandle.Handle, targetId, current, "Agent monitor status changed.");
+                                previous = current;
+                            }
                         }
-                    }
-                    catch (OperationCanceledException) when (taskCancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch
-                    {
-                        // Keep monitor alive across transient cache/network races.
-                    }
+                        catch (OperationCanceledException) when (taskCancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Keep monitor alive across transient cache/network races.
+                            Console.WriteLine($"[agent-monitor] transient-error handle={taskHandle.Handle} target={targetId} type={ex.GetType().Name} message={ex.Message}");
+                        }
 
-                    await Task.Delay(MonitorInterval, taskCancellationToken).ConfigureAwait(false);
+                        await Task.Delay(MonitorInterval, taskCancellationToken).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    Console.WriteLine($"[agent-monitor] task-exit handle={taskHandle.Handle} target={targetId} cancelled={taskCancellationToken.IsCancellationRequested}");
+                    _latestStatusByHandle.TryRemove(taskHandle.Handle, out _);
                 }
             });
+
+        _latestStatusByHandle[task.Handle] = ToSnapshot(targetId, initialStatus);
+        EmitStatusChangedEvent(task.Handle, targetId, initialStatus, "Agent monitor initialized.");
+        Console.WriteLine($"[agent-monitor] started handle={task.Handle} target={targetId} callerCancelled={cancellationToken.IsCancellationRequested} initialSource={initialStatus.Source ?? "unknown"} initialOnline={(initialStatus.Online.HasValue ? (initialStatus.Online.Value ? "true" : "false") : "null")}");
 
         cancellationToken.Register(() =>
         {
             try
             {
-                _bot.CancelBotTask(task.Handle);
+                var cancelResult = _bot.CancelBotTask(task.Handle);
+                Console.WriteLine($"[agent-monitor] caller-cancel handle={task.Handle} target={targetId} tokenCancelled={cancellationToken.IsCancellationRequested} cancelOk={cancelResult.Ok} message={cancelResult.Message}");
             }
-            catch
+            catch (Exception ex)
             {
                 // Best effort if caller cancellation races with task registration.
+                Console.WriteLine($"[agent-monitor] caller-cancel-error handle={task.Handle} target={targetId} message={ex.Message}");
             }
         });
 
-        return Task.FromResult(task);
+        return task;
+    }
+
+    public bool TryGetLatestStatus(string monitorHandle, out AgentMonitorSnapshot snapshot)
+    {
+        if (string.IsNullOrWhiteSpace(monitorHandle))
+        {
+            snapshot = default!;
+            return false;
+        }
+
+        return _latestStatusByHandle.TryGetValue(monitorHandle.Trim(), out snapshot!);
+    }
+
+    private async Task<AgentMonitorStatus> CaptureInitialStatusBestEffortAsync(UUID targetId, CancellationToken cancellationToken)
+    {
+        using var avatarUpdates = new AvatarUpdateTracker(targetId);
+        try
+        {
+            return await CaptureStatusAsync(targetId, avatarUpdates, previous: null, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return AgentMonitorStatus.Unknown;
+        }
+    }
+
+    private static AgentMonitorSnapshot ToSnapshot(UUID targetId, AgentMonitorStatus status)
+    {
+        return new AgentMonitorSnapshot(
+            targetId,
+            status.Online,
+            status.RegionName,
+            status.RegionHandle,
+            status.Position,
+            status.IsFlying,
+            status.Velocity,
+            status.HeadingDegrees,
+            status.Source,
+            status.LocalId,
+            status.AvatarRegionHandle,
+            status.AvatarUpdateSeen,
+            status.AvatarUpdateSim,
+            status.CacheVsAvatarUpdate);
     }
 
     private async Task<AgentMonitorStatus> CaptureStatusAsync(
@@ -923,3 +996,19 @@ internal sealed class AgentLocator
         uint LocalId,
         bool IsNew);
 }
+
+internal sealed record AgentMonitorSnapshot(
+    UUID TargetId,
+    bool? Online,
+    string? RegionName,
+    ulong? RegionHandle,
+    Vector3? Position,
+    bool? IsFlying,
+    Vector3? Velocity,
+    float? HeadingDegrees,
+    string? Source,
+    uint? LocalId,
+    ulong? AvatarRegionHandle,
+    bool? AvatarUpdateSeen,
+    string? AvatarUpdateSim,
+    string? CacheVsAvatarUpdate);

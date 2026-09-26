@@ -20,7 +20,7 @@ internal sealed class BotMcpTools
         _bot = bot;
         _spawnerClient = spawnerClient;
         _options = options;
-        _agentLocator = new AgentLocator(_bot, _spawnerClient);
+        _agentLocator = _bot.AgentLocator;
     }
 
     [McpServerTool, Description("Get bot's own connection and location status.")]
@@ -408,7 +408,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Start playing an animation by built-in name (e.g. DANCE1, WAVE, SIT) or UUID.")]
     public Task<BotToolResult> AnimationStart(
         [Description("Animation name from the Animations class (e.g. DANCE1, CLAP, SIT) or a UUID string.")] string animation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AnimationStartAsync(animation, cancellationToken);
     }
@@ -416,7 +416,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Stop playing an animation by built-in name or UUID.")]
     public Task<BotToolResult> AnimationStop(
         [Description("Animation name from the Animations class (e.g. DANCE1, CLAP, SIT) or a UUID string.")] string animation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AnimationStopAsync(animation, cancellationToken);
     }
@@ -1348,10 +1348,12 @@ internal sealed class BotMcpTools
     public Task<BotTaskHandle> Follow(
         [Description("Target type: avatar or object.")] string targetType,
         [Description("Avatar full name or UUID, or object name, local ID, or UUID.")] string target,
-        [Description("Distance buffer in meters; follow pauses inside this range (default 3).")] float distanceBuffer,
+        [Description("Distance buffer in meters; follow pauses inside this range (default 3).")]
+        float distanceBuffer,
         CancellationToken cancellationToken)
     {
-        return _bot.FollowAsync(targetType, target, distanceBuffer, cancellationToken);
+        // Do not bind background task lifetime to the MCP request lifetime.
+        return _bot.FollowAsync(targetType, target, distanceBuffer, CancellationToken.None);
     }
 
     [McpServerTool, Description("Start monitoring a target avatar UUID as a background BotTask. Emits updates on runtime-event channel agentMonitor when online/region/position/fly/velocity/heading status changes. Runs until cancelled via BotTaskCancel(handle).")]
@@ -1359,7 +1361,8 @@ internal sealed class BotMcpTools
         [Description("Target avatar UUID to monitor.")] string targetAgentId,
         CancellationToken cancellationToken)
     {
-        return _agentLocator.MonitorAgent(targetAgentId, cancellationToken);
+        // Do not bind background task lifetime to the MCP request lifetime.
+        return _agentLocator.MonitorAgent(targetAgentId, CancellationToken.None);
     }
 
     [McpServerTool, Description("Create a new prim shape at a position with scale and rotation.")]
@@ -1663,7 +1666,7 @@ internal sealed class BotMcpTools
         [Description("Copy source textures onto clone.")] bool copyTextures,
         [Description("Copy source object name onto clone.")] bool copyName,
         [Description("Copy source object description onto clone.")] bool copyDescription,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.ClonePrimAsync(sourceLocalId, offsetX, offsetY, offsetZ, copyTextures, copyName, copyDescription, cancellationToken);
     }
@@ -2066,7 +2069,7 @@ internal sealed class BotMcpTools
         [Description("Inventory item UUID to send.")] string itemId,
         [Description("Recipient avatar UUID.")] string recipientAgentId,
         [Description("True to show transfer beam effect.")] bool withBeamEffect,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.InventoryGiveItemAsync(itemId, recipientAgentId, withBeamEffect, cancellationToken);
     }
@@ -2076,7 +2079,7 @@ internal sealed class BotMcpTools
         [Description("Inventory folder UUID or slash-separated path to send.")] string folderIdOrPath,
         [Description("Recipient avatar UUID.")] string recipientAgentId,
         [Description("True to show transfer beam effect.")] bool withBeamEffect,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.InventoryGiveFolderAsync(folderIdOrPath, recipientAgentId, withBeamEffect, cancellationToken);
     }

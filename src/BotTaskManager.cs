@@ -86,6 +86,7 @@ internal sealed class BotTaskManager : IDisposable
 
         var id = Guid.NewGuid().ToString("D");
         var handle = new BotTaskHandle(id, normalizedDescription);
+        Console.WriteLine($"[bot-task] start handle={id} lifecycleCancelled={_lifecycleToken.IsCancellationRequested} description={normalizedDescription}");
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_lifecycleToken);
         var state = new BotTaskState(handle, linkedCts, DateTimeOffset.UtcNow);
 
@@ -199,6 +200,8 @@ internal sealed class BotTaskManager : IDisposable
         var completionStatus = "completed";
         var completionMessage = "Task completed.";
 
+        Console.WriteLine($"[bot-task] run handle={state.Handle.Handle} cancellationRequested={state.Cancellation.IsCancellationRequested}");
+
         try
         {
             await work(state.Handle, state.Cancellation.Token).ConfigureAwait(false);
@@ -233,6 +236,9 @@ internal sealed class BotTaskManager : IDisposable
             completedAtUtc = DateTimeOffset.UtcNow;
             _activeTasks.TryRemove(state.Handle.Handle, out _);
             state.Cancellation.Dispose();
+
+            Console.WriteLine(
+                $"[bot-task] finish handle={state.Handle.Handle} status={completionStatus} cancelledFlag={state.Handle.Cancelled} message={completionMessage}");
 
             RecordHistory(new BotTaskInfo(
                 state.Handle.Handle,

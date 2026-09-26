@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 using LibreMetaverse;
 
 namespace Opensim.Metaverse2Mcp;
@@ -15,6 +14,7 @@ internal sealed partial class BotSession
     private readonly object _movementLock = new();
     private CancellationTokenSource? _movementAutoStopCts;
     private string? _activeFollowTaskHandle;
+    private string? _activeFollowMonitorTaskHandle;
     private string? _followTargetDescription;
     private UUID _followTrackedAvatarId = UUID.Zero;
     private uint _followTrackedLocalId;
@@ -342,34 +342,52 @@ internal sealed partial class BotSession
                     EmitFollowProgressEvent(taskHandle.Handle, "follow.starting", $"Resolving {targetType} target '{target.Trim()}' for follow.");
 
                     FollowResolution? resolution = null;
-                    var setup = await ExecuteLockedAsync((client, _) =>
+                    var setup = await ExecuteLockedAsync(async (client, _) =>
                     {
                         var sim = client.Network.CurrentSim;
                         if (sim == null)
                         {
-                            return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+                            return BotToolResult.Fail("No current simulator available.");
                         }
 
                         uint localId;
                         string label;
                         var trackedId = UUID.Zero;
+                        string? monitorHandle = null;
                         if (isAvatar)
                         {
-                            if (!TryResolveAvatarAcrossSims(client, target, out sim, out localId, out label, out trackedId))
+                            var trimmedTarget = target.Trim();
+                            if (UUID.TryParse(trimmedTarget, out var explicitTargetId) && explicitTargetId != UUID.Zero)
                             {
-                                return Task.FromResult(BotToolResult.Fail(
-                                    $"Avatar '{target}' not found in visible simulators. Use full name or UUID."));
+                                trackedId = explicitTargetId;
+                                localId = 0;
+                                label = trackedId.ToString();
+
+                                // If currently visible, prefer a friendly label and local ID.
+                                if (TryResolveAvatarAcrossSims(client, trimmedTarget, out var resolvedSim, out var resolvedLocalId, out var resolvedLabel, out var _ignoredAvatarId))
+                                {
+                                    sim = resolvedSim;
+                                    localId = resolvedLocalId;
+                                    label = resolvedLabel;
+                                }
                             }
+                            else if (!TryResolveAvatarAcrossSims(client, target, out sim, out localId, out label, out trackedId))
+                            {
+                                return BotToolResult.Fail(
+                                    $"Avatar '{target}' not found in visible simulators. Use full name or UUID.");
+                            }
+
+                            monitorHandle = (await _agentLocator.MonitorAgent(trackedId.ToString(), taskCancellationToken).ConfigureAwait(false)).Handle;
                         }
                         else if (!TryResolveObject(sim, target, out localId, out label))
                         {
-                            return Task.FromResult(BotToolResult.Fail(
-                                $"Object '{target}' not found in current simulator. Use name, local ID, or UUID."));
+                            return BotToolResult.Fail(
+                                $"Object '{target}' not found in current simulator. Use name, local ID, or UUID.");
                         }
 
-                        resolution = new FollowResolution(client, sim, isObject, trackedId, localId, label);
-                        StartFollowLoop(taskHandle.Handle, client, sim, isObject, trackedId, localId, label);
-                        return Task.FromResult(BotToolResult.OkResult($"Following {targetType} {label} (buffer {buffer:F1}m)."));
+                        resolution = new FollowResolution(client, sim, isObject, trackedId, localId, label, monitorHandle);
+                        StartFollowLoop(taskHandle.Handle, monitorHandle, client, sim, isObject, trackedId, localId, label);
+                        return BotToolResult.OkResult($"Following {targetType} {label} (buffer {buffer:F1}m).");
                     }, taskCancellationToken).ConfigureAwait(false);
 
                     if (!setup.Ok || resolution == null)
@@ -378,25 +396,28 @@ internal sealed partial class BotSession
                         return;
                     }
 
+                    var activeResolution = resolution;
+
                     EmitFollowProgressEvent(
                         taskHandle.Handle,
                         "follow.started",
-                        $"Following {targetType} {resolution.Label} (buffer {buffer:F1}m).",
+                        $"Following {targetType} {activeResolution.Label} (buffer {buffer:F1}m).",
                         new Dictionary<string, string?>
                         {
                             ["targetType"] = targetType.Trim().ToLowerInvariant(),
-                            ["target"] = resolution.Label,
+                            ["target"] = activeResolution.Label,
                             ["bufferMeters"] = buffer.ToString("0.0", CultureInfo.InvariantCulture)
                         });
 
                     var followResult = await FollowLoopAsync(
                         taskHandle.Handle,
-                        resolution.Client,
-                        resolution.Simulator,
-                        resolution.IsObject,
-                        resolution.TrackedId,
-                        resolution.LocalId,
-                        resolution.Label,
+                        activeResolution.Client,
+                        activeResolution.Simulator,
+                        activeResolution.IsObject,
+                        activeResolution.TrackedId,
+                        activeResolution.LocalId,
+                        activeResolution.Label,
+                        activeResolution.MonitorHandle,
                         buffer,
                         taskCancellationToken).ConfigureAwait(false);
 
@@ -433,14 +454,16 @@ internal sealed partial class BotSession
         bool IsObject,
         UUID TrackedId,
         uint LocalId,
-        string Label);
+        string Label,
+        string? MonitorHandle);
 
-    private void StartFollowLoop(string followTaskHandle, GridClient client, Simulator sim, bool isObject, UUID trackedId, uint localId, string label)
+    private void StartFollowLoop(string followTaskHandle, string? monitorTaskHandle, GridClient client, Simulator sim, bool isObject, UUID trackedId, uint localId, string label)
     {
         StopFollowInternal();
         lock (_movementLock)
         {
             _activeFollowTaskHandle = followTaskHandle;
+            _activeFollowMonitorTaskHandle = monitorTaskHandle;
             _followTargetDescription = $"{(isObject ? "object" : "avatar")} {label}";
             _followTrackedAvatarId = isObject ? UUID.Zero : trackedId;
             _followTrackedLocalId = localId;
@@ -462,6 +485,7 @@ internal sealed partial class BotSession
         UUID trackedId,
         uint localId,
         string label,
+        string? monitorTaskHandle,
         float buffer,
         CancellationToken cancellationToken)
     {
@@ -469,16 +493,6 @@ internal sealed partial class BotSession
         var targetLocalId = localId;
         var lastPilotAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
         var lastDiagAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
-        var lastMapProbeAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
-        var lastSpawnerProbeAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
-        var lastSpawnerFoundAt = DateTime.MinValue;
-        var lastMappedTargetAt = DateTime.MinValue;
-        ulong lastMappedRegionHandle = 0;
-        var lastMappedLocal = Vector3.Zero;
-        var lastSpawnerRegionId = UUID.Zero;
-        string? lastSpawnerRegionName = null;
-        var lastAvatarSeenAt = DateTime.UtcNow;
-        var lastCacheMissDiagAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
         var crossRegionState = FollowCrossRegionState.None;
         var crossRegionStateSince = DateTime.MinValue;
         var lastCrossRegionDistance = float.MaxValue;
@@ -490,6 +504,22 @@ internal sealed partial class BotSession
         var followStartRegionHandle = sim.Handle;
         var followStartLocal = ClampLocalPosition(client.Self.SimPosition);
         var avatarLost = false;
+        var targetStationary = false;
+        var followMovementHardStopped = false;
+
+        void EnsureFollowMovementStopped()
+        {
+            if (followMovementHardStopped)
+            {
+                return;
+            }
+
+            client.Self.AutoPilotCancel();
+            client.Self.Movement.ResetControlFlags();
+            client.Self.Movement.SendUpdate(true);
+            followMovementHardStopped = true;
+        }
+
         var completion = BotToolResult.OkResult($"Follow ended for {label}.");
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -513,6 +543,7 @@ internal sealed partial class BotSession
 
                 Vector3 targetPos;
                 var targetIsCrossRegion = false;
+                var suppressMovementForStationary = false;
                 ulong crossRegionTargetHandle = 0;
                 Vector3 crossRegionTargetLocal = Vector3.Zero;
                 float distance;
@@ -537,151 +568,14 @@ internal sealed partial class BotSession
                 }
                 else
                 {
-                    Avatar? avatar = null;
-                    if (trackedId != UUID.Zero
-                        && (DateTime.UtcNow - lastSpawnerProbeAt) >= TimeSpan.FromSeconds(2))
+                    if (string.IsNullOrWhiteSpace(monitorTaskHandle)
+                        || !_agentLocator.TryGetLatestStatus(monitorTaskHandle, out var monitorStatus))
                     {
-                        lastSpawnerProbeAt = DateTime.UtcNow;
-                        var locatedBySpawner = await TryLocateAgentViaSpawnerAsync(client, trackedId, cancellationToken).ConfigureAwait(false);
-                        if (locatedBySpawner != null && locatedBySpawner.Found)
-                        {
-                            lastSpawnerFoundAt = DateTime.UtcNow;
-                            lastSpawnerRegionId = locatedBySpawner.RegionId;
-                            lastSpawnerRegionName = locatedBySpawner.RegionName;
-
-                            if (locatedBySpawner.RegionHandle != 0)
-                            {
-                                lastMappedTargetAt = DateTime.UtcNow;
-                                lastMappedRegionHandle = locatedBySpawner.RegionHandle;
-                                lastMappedLocal = locatedBySpawner.Position;
-                            }
-
-                            if (locatedBySpawner.Simulator != null && !ReferenceEquals(targetSim, locatedBySpawner.Simulator))
-                            {
-                                targetSim = locatedBySpawner.Simulator;
-                                lock (_movementLock)
-                                {
-                                    _followAnchorSimHandle = targetSim.Handle;
-                                }
-                            }
-
-                            if (locatedBySpawner.Simulator != null)
-                            {
-                                avatar = locatedBySpawner.Simulator.ObjectsAvatars.Values
-                                    .FirstOrDefault(candidate => candidate != null && candidate.ID == trackedId);
-                                if (avatar != null)
-                                {
-                                    targetLocalId = avatar.LocalID;
-                                    lock (_movementLock)
-                                    {
-                                        _followTrackedLocalId = targetLocalId;
-                                    }
-                                }
-                            }
-
-                            if (IsFollowDiagnosticsEnabled())
-                            {
-                                Console.WriteLine(
-                                    $"[follow][diag] spawner_locate target={label} targetUuid={trackedId} found=true regionName={locatedBySpawner.RegionName ?? "(unknown)"} regionUuid={(locatedBySpawner.RegionId == UUID.Zero ? "(unknown)" : locatedBySpawner.RegionId.ToString())} mappedSim={DescribeSimulator(locatedBySpawner.Simulator)} mappedHandle={locatedBySpawner.RegionHandle} mappedLocal={FormatPosition(locatedBySpawner.Position)}");
-                            }
-
-                            // Prevent stale same-region waypoints when the target moved away but a handle could not be resolved.
-                            if (locatedBySpawner.RegionHandle == 0)
-                            {
-                                var spawnerSaysDifferentRegion =
-                                    (locatedBySpawner.RegionId != UUID.Zero && locatedBySpawner.RegionId != botSim.ID)
-                                    || (!string.IsNullOrWhiteSpace(locatedBySpawner.RegionName)
-                                        && !string.Equals(locatedBySpawner.RegionName, botSim.Name, StringComparison.OrdinalIgnoreCase));
-
-                                if (spawnerSaysDifferentRegion)
-                                {
-                                    lastMappedTargetAt = DateTime.MinValue;
-                                    lastMappedRegionHandle = 0;
-                                }
-                            }
-                        }
+                        EnsureFollowMovementStopped();
+                        continue;
                     }
 
-                    if (trackedId != UUID.Zero
-                        && TryFindAvatarByIdAcrossSims(client, trackedId, out var seenSim, out var seenAvatar)
-                        && seenAvatar != null)
-                    {
-                        avatar = seenAvatar;
-                        if (seenSim != null
-                            && (!ReferenceEquals(targetSim, seenSim) || targetLocalId != seenAvatar.LocalID))
-                        {
-                            if (IsFollowDiagnosticsEnabled())
-                            {
-                                Console.WriteLine(
-                                    $"[follow][diag] rebind target={label} targetUuid={trackedId} fromSim={DescribeSimulator(targetSim)} fromLocalId={targetLocalId} toSim={DescribeSimulator(seenSim)} toLocalId={seenAvatar.LocalID} toPos={FormatPosition(seenAvatar.Position)}");
-                            }
-
-                            targetSim = seenSim;
-                            targetLocalId = seenAvatar.LocalID;
-                            lock (_movementLock)
-                            {
-                                _followTrackedLocalId = targetLocalId;
-                                _followAnchorSimHandle = targetSim.Handle;
-                            }
-                        }
-                    }
-
-                    if (avatar == null && targetSim.ObjectsAvatars.TryGetValue(targetLocalId, out var byLocalId))
-                    {
-                        avatar = byLocalId;
-                    }
-
-                    if (trackedId != UUID.Zero && (DateTime.UtcNow - lastMapProbeAt) >= TimeSpan.FromSeconds(2))
-                    {
-                        var shouldProbeMap = lastMappedTargetAt == DateTime.MinValue
-                            || (DateTime.UtcNow - lastMappedTargetAt) >= TimeSpan.FromSeconds(3);
-                        if (shouldProbeMap)
-                        {
-                            lastMapProbeAt = DateTime.UtcNow;
-                            var mapProbeTimeout = TimeSpan.FromMilliseconds(2500);
-                            var mapped = await TryMapFriendLocationOnceAsync(client, trackedId, mapProbeTimeout, cancellationToken).ConfigureAwait(false);
-                            if (mapped != null)
-                            {
-                                var mappedSim = client.Network.Simulators.FirstOrDefault(s => s.Handle == mapped.RegionHandle);
-                                if (mappedSim == null
-                                    && TryResolveConnectedSimulator(client, lastSpawnerRegionId, lastSpawnerRegionName, out var resolvedBySpawnerIdentity))
-                                {
-                                    mappedSim = resolvedBySpawnerIdentity;
-                                }
-
-                                lastMappedTargetAt = DateTime.UtcNow;
-                                lastMappedRegionHandle = mapped.RegionHandle;
-                                lastMappedLocal = mapped.Location;
-
-                                if (mappedSim != null && !ReferenceEquals(targetSim, mappedSim))
-                                {
-                                    targetSim = mappedSim;
-                                    lock (_movementLock)
-                                    {
-                                        _followAnchorSimHandle = targetSim.Handle;
-                                    }
-                                }
-
-                                if (IsFollowDiagnosticsEnabled())
-                                {
-                                    Console.WriteLine(
-                                        $"[follow][diag] map_locate target={label} targetUuid={trackedId} mappedSim={DescribeSimulator(mappedSim)} mappedHandle={mapped.RegionHandle} mappedLocal={FormatPosition(mapped.Location)}");
-                                }
-                            }
-                            else if (IsFollowDiagnosticsEnabled())
-                            {
-                                Console.WriteLine(
-                                    $"[follow][diag] map_locate_no_reply target={label} targetUuid={trackedId} timeoutMs={(int)mapProbeTimeout.TotalMilliseconds} {DescribeFriendMapRights(client, trackedId)}");
-                            }
-                        }
-                    }
-
-                    var hasFreshMapped = lastMappedTargetAt != DateTime.MinValue
-                        && (DateTime.UtcNow - lastMappedTargetAt) <= TimeSpan.FromSeconds(5);
-                    var hasFreshSpawner = lastSpawnerFoundAt != DateTime.MinValue
-                        && (DateTime.UtcNow - lastSpawnerFoundAt) <= TimeSpan.FromSeconds(12);
-
-                    if (avatar == null)
+                    if (monitorStatus.Online == false)
                     {
                         if (!avatarLost)
                         {
@@ -689,61 +583,31 @@ internal sealed partial class BotSession
                             EmitFollowProgressEvent(
                                 followTaskHandle,
                                 "follow.target.lost",
-                                $"Lost avatar {label}; attempting to refind via cache/spawner/map.");
+                                $"Lost avatar {label}; monitor reported offline.");
                         }
 
-                        if (hasFreshMapped)
+                        EnsureFollowMovementStopped();
+                        continue;
+                    }
+
+                    if (monitorStatus.LocalId.HasValue)
+                    {
+                        targetLocalId = monitorStatus.LocalId.Value;
+                        lock (_movementLock)
                         {
-                            crossRegionTargetHandle = lastMappedRegionHandle;
-                            crossRegionTargetLocal = lastMappedLocal;
-                            targetPos = ResolveFollowWaypointFromRegionHandle(
-                                botSim,
-                                client.Self.SimPosition,
-                                lastMappedRegionHandle,
-                                lastMappedLocal,
-                                out distance,
-                                out targetIsCrossRegion);
-                        }
-                        else
-                        {
-                            if (hasFreshSpawner)
-                            {
-                                if (IsFollowDiagnosticsEnabled() && (DateTime.UtcNow - lastCacheMissDiagAt) >= TimeSpan.FromSeconds(3))
-                                {
-                                    Console.WriteLine(
-                                        $"[follow][diag] cache_miss_waiting_spawner target={label} targetUuid={(trackedId == UUID.Zero ? "(unknown)" : trackedId.ToString())} spawnerRegion={lastSpawnerRegionName ?? "(unknown)"} spawnerRegionUuid={(lastSpawnerRegionId == UUID.Zero ? "(unknown)" : lastSpawnerRegionId.ToString())} knownSims={client.Network.Simulators.Count}");
-                                    lastCacheMissDiagAt = DateTime.UtcNow;
-                                }
-
-                                client.Self.AutoPilotCancel();
-                                continue;
-                            }
-
-                            var missingDuration = DateTime.UtcNow - lastAvatarSeenAt;
-                            if (missingDuration <= TimeSpan.FromSeconds(12))
-                            {
-                                if (IsFollowDiagnosticsEnabled() && (DateTime.UtcNow - lastCacheMissDiagAt) >= TimeSpan.FromSeconds(3))
-                                {
-                                    Console.WriteLine(
-                                        $"[follow][diag] cache_miss_waiting target={label} targetUuid={(trackedId == UUID.Zero ? "(unknown)" : trackedId.ToString())} missingForMs={(int)missingDuration.TotalMilliseconds} anchorSim={DescribeSimulator(targetSim)} currentSim={DescribeSimulator(botSim)} knownSims={client.Network.Simulators.Count} {DescribeFriendMapRights(client, trackedId)}");
-                                    lastCacheMissDiagAt = DateTime.UtcNow;
-                                }
-
-                                client.Self.AutoPilotCancel();
-                                continue;
-                            }
-
-                            Console.WriteLine($"[follow] avatar {label} no longer in cache; stopping.");
-                            completion = BotToolResult.Fail($"Avatar {label} is no longer in cache; follow stopped.");
-                            if (IsFollowDiagnosticsEnabled())
-                            {
-                                Console.WriteLine(
-                                    $"[follow][diag] cache_miss_stop target={label} targetUuid={(trackedId == UUID.Zero ? "(unknown)" : trackedId.ToString())} missingForMs={(int)missingDuration.TotalMilliseconds} anchorSim={DescribeSimulator(targetSim)} currentSim={DescribeSimulator(botSim)} knownSims={client.Network.Simulators.Count} {DescribeFriendMapRights(client, trackedId)}");
-                            }
-                            break;
+                            _followTrackedLocalId = targetLocalId;
                         }
                     }
-                    else
+
+                    if (monitorStatus.RegionHandle.HasValue)
+                    {
+                        lock (_movementLock)
+                        {
+                            _followAnchorSimHandle = monitorStatus.RegionHandle.Value;
+                        }
+                    }
+
+                    if (monitorStatus.RegionHandle.HasValue && monitorStatus.Position.HasValue)
                     {
                         if (avatarLost)
                         {
@@ -754,26 +618,81 @@ internal sealed partial class BotSession
                                 $"Refound avatar {label}; resuming follow.");
                         }
 
-                        lastAvatarSeenAt = DateTime.UtcNow;
+                        var statusRegionHandle = monitorStatus.RegionHandle.Value;
+                        var statusPosition = ClampLocalPosition(monitorStatus.Position.Value);
+                        crossRegionTargetHandle = statusRegionHandle;
+                        crossRegionTargetLocal = statusPosition;
+                        lastKnownCrossRegionHandle = statusRegionHandle;
+                        lastKnownCrossRegionLocal = statusPosition;
 
-                        if (hasFreshMapped)
+                        targetPos = ResolveFollowWaypointFromRegionHandle(
+                            botSim,
+                            client.Self.SimPosition,
+                            statusRegionHandle,
+                            statusPosition,
+                            out distance,
+                            out targetIsCrossRegion);
+
+                        var velocityMagnitude = monitorStatus.Velocity?.Length() ?? -1f;
+                        var isStationaryNow = velocityMagnitude >= 0f && velocityMagnitude < 0.05f;
+                        var holdForStationary = isStationaryNow && distance <= buffer;
+                        if (isStationaryNow)
                         {
-                            crossRegionTargetHandle = lastMappedRegionHandle;
-                            crossRegionTargetLocal = lastMappedLocal;
-                            targetPos = ResolveFollowWaypointFromRegionHandle(
-                                botSim,
-                                client.Self.SimPosition,
-                                lastMappedRegionHandle,
-                                lastMappedLocal,
-                                out distance,
-                                out targetIsCrossRegion);
+                            suppressMovementForStationary = holdForStationary;
+                            if (!targetStationary)
+                            {
+                                targetStationary = true;
+                                EmitFollowProgressEvent(
+                                    followTaskHandle,
+                                    "follow.target.stationary",
+                                    holdForStationary
+                                        ? $"Target {label} velocity is zero; holding position while follow remains active."
+                                        : $"Target {label} velocity is zero; closing follow distance before holding position.");
+                            }
                         }
-                        else
+                        else if (targetStationary)
                         {
-                            crossRegionTargetHandle = targetSim.Handle;
-                            crossRegionTargetLocal = avatar.Position;
-                            targetPos = ResolveFollowWaypoint(botSim, client.Self.SimPosition, targetSim, avatar.Position, out distance, out targetIsCrossRegion);
+                            targetStationary = false;
+                            EmitFollowProgressEvent(
+                                followTaskHandle,
+                                "follow.target.moving",
+                                $"Target {label} is moving again; resuming follow movement.");
                         }
+                    }
+                    else
+                    {
+                        if (!avatarLost)
+                        {
+                            avatarLost = true;
+                            EmitFollowProgressEvent(
+                                followTaskHandle,
+                                "follow.target.off_region",
+                                $"Target {label} is off-region; moving toward best-known crossing path.");
+                        }
+
+                        targetStationary = false;
+
+                        var offRegionHandle = monitorStatus.AvatarRegionHandle ?? lastKnownCrossRegionHandle;
+                        if (offRegionHandle == 0)
+                        {
+                            EnsureFollowMovementStopped();
+                            continue;
+                        }
+
+                        if (lastKnownCrossRegionLocal.Length() <= 0.001f)
+                        {
+                            lastKnownCrossRegionLocal = ClampLocalPosition(client.Self.SimPosition);
+                        }
+
+                        crossRegionTargetHandle = offRegionHandle;
+                        crossRegionTargetLocal = lastKnownCrossRegionLocal;
+                        targetPos = ResolveFollowWaypointFromRegionHandle(
+                            botSim,
+                            client.Self.SimPosition,
+                            crossRegionTargetHandle,
+                            crossRegionTargetLocal,
+                            out distance,
+                            out targetIsCrossRegion);
                     }
                 }
 
@@ -909,6 +828,12 @@ internal sealed partial class BotSession
 
                 var holdPositionForTeleportAssist = crossRegionState == FollowCrossRegionState.AwaitingTeleportAssist;
 
+                if (suppressMovementForStationary)
+                {
+                    EnsureFollowMovementStopped();
+                    continue;
+                }
+
                 if (distance > buffer)
                 {
                     // Re-issue autopilot at most once per second to avoid packet spam.
@@ -926,12 +851,13 @@ internal sealed partial class BotSession
                                 (int)MathF.Round(targetPos.Y),
                                 targetPos.Z);
                         }
+                        followMovementHardStopped = false;
                         lastPilotAt = DateTime.UtcNow;
                     }
                 }
                 else
                 {
-                    client.Self.AutoPilotCancel();
+                    EnsureFollowMovementStopped();
                 }
             }
             catch (OperationCanceledException)
@@ -950,10 +876,17 @@ internal sealed partial class BotSession
         try
         {
             client.Self.AutoPilotCancel();
+            client.Self.Movement.ResetControlFlags();
+            client.Self.Movement.SendUpdate(true);
         }
         catch
         {
             // Best-effort cleanup.
+        }
+
+        if (!string.IsNullOrWhiteSpace(monitorTaskHandle))
+        {
+            _botTaskManager.TryCancel(monitorTaskHandle, out _);
         }
 
         ClearFollowTrackingState(followTaskHandle);
@@ -962,35 +895,6 @@ internal sealed partial class BotSession
 
     private bool IsFollowDiagnosticsEnabled()
         => true;
-
-    private static Vector3 ResolveFollowWaypoint(
-        Simulator botSim,
-        Vector3 botPosition,
-        Simulator targetSim,
-        Vector3 targetLocalPosition,
-        out float distance,
-        out bool crossRegion)
-    {
-        crossRegion = !ReferenceEquals(botSim, targetSim);
-        if (!crossRegion)
-        {
-            distance = Vector3.Distance(botPosition, targetLocalPosition);
-            return targetLocalPosition;
-        }
-
-        var botGlobal = ToGlobalPosition(botSim.Handle, botPosition);
-        var targetGlobal = ToGlobalPosition(targetSim.Handle, targetLocalPosition);
-        var delta = targetGlobal - botGlobal;
-        distance = delta.Length();
-
-        // Drive toward the neighboring region edge in global direction.
-        var projectedLocal = new Vector3(
-            botPosition.X + delta.X,
-            botPosition.Y + delta.Y,
-            botPosition.Z + Math.Clamp(delta.Z, -3f, 3f));
-
-        return ClampEdgeWaypoint(projectedLocal);
-    }
 
     private static Vector3 ResolveFollowWaypointFromRegionHandle(
         Simulator botSim,
@@ -1020,184 +924,6 @@ internal sealed partial class BotSession
         return ClampEdgeWaypoint(projectedLocal);
     }
 
-    private static async Task<FriendFoundReplyEventArgs?> TryMapFriendLocationOnceAsync(
-        GridClient client,
-        UUID friendId,
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var replyTask = WaitForFriendFoundReplyAsync(client, friendId, timeout, cancellationToken);
-            client.Friends.MapFriend(friendId);
-            return await replyTask.ConfigureAwait(false);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private async Task<SpawnerLocatedAgent?> TryLocateAgentViaSpawnerAsync(
-        GridClient client,
-        UUID trackedId,
-        CancellationToken cancellationToken)
-    {
-        DataToolResult result;
-        try
-        {
-            result = await _followSpawnerClient
-                .FindAgentByUuidAsync(trackedId.ToString(), cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            return null;
-        }
-
-        if (!result.Ok || !TryParseSpawnerAgentResponse(result.PayloadJson, out var parsed))
-        {
-            return null;
-        }
-
-        Simulator? simulator = null;
-        ulong regionHandle = 0;
-        if (parsed.Found && TryResolveConnectedSimulator(client, parsed.RegionId, parsed.RegionName, out simulator))
-        {
-            regionHandle = simulator!.Handle;
-        }
-        else if (parsed.Found && !string.IsNullOrWhiteSpace(parsed.RegionName))
-        {
-            try
-            {
-                var region = await client.Grid
-                    .GetGridRegionAsync(parsed.RegionName, GridLayerType.Objects, cancellationToken)
-                    .ConfigureAwait(false);
-                if (region.HasValue)
-                {
-                    regionHandle = region.Value.RegionHandle;
-                    simulator = client.Network.Simulators.FirstOrDefault(candidate => candidate.Handle == regionHandle);
-                }
-            }
-            catch
-            {
-                // Best effort: fallback path should keep running even if grid lookup fails.
-            }
-        }
-
-        return new SpawnerLocatedAgent(
-            parsed.Found,
-            parsed.RegionId,
-            parsed.RegionName,
-            parsed.Position,
-            regionHandle,
-            simulator);
-    }
-
-    private static bool TryResolveConnectedSimulator(
-        GridClient client,
-        UUID regionId,
-        string? regionName,
-        out Simulator? simulator)
-    {
-        simulator = null;
-        if (regionId != UUID.Zero)
-        {
-            simulator = client.Network.Simulators.FirstOrDefault(candidate => candidate.ID == regionId);
-        }
-
-        if (simulator == null && !string.IsNullOrWhiteSpace(regionName))
-        {
-            simulator = client.Network.Simulators.FirstOrDefault(candidate =>
-                !string.IsNullOrWhiteSpace(candidate.Name)
-                && candidate.Name.Equals(regionName.Trim(), StringComparison.OrdinalIgnoreCase));
-        }
-
-        return simulator != null;
-    }
-
-    private static bool TryParseSpawnerAgentResponse(string? payloadJson, out SpawnerAgentResponse response)
-    {
-        response = default;
-        if (string.IsNullOrWhiteSpace(payloadJson))
-        {
-            return false;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(payloadJson);
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
-            {
-                return false;
-            }
-
-            var root = document.RootElement;
-            if (!root.TryGetProperty("found", out var foundElement))
-            {
-                return false;
-            }
-
-            var found = foundElement.ValueKind == JsonValueKind.True;
-            if (!found)
-            {
-                response = new SpawnerAgentResponse(false, UUID.Zero, null, Vector3.Zero);
-                return true;
-            }
-
-            var regionId = UUID.Zero;
-            if (root.TryGetProperty("regionUuid", out var regionUuidElement)
-                && regionUuidElement.ValueKind == JsonValueKind.String)
-            {
-                var regionUuidText = regionUuidElement.GetString();
-                if (!string.IsNullOrWhiteSpace(regionUuidText))
-                {
-                    UUID.TryParse(regionUuidText, out regionId);
-                }
-            }
-
-            var regionName = root.TryGetProperty("regionName", out var regionNameElement)
-                && regionNameElement.ValueKind == JsonValueKind.String
-                ? regionNameElement.GetString()
-                : null;
-
-            if (!TryReadJsonSingle(root, "posX", out var posX)
-                || !TryReadJsonSingle(root, "posY", out var posY)
-                || !TryReadJsonSingle(root, "posZ", out var posZ))
-            {
-                return false;
-            }
-
-            response = new SpawnerAgentResponse(true, regionId, regionName, new Vector3(posX, posY, posZ));
-            return true;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static bool TryReadJsonSingle(JsonElement container, string propertyName, out float value)
-    {
-        value = 0f;
-        if (!container.TryGetProperty(propertyName, out var element))
-        {
-            return false;
-        }
-
-        if (element.ValueKind == JsonValueKind.Number)
-        {
-            return element.TryGetSingle(out value);
-        }
-
-        if (element.ValueKind == JsonValueKind.String)
-        {
-            var text = element.GetString();
-            return float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
-        }
-
-        return false;
-    }
 
     private static Vector3 ToGlobalPosition(ulong regionHandle, Vector3 localPosition)
     {
@@ -1219,31 +945,6 @@ internal sealed partial class BotSession
         var localX = (uint)Math.Clamp((int)MathF.Round(localPosition.X), 0, 255);
         var localY = (uint)Math.Clamp((int)MathF.Round(localPosition.Y), 0, 255);
         client.Self.AutoPilot((ulong)regionX + localX, (ulong)regionY + localY, localPosition.Z);
-    }
-
-    private readonly record struct SpawnerAgentResponse(bool Found, UUID RegionId, string? RegionName, Vector3 Position);
-
-    private sealed record SpawnerLocatedAgent(
-        bool Found,
-        UUID RegionId,
-        string? RegionName,
-        Vector3 Position,
-        ulong RegionHandle,
-        Simulator? Simulator);
-
-    private static string DescribeFriendMapRights(GridClient client, UUID friendId)
-    {
-        if (friendId == UUID.Zero)
-        {
-            return "friendMapRights=unknown_target";
-        }
-
-        if (!client.Friends.FriendList.TryGetValue(friendId, out var friend))
-        {
-            return "friendMapRights=not_in_friend_list";
-        }
-
-        return $"friendMapRights=my:{friend.MyFriendRights}|their:{friend.TheirFriendRights}";
     }
 
     private static bool TryFindAvatarByIdAcrossSims(GridClient client, UUID avatarId, out Simulator? foundSim, out Avatar? foundAvatar)
@@ -1359,6 +1060,7 @@ internal sealed partial class BotSession
             }
 
             _activeFollowTaskHandle = null;
+            _activeFollowMonitorTaskHandle = null;
             _followTargetDescription = null;
             _followTrackedAvatarId = UUID.Zero;
             _followTrackedLocalId = 0;
@@ -1369,14 +1071,22 @@ internal sealed partial class BotSession
     private bool StopFollowInternal()
     {
         string? handle;
+        string? monitorHandle;
         lock (_movementLock)
         {
             handle = _activeFollowTaskHandle;
+            monitorHandle = _activeFollowMonitorTaskHandle;
             _activeFollowTaskHandle = null;
+            _activeFollowMonitorTaskHandle = null;
             _followTargetDescription = null;
             _followTrackedAvatarId = UUID.Zero;
             _followTrackedLocalId = 0;
             _followAnchorSimHandle = 0;
+        }
+
+        if (!string.IsNullOrWhiteSpace(monitorHandle))
+        {
+            _botTaskManager.TryCancel(monitorHandle, out _);
         }
 
         if (string.IsNullOrWhiteSpace(handle))
