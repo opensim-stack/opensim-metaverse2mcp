@@ -11,6 +11,8 @@ internal sealed partial class BotSession
     private const int EventStreamMaxTeleport = 500;
     private const int EventStreamMaxProgress = 1000;
     private const int EventStreamMaxFollow = 1000;
+    private const int EventStreamMaxAgentMonitor = 1000;
+    private const int EventStreamMaxFriends = 500;
     private const int EventStreamObjectMinIntervalMs = 250;
 
     private readonly object _eventStreamLock = new();
@@ -19,6 +21,8 @@ internal sealed partial class BotSession
     private readonly Queue<RuntimeEventInfo> _eventStreamTeleport = new();
     private readonly Queue<RuntimeEventInfo> _eventStreamProgress = new();
     private readonly Queue<RuntimeEventInfo> _eventStreamFollow = new();
+    private readonly Queue<RuntimeEventInfo> _eventStreamAgentMonitor = new();
+    private readonly Queue<RuntimeEventInfo> _eventStreamFriends = new();
     private readonly SemaphoreSlim _eventStreamSignal = new(0, int.MaxValue);
     private readonly ConcurrentDictionary<string, EventStreamSubscriptionState> _eventSubscriptions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _objectEventThrottle = new(StringComparer.OrdinalIgnoreCase);
@@ -266,7 +270,7 @@ internal sealed partial class BotSession
                 "Current event stream buffer stats.");
         }
     }
-
+    
     public void EmitInventoryImportProgressEvent(string handle, string message, int progressPercent)
     {
         var normalizedMessage = string.IsNullOrWhiteSpace(message) ? "Inventory import is in progress." : message.Trim();
@@ -374,8 +378,17 @@ internal sealed partial class BotSession
         _eventStreamSignal.Release();
     }
 
+    internal void EmitAgentMonitorRuntimeEvent(
+        string eventType,
+        string message,
+        IReadOnlyDictionary<string, string?>? attributes = null)
+    {
+        EmitRuntimeEvent("agentMonitor", eventType, "agentLocator", message, attributes);
+    }
+
     private void OnWorldObjectUpdateForEventStream(object? sender, PrimEventArgs e)
     {
+        // TODO very similar to OnTerseWorldObjectUpdateForEventStream
         var prim = e.Prim;
         if (prim == null)
         {
@@ -404,7 +417,7 @@ internal sealed partial class BotSession
             }
         }
 
-        var throttleKey = objectId.ToString();
+        var throttleKey ="object.updated";
         var now = DateTimeOffset.UtcNow;
         if (_objectEventThrottle.TryGetValue(throttleKey, out var lastSeen)
             && (now - lastSeen).TotalMilliseconds < EventStreamObjectMinIntervalMs)
@@ -439,6 +452,57 @@ internal sealed partial class BotSession
                 ["position"] = $"{prim.Position.X:0.###},{prim.Position.Y:0.###},{prim.Position.Z:0.###}"
             });
     }
+    
+    private void OnTerseWorldObjectUpdateForEventStream(object? sender, TerseObjectUpdateEventArgs e)
+    {
+        // TODO very similar to OnWorldObjectUpdateForEventStream
+        var prim = e.Prim;
+        if (prim == null)
+        {
+            return;
+        }
+
+        var objectId = prim.ID;
+        if (objectId == UUID.Zero)
+        {
+            return;
+        }
+
+        var throttleKey ="object.terse.updated";
+        var now = DateTimeOffset.UtcNow;
+        if (_objectEventThrottle.TryGetValue(throttleKey, out var lastSeen)
+            && (now - lastSeen).TotalMilliseconds < EventStreamObjectMinIntervalMs)
+        {
+            return;
+        }
+
+        _objectEventThrottle[throttleKey] = now;
+        if (_objectEventThrottle.Count > 8000)
+        {
+            var cutoff = now - TimeSpan.FromMinutes(5);
+            foreach (var item in _objectEventThrottle)
+            {
+                if (item.Value < cutoff)
+                {
+                    _objectEventThrottle.TryRemove(item.Key, out _);
+                }
+            }
+        }
+
+        EmitRuntimeEvent(
+            "object",
+            "object.terse.updated",
+            "opensim",
+            $"Tersee object update for {objectId}.",
+            new Dictionary<string, string?>
+            {
+                ["objectId"] = objectId.ToString(),
+                ["localId"] = prim.LocalID.ToString(CultureInfo.InvariantCulture),
+                ["name"] = string.IsNullOrWhiteSpace(prim.Properties?.Name) ? null : prim.Properties?.Name,
+                ["simulator"] = e.Simulator?.Name,
+                ["position"] = $"{prim.Position.X:0.###},{prim.Position.Y:0.###},{prim.Position.Z:0.###}"
+            });
+    }
 
     private static string NormalizeEventChannel(string channel)
     {
@@ -449,12 +513,14 @@ internal sealed partial class BotSession
             "teleport" => "teleport",
             "progress" => "progress",
             "follow" => "follow",
+            "agentmonitor" => "agentMonitor",
+            "friends" => "friends",
             _ => "general"
         };
     }
 
     private static HashSet<string> DefaultEventChannels()
-        => new(new[] { "general", "object", "teleport", "progress", "follow" }, StringComparer.OrdinalIgnoreCase);
+        => new(new[] { "general", "object", "teleport", "progress", "follow", "agentMonitor", "friends" }, StringComparer.OrdinalIgnoreCase);
 
     private static HashSet<string>? ParseEventTypes(string? raw)
     {
@@ -498,13 +564,13 @@ internal sealed partial class BotSession
         var accepted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var channel in requested)
         {
-            if (channel == "general" || channel == "object" || channel == "teleport" || channel == "progress" || channel == "follow")
+            if (channel == "general" || channel == "object" || channel == "teleport" || channel == "progress" || channel == "follow" || channel == "agentmonitor" || channel == "friends")
             {
-                accepted.Add(channel);
+                accepted.Add(channel == "agentmonitor" ? "agentMonitor" : channel);
                 continue;
             }
 
-            error = "channels must use: general, object, teleport, progress, follow, or all.";
+            error = "channels must use: general, object, teleport, progress, follow, agentMonitor, friends, or all.";
             return null;
         }
 
@@ -624,6 +690,22 @@ internal sealed partial class BotSession
         if (channels.Contains("follow"))
         {
             foreach (var item in _eventStreamFollow)
+            {
+                yield return item;
+            }
+        }
+
+        if (channels.Contains("agentMonitor"))
+        {
+            foreach (var item in _eventStreamAgentMonitor)
+            {
+                yield return item;
+            }
+        }
+
+        if (channels.Contains("friends"))
+        {
+            foreach (var item in _eventStreamFriends)
             {
                 yield return item;
             }
@@ -839,6 +921,8 @@ internal sealed partial class BotSession
             "teleport" => _eventStreamTeleport,
             "progress" => _eventStreamProgress,
             "follow" => _eventStreamFollow,
+            "agentMonitor" => _eventStreamAgentMonitor,
+            "friends" => _eventStreamFriends,
             _ => _eventStreamGeneral,
         };
     }
@@ -851,6 +935,8 @@ internal sealed partial class BotSession
             "teleport" => EventStreamMaxTeleport,
             "progress" => EventStreamMaxProgress,
             "follow" => EventStreamMaxFollow,
+            "agentMonitor" => EventStreamMaxAgentMonitor,
+            "friends" => EventStreamMaxFriends,
             _ => EventStreamMaxGeneral,
         };
 

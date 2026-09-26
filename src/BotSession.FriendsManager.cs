@@ -14,8 +14,15 @@ internal sealed partial class BotSession
         InstantMessageDialog Dialog,
         DateTimeOffset ReceivedAtUtc);
 
+    private sealed record PendingFriendOfferMessage(
+        UUID FromAgentId,
+        string FromAgentName,
+        UUID SessionId,
+        DateTimeOffset ReceivedAtUtc);
+
     private readonly ConcurrentDictionary<UUID, PendingTeleportMessage> _pendingTeleportOffersByAgent = new();
     private readonly ConcurrentDictionary<UUID, PendingTeleportMessage> _pendingTeleportRequestsByAgent = new();
+    private readonly ConcurrentDictionary<UUID, PendingFriendOfferMessage> _pendingFriendOffersByAgent = new();
     private readonly object _socialImHookLock = new();
     private GridClient? _socialImHookClient;
 
@@ -81,7 +88,9 @@ internal sealed partial class BotSession
                     var sessionId = kvp.Value;
                     var name = client.Friends.FriendList.TryGetValue(fromAgentId, out var friend)
                         ? friend.Name
-                        : string.Empty;
+                        : (_pendingFriendOffersByAgent.TryGetValue(fromAgentId, out var pendingOffer)
+                            ? pendingOffer.FromAgentName
+                            : string.Empty);
 
                     return (object)new
                     {
@@ -173,9 +182,13 @@ internal sealed partial class BotSession
                 return BotToolResult.Fail($"No pending friendship offer found for agent {fromAgentUuid}.");
             }
 
+            var offeredName = _pendingFriendOffersByAgent.TryGetValue(fromAgentUuid, out var pendingOffer)
+                ? pendingOffer.FromAgentName
+                : null;
+
             if (normalizedAction == "accept")
             {
-                var friendshipPolicy = await ValidateFriendshipTargetPolicyAsync(client, fromAgentUuid, null, token).ConfigureAwait(false);
+                var friendshipPolicy = await ValidateFriendshipTargetPolicyAsync(client, fromAgentUuid, offeredName, token).ConfigureAwait(false);
                 if (!friendshipPolicy.Allowed)
                 {
                     return BotToolResult.Fail(friendshipPolicy.Error);
@@ -190,10 +203,24 @@ internal sealed partial class BotSession
                     client.Friends.AcceptFriendship(fromAgentUuid, requestSessionId);
                 }
 
+                _pendingFriendOffersByAgent.TryRemove(fromAgentUuid, out _);
+
+                var grantedDefaultRights = false;
+                if (IsHandlerAgent(fromAgentUuid, offeredName))
+                {
+                    await WaitForFriendInListAsync(client, fromAgentUuid, TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
+                    var fullRights = FriendRights.CanSeeOnline | FriendRights.CanSeeOnMap | FriendRights.CanModifyObjects;
+                    client.Friends.GrantRights(fromAgentUuid, fullRights);
+                    grantedDefaultRights = true;
+                }
+
                 var accepted = client.Friends.FriendList.ContainsKey(fromAgentUuid);
+                var suffix = grantedDefaultRights
+                    ? " Default handler rights enabled: online/map/modify=ON."
+                    : string.Empty;
                 return accepted
-                    ? BotToolResult.OkResult($"Accepted friendship offer from {fromAgentUuid}.")
-                    : BotToolResult.OkResult($"Friendship accept submitted for {fromAgentUuid}. Verify with FriendList/FriendOffersList if needed.");
+                    ? BotToolResult.OkResult($"Accepted friendship offer from {fromAgentUuid}.{suffix}")
+                    : BotToolResult.OkResult($"Friendship accept submitted for {fromAgentUuid}. Verify with FriendList/FriendOffersList if needed.{suffix}");
             }
 
             if (useCapabilities)
@@ -204,6 +231,8 @@ internal sealed partial class BotSession
             {
                 client.Friends.DeclineFriendship(fromAgentUuid, requestSessionId);
             }
+
+            _pendingFriendOffersByAgent.TryRemove(fromAgentUuid, out _);
 
             var stillPending = client.Friends.FriendRequests.ContainsKey(fromAgentUuid);
             return stillPending
@@ -273,6 +302,50 @@ internal sealed partial class BotSession
 
             client.Friends.GrantRights(friendAgentUuid, rights);
             return Task.FromResult(BotToolResult.OkResult($"Friend rights update submitted for {friendAgentUuid}: rights={rights}."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<DataToolResult> FriendRightsGetAsync(string friendAgentId, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(friendAgentId, out var friendAgentUuid))
+        {
+            return DataToolResult.FailResult("friendAgentId must be a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            if (!client.Friends.FriendList.TryGetValue(friendAgentUuid, out var friend))
+            {
+                return Task.FromResult(DataToolResult.FailResult($"Agent {friendAgentUuid} is not currently in the friend list."));
+            }
+
+            var payload = new
+            {
+                friend = new
+                {
+                    agentId = friend.UUID.ToString(),
+                    name = friend.Name,
+                    isOnline = friend.IsOnline,
+                    myRights = new
+                    {
+                        canSeeOnline = friend.CanSeeThemOnline,
+                        canSeeOnMap = friend.CanSeeThemOnMap,
+                        canModifyObjects = friend.CanModifyTheirObjects,
+                        bitmask = friend.MyFriendRights.ToString()
+                    },
+                    theirRights = new
+                    {
+                        canSeeOnline = friend.CanSeeMeOnline,
+                        canSeeOnMap = friend.CanSeeMeOnMap,
+                        canModifyObjects = friend.CanModifyMyObjects,
+                        bitmask = friend.TheirFriendRights.ToString()
+                    }
+                }
+            };
+
+            return Task.FromResult(DataToolResult.OkResult(
+                $"Retrieved friend rights for {friend.UUID}.",
+                JsonSerializer.Serialize(payload, JsonOptions)));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -355,16 +428,34 @@ internal sealed partial class BotSession
         {
             EnsureSocialImHookRegistered(client);
 
-            if (string.IsNullOrWhiteSpace(message))
+            var text = string.IsNullOrWhiteSpace(message)
+                ? $"Join me in {client.Network.CurrentSim?.Name ?? "unknown"}!"
+                : message.Trim();
+
+            // Primary path: standard teleport lure packet.
+            client.Self.SendTeleportLure(targetAgentUuid, text);
+
+            // Compatibility path: mirror as explicit teleport-offer IM envelope for grids/viewers
+            // that do not reliably surface StartLure-only offers.
+            try
             {
-                client.Self.SendTeleportLure(targetAgentUuid);
+                client.Self.InstantMessage(
+                    client.Self.Name,
+                    targetAgentUuid,
+                    text,
+                    targetAgentUuid,
+                    InstantMessageDialog.RequestTeleport,
+                    InstantMessageOnline.Offline,
+                    client.Self.SimPosition,
+                    UUID.Zero,
+                    Utils.EmptyBytes);
             }
-            else
+            catch (Exception ex)
             {
-                client.Self.SendTeleportLure(targetAgentUuid, message.Trim());
+                Console.WriteLine($"[teleport] compatibility IM offer mirror failed for {targetAgentUuid}: {ex.Message}");
             }
 
-            return Task.FromResult(BotToolResult.OkResult($"Teleport offer sent to {targetAgentUuid}."));
+            return Task.FromResult(BotToolResult.OkResult($"Teleport offer sent to {targetAgentUuid} (lure + compatibility IM mirror)."));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -530,10 +621,82 @@ internal sealed partial class BotSession
             case InstantMessageDialog.RequestTeleport:
             case InstantMessageDialog.GodLikeRequestTeleport:
                 _pendingTeleportOffersByAgent[im.FromAgentID] = entry;
+                EmitRuntimeEvent(
+                    "teleport",
+                    "teleport.offer.received",
+                    "opensim",
+                    $"Teleport offer received from {im.FromAgentName}.",
+                    new Dictionary<string, string?>
+                    {
+                        ["fromAgentId"] = im.FromAgentID.ToString(),
+                        ["fromAgentName"] = string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName,
+                        ["sessionId"] = im.IMSessionID.ToString(),
+                        ["dialog"] = im.Dialog.ToString(),
+                        ["message"] = message
+                    });
                 break;
             case InstantMessageDialog.RequestLure:
                 _pendingTeleportRequestsByAgent[im.FromAgentID] = entry;
+                EmitRuntimeEvent(
+                    "teleport",
+                    "teleport.request.received",
+                    "opensim",
+                    $"Teleport request received from {im.FromAgentName}.",
+                    new Dictionary<string, string?>
+                    {
+                        ["fromAgentId"] = im.FromAgentID.ToString(),
+                        ["fromAgentName"] = string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName,
+                        ["sessionId"] = im.IMSessionID.ToString(),
+                        ["dialog"] = im.Dialog.ToString(),
+                        ["message"] = message
+                    });
                 break;
+        }
+    }
+
+    private void OnFriendshipOffered(object? sender, FriendshipOfferedEventArgs e)
+    {
+        var agentName = string.IsNullOrWhiteSpace(e.AgentName) ? "(unknown)" : e.AgentName;
+        _pendingFriendOffersByAgent[e.AgentID] = new PendingFriendOfferMessage(
+            e.AgentID,
+            agentName,
+            e.SessionID,
+            DateTimeOffset.UtcNow);
+
+        EmitRuntimeEvent(
+            "friends",
+            "friends.offer.received",
+            "opensim",
+            $"Friendship offer received from {agentName}.",
+            new Dictionary<string, string?>
+            {
+                ["fromAgentId"] = e.AgentID.ToString(),
+                ["fromAgentName"] = agentName,
+                ["sessionId"] = e.SessionID.ToString()
+            });
+    }
+
+    private static async Task WaitForFriendInListAsync(
+        GridClient client,
+        UUID friendId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        if (client.Friends.FriendList.ContainsKey(friendId))
+        {
+            return;
+        }
+
+        var start = DateTimeOffset.UtcNow;
+        while (DateTimeOffset.UtcNow - start < timeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (client.Friends.FriendList.ContainsKey(friendId))
+            {
+                return;
+            }
+
+            await Task.Delay(150, cancellationToken).ConfigureAwait(false);
         }
     }
 

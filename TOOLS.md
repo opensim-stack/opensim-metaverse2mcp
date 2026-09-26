@@ -41,6 +41,7 @@ The server publishes tools including:
 - `SetCameraHeading`
 - `GetCameraState`
 - `Follow`
+- `MonitorAgent`
 - `StopFollow`
 - `PrimCreate`
 - `PrimSetPosition`
@@ -134,6 +135,26 @@ The server publishes tools including:
 - `RlvProcessCommand`
 - `RlvListRestrictions`
 
+Social/friends tools:
+- `FriendList`
+- `FriendOffersList`
+- `FriendOfferSend`
+- `FriendOfferRespond`
+- `FriendRemove`
+- `FriendSetRights`
+- `FriendRightsGet`
+- `FriendMapLocate`
+- `TeleportOfferSend`
+- `TeleportRequestSend`
+- `TeleportOffersList`
+- `TeleportRequestsList`
+- `TeleportOfferRespond`
+
+Social/friends notes:
+- `FriendSetRights` controls the three viewer switches: see online, locate on map, and edit/delete/take objects.
+- `FriendRightsGet` reports both sides of rights (`myRights` and `theirRights`) for one friend UUID.
+- Accepting a friendship offer from a configured handler auto-enables all three rights by default.
+
 Chat notes:
 - `Chat` accepts optional `chatType` (case-insensitive) and defaults to `Normal`.
 - Supported `chatType` values are `Whisper`, `Normal`, `Shout`, `StartTyping`, `StopTyping`, `Debug`, `OwnerSay`, `RegionSayTo`, `RegionSay`.
@@ -213,6 +234,9 @@ UV preset notes:
 Movement notes:
 - `WalkTo`/`FlyTo` use stepped autopilot waypoints for improved reliability over larger distances.
 - `TeleportTo` resolves named regions to handles before teleporting for stricter targeting.
+- `MonitorAgent` starts a long-running BotTask that tracks one avatar UUID and emits `agentMonitor` events when observed status changes.
+- `MonitorAgent` only reports region/position/velocity/fly from current-region simulator cache; when the target is off-region those fields become unknown (`null`).
+- Optional external presence fallback is disabled by default; set `AGENT_MONITOR_EXTERNAL_FALLBACK=true` to probe spawner/friend-map (throttled) only when the target is otherwise lost.
 
 Animation notes:
 - `AnimationStart`/`AnimationStop` accept either a built-in animation name (e.g. `DANCE1`, `WAVE`, `CLAP`, `SIT`) or a raw animation UUID.
@@ -246,7 +270,7 @@ Inventory and asset notes:
 
 Event stream notes:
 - Hybrid default: use `EventStreamSubscribe` once, then `EventStreamPoll` with a cursor and non-zero `waitMs` for reactive long-poll behavior.
-- Channels are split as `general`, `object`, and `teleport` (`all` is accepted as shorthand).
+- Channels are split as `general`, `object`, `teleport`, `progress`, `follow`, `agentMonitor`, and `friends` (`all` is accepted as shorthand).
 - Event filtering supports `eventTypes`, `radiusMeters`, `objectIds`, `objectLocalIds`, and `chatSources` on subscribe and poll.
 - Buffers are bounded per channel; when full, oldest events are trimmed.
 - `EventStreamPoll` includes trim diagnostics (`CursorTrimmed`, `Trimmed*`) so clients can detect loss and recover.

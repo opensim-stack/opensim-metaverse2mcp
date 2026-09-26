@@ -397,7 +397,7 @@ internal sealed partial class BotSession
                         var playbackWindow = wavDuration > TimeSpan.Zero
                             ? wavDuration
                             : TimeSpan.FromSeconds(4);
-                        var postRoll = TimeSpan.FromMilliseconds(900);
+                        var postRoll = TimeSpan.FromMilliseconds(3000);
 
                         var played = await TryPlayWavViaWebRtcAsync(wavPath, preRoll, playbackWindow, postRoll, token, traceId, attempt: 1).ConfigureAwait(false);
                         if (!played)

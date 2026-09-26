@@ -13,12 +13,14 @@ internal sealed class BotMcpTools
     private readonly BotSession _bot;
     private readonly SpawnerClient _spawnerClient;
     private readonly AppOptions _options;
+    private readonly AgentLocator _agentLocator;
 
     public BotMcpTools(BotSession bot, SpawnerClient spawnerClient, AppOptions options)
     {
         _bot = bot;
         _spawnerClient = spawnerClient;
         _options = options;
+        _agentLocator = new AgentLocator(_bot, _spawnerClient);
     }
 
     [McpServerTool, Description("Get bot's own connection and location status.")]
@@ -880,6 +882,14 @@ internal sealed class BotMcpTools
         return _bot.FriendSetRightsAsync(friendAgentId, canSeeOnline, canSeeOnMap, canModifyObjects, cancellationToken);
     }
 
+    [McpServerTool, Description("Get current friend-rights status for a friend UUID (both rights you grant and rights they grant).")]
+    public Task<DataToolResult> FriendRightsGet(
+        [Description("Friend avatar UUID.")] string friendAgentId,
+        CancellationToken cancellationToken)
+    {
+        return _bot.FriendRightsGetAsync(friendAgentId, cancellationToken);
+    }
+
     [McpServerTool, Description("Request map location for a friend UUID and optionally wait for reply.")]
     public Task<DataToolResult> FriendMapLocate(
         [Description("Friend avatar UUID.")] string friendAgentId,
@@ -1342,6 +1352,14 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken)
     {
         return _bot.FollowAsync(targetType, target, distanceBuffer, cancellationToken);
+    }
+
+    [McpServerTool, Description("Start monitoring a target avatar UUID as a background BotTask. Emits updates on runtime-event channel agentMonitor when online/region/position/fly/velocity/heading status changes. Runs until cancelled via BotTaskCancel(handle).")]
+    public Task<BotTaskHandle> MonitorAgent(
+        [Description("Target avatar UUID to monitor.")] string targetAgentId,
+        CancellationToken cancellationToken)
+    {
+        return _agentLocator.MonitorAgent(targetAgentId, cancellationToken);
     }
 
     [McpServerTool, Description("Create a new prim shape at a position with scale and rotation.")]
@@ -2595,7 +2613,7 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Create an MCP runtime event subscription for filtered channels/types.")]
     public EventStreamSubscriptionResult EventStreamSubscribe(
-        [Description("Optional channels list: general, object, teleport, progress, follow, all. Delimit with comma/space/pipe.")] string? channels = null,
+        [Description("Optional channels list: general, object, teleport, progress, follow, agentMonitor, all. Delimit with comma/space/pipe.")] string? channels = null,
         [Description("Optional event-type filter list. Delimit with comma/space/pipe.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter list (comma/pipe/semicolon delimited).") ] string? objectIds = null,
@@ -2618,7 +2636,7 @@ internal sealed class BotMcpTools
         [Description("Long-poll wait timeout in milliseconds (0..30000).") ] int waitMs,
         [Description("Optional subscription ID. If provided, defaults to that subscription's channels/types/cursor.")] string? subscriptionId = null,
         [Description("Optional cursor returned by prior poll. Omit to use subscription cursor (or 0).") ] string? cursor = null,
-        [Description("Optional channels override: general, object, teleport, progress, follow, all.")] string? channels = null,
+        [Description("Optional channels override: general, object, teleport, progress, follow, agentMonitor, all.")] string? channels = null,
         [Description("Optional event-type filter override.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter override list.")] string? objectIds = null,
@@ -2643,7 +2661,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Query a short historical window of retained runtime events for debugging.")]
     public EventStreamHistoryResult EventStreamHistory(
         [Description("Window size in seconds (1..1800).") ] int lastSeconds,
-        [Description("Optional channels list: general, object, teleport, progress, all.")] string? channels = null,
+        [Description("Optional channels list: general, object, teleport, progress, follow, agentMonitor, all.")] string? channels = null,
         [Description("Optional event-type filter list.")] string? eventTypes = null,
         [Description("Optional distance filter in meters from the bot's current position.")] float? radiusMeters = null,
         [Description("Optional object UUID filter list.")] string? objectIds = null,

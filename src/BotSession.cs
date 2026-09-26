@@ -2,11 +2,11 @@ using LibreMetaverse;
 using LibreMetaverse.Messages.Linden;
 using LibreMetaverse.StructuredData;
 using LibreMetaverse.Assets;
+using LibreMetaverse.Packets;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
-
 namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession : IDisposable
@@ -344,16 +344,16 @@ internal sealed partial class BotSession : IDisposable
             }
 
             var client = new GridClient();
+            
             // Must be set before login/simulator creation; enabling later does not backfill Terrain arrays.
             client.Settings.World.StoreLandPatches = true;
-            client.Network.LoginProgress += OnLoginProgress;
-            client.Network.Disconnected += OnDisconnected;
-            client.Network.SimChanged += OnNetworkSimChanged;
-            client.Self.IM += OnInstantMessage;
-            client.Self.ChatFromSimulator += OnChatFromSimulator;
-            client.Self.ScriptDialog += OnScriptDialog;
-            client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
-            client.Objects.ObjectUpdate += OnWorldObjectUpdateForEventStream;
+            LibreMetaverse.Settings.LogLevel = Microsoft.Extensions.Logging.LogLevel.Debug;
+            client.Settings.Logging.LogResends = false;
+            client.Settings.World.StoreLandPatches = true;
+            client.Settings.World.AlwaysDecodeObjects = true;
+            client.Settings.World.AlwaysRequestObjects = true;
+            client.Settings.Agent.SendUpdates = true;
+            client.Settings.Agent.MultipleSims = true;
             
             //  Cache setup            
             client.Settings.AssetCache.Enabled = _options.CacheEnabled;
@@ -361,6 +361,22 @@ internal sealed partial class BotSession : IDisposable
             if(!string.IsNullOrEmpty(_options.CacheDir)) {
                 client.Settings.AssetCache.Dir = _options.CacheDir;
             }
+            
+            client.Network.LoginProgress += OnLoginProgress;
+            client.Network.Disconnected += OnDisconnected;
+            client.Network.SimChanged += OnNetworkSimChanged;
+            client.Self.IM += OnInstantMessage;
+            client.Self.ChatFromSimulator += OnChatFromSimulator;
+            client.Self.ScriptDialog += OnScriptDialog;
+            EnsureSocialImHookRegistered(client);
+            client.Friends.FriendshipOffered += OnFriendshipOffered;
+            client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
+            client.Objects.ObjectUpdate += OnWorldObjectUpdateForEventStream;
+            client.Objects.TerseObjectUpdate += OnTerseWorldObjectUpdateForEventStream;
+            client.Objects.AvatarUpdate += AvatarUpdateHandler;     
+
+            client.Network.RegisterCallback(PacketType.AlertMessage, AlertMessageHandler);
+            
 
             // Assign the field-backed client early so event handlers that run during
             // the login process (for example SimChanged) can reference a non-null
@@ -558,9 +574,10 @@ internal sealed partial class BotSession : IDisposable
             EnsureReconnectLoop("get-current-sim");
             return "(disconnected)";
         }
-
-        var sim = client.Network.CurrentSim;
-        return sim.Name ?? "(unknown)";
+        else {
+            var sim = client.Network.CurrentSim;
+            return sim?.Name ?? "(unknown)";   
+        }
     }
 
     private static string DescribeSimulator(Simulator? sim)
@@ -717,6 +734,12 @@ internal sealed partial class BotSession : IDisposable
         }
 
         return _client;
+    }
+
+    internal bool TryGetConnectedClientSnapshot(out GridClient? client)
+    {
+        client = _connected ? _client : null;
+        return client != null;
     }
 
     private static string FormatWhereText(GridClient client)
@@ -2146,6 +2169,41 @@ internal sealed partial class BotSession : IDisposable
         Console.WriteLine($"[dialog] forwarded script dialog from '{pending.ObjectName}' to {from} ({conversationKey}).");
     }
 
+    private void AlertMessageHandler(object? sender, PacketReceivedEventArgs e)
+    {
+        Packet packet = e.Packet;
+
+        AlertMessagePacket alert = (AlertMessagePacket)packet;
+        if (alert.AlertInfo.Length > 0)
+        {
+            EmitRuntimeEvent(
+                "general",
+                "alert.message",
+                "opensim",
+                Utils.BytesToString(alert.AlertInfo[0].Message),
+                new Dictionary<string, string?>());
+        }
+    }
+    
+    private void AvatarUpdateHandler(object? sender, AvatarUpdateEventArgs e)
+    {
+        if ( _client != null && e.Avatar.LocalID == _client.Self.LocalID)
+        {
+            SetDefaultCamera();
+        }
+    }
+    
+    private void SetDefaultCamera()
+    {
+        // SetCamera 5m behind the avatar
+        if( _client != null) {
+            _client.Self.Movement.Camera.LookAt(
+                _client.Self.SimPosition + new Vector3(-5, 0, 0) * _client.Self.Movement.BodyRotation,
+                _client.Self.SimPosition
+            );
+        }
+    }
+
     private static IReadOnlyList<string> SplitForInstantMessage(string message, int maxChunkLength)
     {
         if (string.IsNullOrWhiteSpace(message))
@@ -2285,6 +2343,8 @@ internal sealed partial class BotSession : IDisposable
                     Console.WriteLine("[dialog-bridge] OnNetworkSimChanged: client not fully initialized yet; postponing auto-provision until next sim change.");
                     return;
                 }
+                
+                client.Self.Movement.SetFOVVerticalAngle(Utils.TWO_PI - 0.05f);
 
                 // Allow some time for the simulator to populate object updates in the client's
                 // local cache after we've become ready.
@@ -2600,13 +2660,27 @@ internal sealed partial class BotSession : IDisposable
     private void CleanupClient(GridClient client, bool logout)
     {
         try { client.Self.IM -= OnInstantMessage; } catch { }
+        try { client.Self.IM -= OnSocialInstantMessage; } catch { }
         try { client.Self.ChatFromSimulator -= OnChatFromSimulator; } catch { }
         try { client.Self.ScriptDialog -= OnScriptDialog; } catch { }
+        try { client.Friends.FriendshipOffered -= OnFriendshipOffered; } catch { }
         try { client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered; } catch { }
         try { client.Objects.ObjectUpdate -= OnWorldObjectUpdateForEventStream; } catch { }
         try { client.Network.Disconnected -= OnDisconnected; } catch { }
         try { client.Network.SimChanged -= OnNetworkSimChanged; } catch { }
         try { client.Network.LoginProgress -= OnLoginProgress; } catch { }
+        try { client.Objects.TerseObjectUpdate -= OnTerseWorldObjectUpdateForEventStream; } catch { }
+        try { client.Objects.AvatarUpdate -= AvatarUpdateHandler; } catch { }
+        
+        try { client.Network.UnregisterCallback(PacketType.AlertMessage, AlertMessageHandler); } catch { }
+
+        lock (_socialImHookLock)
+        {
+            if (ReferenceEquals(_socialImHookClient, client))
+            {
+                _socialImHookClient = null;
+            }
+        }
 
         if (logout)
         {
