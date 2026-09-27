@@ -219,6 +219,13 @@ internal sealed class AgentLocator
 
             var currentSim = connectedClient.Network.CurrentSim;
             var latestUpdate = avatarUpdates.TryGetLatest(out var sampledUpdate) ? sampledUpdate : null;
+            var preferredLocalId = previous?.LocalId;
+            var resolvedOffRegion = ResolveOffRegionLocation(
+                connectedClient,
+                currentSim,
+                targetId,
+                preferredLocalId,
+                latestUpdate);
 
             // AvatarUpdate is authoritative for region transitions. If it says the
             // target is in a different region right now, ignore stale in-sim cache data.
@@ -226,25 +233,53 @@ internal sealed class AgentLocator
             {
                 return new AgentMonitorStatus(
                     Online: true,
-                    RegionName: null,
-                    RegionHandle: null,
-                    Position: null,
+                    RegionName: resolvedOffRegion.RegionName,
+                    RegionHandle: resolvedOffRegion.RegionHandle,
+                    Position: resolvedOffRegion.Position,
                     IsFlying: null,
                     Velocity: null,
                     HeadingDegrees: null,
                     Source: "avatarUpdate.offRegion",
                     LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId,
-                    AvatarRegionHandle: latestUpdate.SimulatorHandle == 0 ? null : latestUpdate.SimulatorHandle,
+                    AvatarRegionHandle: resolvedOffRegion.RegionHandle,
                     AvatarUpdateSeen: true,
                     AvatarUpdateSim: latestUpdate.SimulatorName,
                     CacheVsAvatarUpdate: "cache:stale|avatarUpdate:otherRegion");
             }
 
-            var preferredLocalId = previous?.LocalId;
+            // Keep off-region AvatarUpdate authoritative even after freshness expiry
+            // until we see evidence that the target is truly back in this simulator.
+            // This avoids stale sim-cache ghosts pinning follow at the border.
+            if (currentSim != null && IsOffRegionAvatarUpdate(latestUpdate, currentSim, requireFresh: false))
+            {
+                return new AgentMonitorStatus(
+                    Online: true,
+                    RegionName: resolvedOffRegion.RegionName,
+                    RegionHandle: resolvedOffRegion.RegionHandle,
+                    Position: resolvedOffRegion.Position,
+                    IsFlying: null,
+                    Velocity: null,
+                    HeadingDegrees: null,
+                    Source: "avatarUpdate.offRegion.sticky",
+                    LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId,
+                    AvatarRegionHandle: resolvedOffRegion.RegionHandle,
+                    AvatarUpdateSeen: true,
+                    AvatarUpdateSim: latestUpdate.SimulatorName,
+                    CacheVsAvatarUpdate: "cache:blocked|avatarUpdate:otherRegion");
+            }
 
             if (TryBuildStatusFromAvatarUpdate(currentSim, sampledUpdate, out var fromAvatarUpdate))
             {
-                return fromAvatarUpdate;
+                if (ShouldTrustAvatarUpdateCurrentRegion(
+                    currentSim,
+                    targetId,
+                    preferredLocalId,
+                    previous,
+                    latestUpdate,
+                    fromAvatarUpdate))
+                {
+                    return fromAvatarUpdate;
+                }
             }
             
             if (currentSim != null && TryFindAvatarByIdInSim(currentSim, targetId, preferredLocalId, out var foundAvatar))
@@ -288,15 +323,15 @@ internal sealed class AgentLocator
             {
                 return new AgentMonitorStatus(
                     Online: true,
-                    RegionName: null,
-                    RegionHandle: null,
-                    Position: null,
+                    RegionName: resolvedOffRegion.RegionName,
+                    RegionHandle: resolvedOffRegion.RegionHandle,
+                    Position: resolvedOffRegion.Position,
                     IsFlying: null,
                     Velocity: null,
                     HeadingDegrees: null,
                     Source: "avatarUpdate.offRegion",
                     LocalId: null,
-                    AvatarRegionHandle: latestUpdate.SimulatorHandle == 0 ? null : latestUpdate.SimulatorHandle,
+                    AvatarRegionHandle: resolvedOffRegion.RegionHandle,
                     AvatarUpdateSeen: true,
                     AvatarUpdateSim: latestUpdate.SimulatorName,
                     CacheVsAvatarUpdate: "cache:lost|avatarUpdate:offRegion");
@@ -376,6 +411,11 @@ internal sealed class AgentLocator
             return false;
         }
 
+        if (DateTimeOffset.UtcNow - latestUpdate.SeenAtUtc > AvatarUpdateFreshnessWindow)
+        {
+            return false;
+        }
+
         status = new AgentMonitorStatus(
             Online: true,
             RegionName: string.IsNullOrWhiteSpace(currentSim.Name) ? null : currentSim.Name,
@@ -393,14 +433,59 @@ internal sealed class AgentLocator
         return true;
     }
 
+    private static bool ShouldTrustAvatarUpdateCurrentRegion(
+        Simulator? currentSim,
+        UUID targetId,
+        uint? preferredLocalId,
+        AgentMonitorStatus? previous,
+        AvatarUpdateSample? latestUpdate,
+        AgentMonitorStatus candidate)
+    {
+        if (currentSim == null)
+        {
+            return false;
+        }
+
+        var wasOffRegion = previous?.Source?.Contains("offRegion", StringComparison.OrdinalIgnoreCase) == true;
+        if (!wasOffRegion)
+        {
+            return true;
+        }
+
+        // During region handoff, stale current-sim AvatarUpdate samples can briefly
+        // look valid. Require corroboration from the sim cache before declaring the
+        // target back in current region.
+        if (TryFindAvatarByIdInSim(currentSim, targetId, preferredLocalId, out _))
+        {
+            return true;
+        }
+
+        if (latestUpdate != null)
+        {
+            var age = DateTimeOffset.UtcNow - latestUpdate.SeenAtUtc;
+            if (age <= TimeSpan.FromMilliseconds(750)
+                && latestUpdate.SimulatorHandle == currentSim.Handle
+                && candidate.LocalId.HasValue
+                && candidate.LocalId.Value != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsFreshOffRegionAvatarUpdate(AvatarUpdateSample? latestUpdate, Simulator currentSim)
+        => IsOffRegionAvatarUpdate(latestUpdate, currentSim, requireFresh: true);
+
+    private static bool IsOffRegionAvatarUpdate(AvatarUpdateSample? latestUpdate, Simulator currentSim, bool requireFresh)
     {
         if (latestUpdate == null)
         {
             return false;
         }
 
-        if (DateTimeOffset.UtcNow - latestUpdate.SeenAtUtc > AvatarUpdateFreshnessWindow)
+        if (requireFresh && DateTimeOffset.UtcNow - latestUpdate.SeenAtUtc > AvatarUpdateFreshnessWindow)
         {
             return false;
         }
@@ -588,6 +673,53 @@ internal sealed class AgentLocator
         }
 
         return heading;
+    }
+
+    private static (ulong? RegionHandle, Vector3? Position, string? RegionName) ResolveOffRegionLocation(
+        GridClient client,
+        Simulator? currentSim,
+        UUID targetId,
+        uint? preferredLocalId,
+        AvatarUpdateSample? latestUpdate)
+    {
+        if (latestUpdate != null)
+        {
+            if (latestUpdate.SimulatorHandle != 0
+                && (currentSim == null || latestUpdate.SimulatorHandle != currentSim.Handle))
+            {
+                var byHandle = TryFindSimulatorByHandle(client, latestUpdate.SimulatorHandle);
+                return (
+                    latestUpdate.SimulatorHandle,
+                    latestUpdate.Position,
+                    ResolveRegionName(latestUpdate.SimulatorName, byHandle, latestUpdate.SimulatorHandle));
+            }
+
+            if (!string.IsNullOrWhiteSpace(latestUpdate.SimulatorName))
+            {
+                var byName = client.Network.Simulators.FirstOrDefault(candidate =>
+                    !string.IsNullOrWhiteSpace(candidate.Name)
+                    && candidate.Name.Equals(latestUpdate.SimulatorName, StringComparison.OrdinalIgnoreCase)
+                    && (currentSim == null || candidate.Handle != currentSim.Handle));
+                if (byName != null)
+                {
+                    return (byName.Handle, latestUpdate.Position, byName.Name);
+                }
+            }
+        }
+
+        if (TryFindAvatarByIdAcrossSims(client, targetId, preferredLocalId, out var seenSim, out var seenAvatar)
+            && seenSim != null
+            && (currentSim == null || seenSim.Handle != currentSim.Handle))
+        {
+            var avatarHandle = seenAvatar?.RegionHandle ?? 0;
+            var handle = avatarHandle != 0 ? avatarHandle : seenSim.Handle;
+            return (
+                handle == 0 ? null : handle,
+                seenAvatar?.Position ?? latestUpdate?.Position,
+                ResolveRegionName(latestUpdate?.SimulatorName, seenSim, handle));
+        }
+
+        return (null, latestUpdate?.Position, latestUpdate?.SimulatorName);
     }
 
     private static string? ResolveRegionName(string? preferredRegionName, Simulator? simulator, ulong regionHandle)

@@ -30,6 +30,10 @@ internal sealed partial class BotSession
     }
 
     private static readonly TimeSpan FollowTeleportAssistTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan FollowTeleportVerificationTimeout = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan FollowSameRegionStuckWindow = TimeSpan.FromSeconds(12);
+    private static readonly float FollowSameRegionProgressEpsilonMeters = 0.9f;
+    private static readonly float FollowSameRegionTeleportMinDistanceMeters = 10f;
     
     public async Task<BotToolResult> SitAsync(CancellationToken cancellationToken)
     {
@@ -489,6 +493,9 @@ internal sealed partial class BotSession
         float buffer,
         CancellationToken cancellationToken)
     {
+        // Stage 0: Initialize follow state and safety trackers.
+        // These variables track movement cadence, cross-region transitions,
+        // and anti-stall telemetry/recovery.
         var targetSim = sim;
         var targetLocalId = localId;
         var lastPilotAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
@@ -510,7 +517,13 @@ internal sealed partial class BotSession
         bool? lastLoggedTargetFlying = null;
         bool? lastAppliedFlyMode = null;
         bool? lastAppliedRunMode = null;
+        var sameRegionBestDistance = float.MaxValue;
+        var sameRegionLastProgressAt = DateTime.UtcNow;
+        var sameRegionRecoveryAttempts = 0;
+        var sameRegionLastRecoveryAt = DateTime.MinValue;
 
+        // Stage 1: Apply locomotion mode deltas only when required.
+        // This keeps network updates lower and avoids control-flag churn.
         void ApplyFollowLocomotionMode(bool flyModeDesired, bool runModeDesired)
         {
             if (lastAppliedFlyMode != flyModeDesired)
@@ -528,6 +541,8 @@ internal sealed partial class BotSession
             }
         }
 
+        // Stage 2: Hard-stop helper for hold states and cleanup transitions.
+        // preserveFlight is used when we intentionally keep hover mode active.
         void EnsureFollowMovementStopped(bool preserveFlight = false)
         {
             if (followMovementHardStopped && followMovementHardStoppedPreserveFlight == preserveFlight)
@@ -558,6 +573,9 @@ internal sealed partial class BotSession
             }
         }
 
+        // Stage 3: Main follow tick loop (500ms cadence).
+        // Each tick resolves target state, chooses a waypoint, evaluates
+        // cross-region state-machine transitions, then drives movement.
         var completion = BotToolResult.OkResult($"Follow ended for {label}.");
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -568,6 +586,7 @@ internal sealed partial class BotSession
                 var botSim = client.Network.CurrentSim;
                 if (botSim == null)
                 {
+                    // Stage 3a: Abort if we no longer have an active simulator.
                     Console.WriteLine($"[follow] no active simulator; stopping follow of {label}.");
                     EmitFollowProgressEvent(followTaskHandle, "follow.stopping", $"Lost active simulator while following {label}; stopping follow.");
                     completion = BotToolResult.Fail($"Lost active simulator while following {label}.");
@@ -590,6 +609,7 @@ internal sealed partial class BotSession
                 float distance;
                 if (isObject)
                 {
+                    // Stage 3b: Object follow path (same-region only).
                     if (!ReferenceEquals(botSim, targetSim))
                     {
                         Console.WriteLine($"[follow] object {label} changed region; stopping.");
@@ -609,6 +629,7 @@ internal sealed partial class BotSession
                 }
                 else
                 {
+                    // Stage 3c: Avatar follow path (driven by AgentLocator monitor).
                     if (string.IsNullOrWhiteSpace(monitorTaskHandle)
                         || !_agentLocator.TryGetLatestStatus(monitorTaskHandle, out var monitorStatus))
                     {
@@ -650,6 +671,8 @@ internal sealed partial class BotSession
 
                     if (monitorStatus.RegionHandle.HasValue && monitorStatus.Position.HasValue)
                     {
+                        // Stage 3c.1: Target has concrete region+position.
+                        // Resolve direct same-region or cross-region waypoint.
                         if (avatarLost)
                         {
                             avatarLost = false;
@@ -661,6 +684,18 @@ internal sealed partial class BotSession
 
                         var statusRegionHandle = monitorStatus.RegionHandle.Value;
                         var statusPosition = ClampLocalPosition(monitorStatus.Position.Value);
+                        if (statusRegionHandle == botSim.Handle)
+                        {
+                            targetSim = botSim;
+                        }
+                        else
+                        {
+                            var statusSim = client.Network.Simulators.FirstOrDefault(candidate => candidate.Handle == statusRegionHandle);
+                            if (statusSim != null)
+                            {
+                                targetSim = statusSim;
+                            }
+                        }
                         var targetFlyingNow = monitorStatus.IsFlying == true;
                         if (IsFollowDiagnosticsEnabled() && lastLoggedTargetFlying != targetFlyingNow)
                         {
@@ -725,6 +760,15 @@ internal sealed partial class BotSession
                     }
                     else
                     {
+                        // Stage 3c.2: Off-region fallback path.
+                        // Use last known handle/local for border pathing and
+                        // teleport fallback when we cannot see direct position.
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] off-region target={label} source={monitorStatus.Source ?? "unknown"} online={(monitorStatus.Online.HasValue ? (monitorStatus.Online.Value ? "true" : "false") : "null")} avatarRegionHandle={(monitorStatus.AvatarRegionHandle?.ToString() ?? "null")} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
+                        }
+
                         if (!avatarLost)
                         {
                             avatarLost = true;
@@ -748,6 +792,12 @@ internal sealed partial class BotSession
                             lastKnownCrossRegionLocal = ClampLocalPosition(client.Self.SimPosition);
                         }
 
+                        var offRegionSim = client.Network.Simulators.FirstOrDefault(candidate => candidate.Handle == offRegionHandle);
+                        if (offRegionSim != null)
+                        {
+                            targetSim = offRegionSim;
+                        }
+
                         crossRegionTargetHandle = offRegionHandle;
                         crossRegionTargetLocal = lastKnownCrossRegionLocal;
                         targetPos = ResolveFollowWaypointFromRegionHandle(
@@ -762,6 +812,7 @@ internal sealed partial class BotSession
 
                 if (IsFollowDiagnosticsEnabled() && (DateTime.UtcNow - lastDiagAt) >= TimeSpan.FromSeconds(3))
                 {
+                    // Stage 3d: periodic diagnostics snapshot.
                     Console.WriteLine(
                         $"[follow][diag] tick target={label} targetSim={DescribeSimulator(targetSim)} botSim={DescribeSimulator(botSim)} botPos={FormatPosition(client.Self.SimPosition)} waypoint={FormatPosition(targetPos)} distance={distance:F1} buffer={buffer:F1} crossRegion={targetIsCrossRegion}");
                     lastDiagAt = DateTime.UtcNow;
@@ -769,6 +820,8 @@ internal sealed partial class BotSession
 
                 if (targetIsCrossRegion)
                 {
+                    // Stage 3e: Cross-region state machine.
+                    // Walk to seam -> teleport attempts -> teleport assist.
                     if (crossRegionTargetHandle != 0)
                     {
                         lastKnownCrossRegionHandle = crossRegionTargetHandle;
@@ -810,23 +863,56 @@ internal sealed partial class BotSession
                         && crossRegionTeleportAttempts < 2
                         && lastKnownCrossRegionHandle != 0)
                     {
+                        var preTeleportSim = client.Network.CurrentSim;
+                        var preTeleportPos = client.Self.SimPosition;
                         crossRegionTeleportAttempts++;
                         EmitFollowProgressEvent(
                             followTaskHandle,
                             "follow.cross_region.teleport_try",
-                            $"Teleport attempt {crossRegionTeleportAttempts} while following {label}.");
+                            $"Teleport attempt {crossRegionTeleportAttempts} while following {label} (targetHandle={lastKnownCrossRegionHandle}, targetLocal={FormatPosition(lastKnownCrossRegionLocal)})."
+                        );
+
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] teleport_try target={label} attempt={crossRegionTeleportAttempts} expectedHandle={lastKnownCrossRegionHandle} targetLocal={FormatPosition(lastKnownCrossRegionLocal)} preSim={DescribeSimulator(preTeleportSim)} prePos={FormatPosition(preTeleportPos)}");
+                        }
+
                         var teleported = await client.Self.TeleportAsync(lastKnownCrossRegionHandle, lastKnownCrossRegionLocal, cancellationToken).ConfigureAwait(false);
                         if (teleported)
                         {
+                            var verification = await VerifyCrossRegionTeleportAsync(
+                                client,
+                                lastKnownCrossRegionHandle,
+                                lastKnownCrossRegionLocal,
+                                preTeleportSim,
+                                preTeleportPos,
+                                cancellationToken).ConfigureAwait(false);
+
+                            if (verification.Confirmed)
+                            {
+                                EmitFollowProgressEvent(
+                                    followTaskHandle,
+                                    "follow.cross_region.teleport_succeeded",
+                                    $"Teleport confirmed; continuing follow of {label}. {verification.Details}");
+                                crossRegionState = FollowCrossRegionState.None;
+                                crossRegionStateSince = DateTime.MinValue;
+                                lastCrossRegionDistance = float.MaxValue;
+                                lastCrossRegionProgressAt = DateTime.UtcNow;
+                                continue;
+                            }
+
+                            Console.WriteLine(
+                                $"[follow] teleport acknowledged but not confirmed while following {label}. {verification.Details}");
                             EmitFollowProgressEvent(
                                 followTaskHandle,
-                                "follow.cross_region.teleport_succeeded",
-                                $"Teleport succeeded; continuing follow of {label}.");
-                            crossRegionState = FollowCrossRegionState.None;
-                            crossRegionStateSince = DateTime.MinValue;
-                            lastCrossRegionDistance = float.MaxValue;
-                            lastCrossRegionProgressAt = DateTime.UtcNow;
-                            continue;
+                                "follow.cross_region.teleport_unconfirmed",
+                                $"Teleport returned success but location did not confirm for {label}; retrying if attempts remain. {verification.Details}");
+                        }
+                        else if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] teleport_try_failed target={label} attempt={crossRegionTeleportAttempts} expectedHandle={lastKnownCrossRegionHandle} targetLocal={FormatPosition(lastKnownCrossRegionLocal)} message={(string.IsNullOrWhiteSpace(client.Self.TeleportMessage) ? "(none)" : client.Self.TeleportMessage)} postSim={DescribeSimulator(client.Network.CurrentSim)} postPos={FormatPosition(client.Self.SimPosition)}");
                         }
 
                         if (crossRegionTeleportAttempts >= 2)
@@ -881,6 +967,9 @@ internal sealed partial class BotSession
                 }
                 else
                 {
+                    // Stage 3f: Same-region reset path.
+                    // Clear cross-region state and track local movement progress
+                    // for anti-stall recovery.
                     crossRegionState = FollowCrossRegionState.None;
                     crossRegionStateSince = DateTime.MinValue;
                     lastCrossRegionDistance = float.MaxValue;
@@ -888,6 +977,19 @@ internal sealed partial class BotSession
                     crossRegionTeleportAttempts = 0;
                     teleportRequestSent = false;
                     lastKnownCrossRegionHandle = 0;
+
+                    if (distance < sameRegionBestDistance - FollowSameRegionProgressEpsilonMeters)
+                    {
+                        sameRegionBestDistance = distance;
+                        sameRegionLastProgressAt = DateTime.UtcNow;
+                        sameRegionRecoveryAttempts = 0;
+                    }
+                    else if (distance <= buffer)
+                    {
+                        sameRegionBestDistance = float.MaxValue;
+                        sameRegionLastProgressAt = DateTime.UtcNow;
+                        sameRegionRecoveryAttempts = 0;
+                    }
                 }
 
                 var holdPositionForTeleportAssist = crossRegionState == FollowCrossRegionState.AwaitingTeleportAssist;
@@ -900,6 +1002,49 @@ internal sealed partial class BotSession
 
                 if (distance > buffer)
                 {
+                    // Stage 3g: Same-region anti-stall recovery.
+                    // If we are in-region, far from target, and making no real
+                    // progress for a while, perform controlled teleport recovery.
+                    if (!targetIsCrossRegion
+                        && distance >= FollowSameRegionTeleportMinDistanceMeters
+                        && (DateTime.UtcNow - sameRegionLastProgressAt) >= FollowSameRegionStuckWindow
+                        && (DateTime.UtcNow - sameRegionLastRecoveryAt) >= TimeSpan.FromSeconds(8)
+                        && sameRegionRecoveryAttempts < 2)
+                    {
+                        sameRegionRecoveryAttempts++;
+                        sameRegionLastRecoveryAt = DateTime.UtcNow;
+                        client.Self.AutoPilotCancel();
+                        EmitFollowProgressEvent(
+                            followTaskHandle,
+                            "follow.same_region.recovery_teleport_try",
+                            $"Same-region follow appears stuck while tracking {label}; trying local teleport recovery {sameRegionRecoveryAttempts}/2.");
+
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] same_region_recovery_try target={label} attempt={sameRegionRecoveryAttempts} botSim={DescribeSimulator(botSim)} targetPos={FormatPosition(targetPos)} distance={distance:F2} noProgressSeconds={(DateTime.UtcNow - sameRegionLastProgressAt).TotalSeconds:F1}");
+                        }
+
+                        var recovered = await client.Self.TeleportAsync(botSim.Handle, targetPos, cancellationToken).ConfigureAwait(false);
+                        if (recovered)
+                        {
+                            EmitFollowProgressEvent(
+                                followTaskHandle,
+                                "follow.same_region.recovery_teleport_ok",
+                                $"Local teleport recovery succeeded while following {label}; resuming follow.");
+                            sameRegionBestDistance = float.MaxValue;
+                            sameRegionLastProgressAt = DateTime.UtcNow;
+                            continue;
+                        }
+
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] same_region_recovery_failed target={label} attempt={sameRegionRecoveryAttempts} message={(string.IsNullOrWhiteSpace(client.Self.TeleportMessage) ? "(none)" : client.Self.TeleportMessage)}");
+                        }
+                    }
+
+                    // Stage 3h: Normal movement command emission.
                     // Re-issue autopilot at most once per second to avoid packet spam.
                     if (!holdPositionForTeleportAssist
                         && (DateTime.UtcNow - lastPilotAt) >= TimeSpan.FromSeconds(1))
@@ -929,6 +1074,7 @@ internal sealed partial class BotSession
                 }
                 else
                 {
+                    // Stage 3i: Inside follow buffer: hold position.
                     EnsureFollowMovementStopped(preserveFlightOnStop);
                 }
             }
@@ -945,6 +1091,7 @@ internal sealed partial class BotSession
             }
         }
 
+        // Stage 4: Final cleanup and monitor teardown.
         try
         {
             client.Self.AutoPilotCancel();
@@ -997,6 +1144,52 @@ internal sealed partial class BotSession
             botPosition.Z + Math.Clamp(delta.Z, -3f, 3f));
 
         return ClampEdgeWaypoint(projectedLocal);
+    }
+
+    private async Task<(bool Confirmed, string Details)> VerifyCrossRegionTeleportAsync(
+        GridClient client,
+        ulong expectedRegionHandle,
+        Vector3 requestedLocal,
+        Simulator? preTeleportSim,
+        Vector3 preTeleportPosition,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = DateTime.UtcNow;
+        var lastSnapshot = BuildTeleportVerificationSnapshot(client, expectedRegionHandle, requestedLocal, preTeleportSim, preTeleportPosition);
+
+        while (!cancellationToken.IsCancellationRequested
+            && (DateTime.UtcNow - startedAt) < FollowTeleportVerificationTimeout)
+        {
+            var currentSim = client.Network.CurrentSim;
+            var currentHandle = currentSim?.Handle ?? 0;
+            var currentPosition = client.Self.SimPosition;
+            var simChanged = preTeleportSim == null || currentHandle != preTeleportSim.Handle;
+            var nowOnExpectedRegion = currentHandle == expectedRegionHandle;
+            var movedSinceTeleport = Vector3.Distance(currentPosition, preTeleportPosition) >= 1.0f;
+
+            if (nowOnExpectedRegion && (simChanged || movedSinceTeleport))
+            {
+                return (true, BuildTeleportVerificationSnapshot(client, expectedRegionHandle, requestedLocal, preTeleportSim, preTeleportPosition));
+            }
+
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+            lastSnapshot = BuildTeleportVerificationSnapshot(client, expectedRegionHandle, requestedLocal, preTeleportSim, preTeleportPosition);
+        }
+
+        return (false, lastSnapshot);
+    }
+
+    private static string BuildTeleportVerificationSnapshot(
+        GridClient client,
+        ulong expectedRegionHandle,
+        Vector3 requestedLocal,
+        Simulator? preTeleportSim,
+        Vector3 preTeleportPosition)
+    {
+        var currentSim = client.Network.CurrentSim;
+        var currentPosition = client.Self.SimPosition;
+        var distanceFromPreTeleport = Vector3.Distance(currentPosition, preTeleportPosition);
+        return $"expectedHandle={expectedRegionHandle} requestedLocal={FormatPosition(requestedLocal)} preSim={DescribeSimulator(preTeleportSim)} prePos={FormatPosition(preTeleportPosition)} postSim={DescribeSimulator(currentSim)} postPos={FormatPosition(currentPosition)} movedMeters={distanceFromPreTeleport:0.00} teleportMessage={(string.IsNullOrWhiteSpace(client.Self.TeleportMessage) ? "(none)" : client.Self.TeleportMessage)}";
     }
 
 
