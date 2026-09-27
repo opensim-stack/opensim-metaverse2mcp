@@ -11,6 +11,35 @@ internal sealed class AgentLocator
     private static readonly TimeSpan FriendMapTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ExternalFallbackProbeInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan AvatarUpdateFreshnessWindow = TimeSpan.FromSeconds(3);
+    private static readonly HashSet<UUID> FlyingAnimationIds = new()
+    {
+        Animations.FLY,
+        Animations.FLYSLOW,
+        Animations.HOVER,
+        Animations.HOVER_UP,
+        Animations.HOVER_DOWN,
+    };
+    private static readonly HashSet<UUID> GroundedAnimationIds = new()
+    {
+        Animations.STAND,
+        Animations.STAND_1,
+        Animations.STAND_2,
+        Animations.STAND_3,
+        Animations.STAND_4,
+        Animations.WALK,
+        Animations.RUN,
+        Animations.STRIDE,
+        Animations.TURNLEFT,
+        Animations.TURNRIGHT,
+        Animations.CROUCH,
+        Animations.CROUCHWALK,
+        Animations.SIT,
+        Animations.SIT_FEMALE,
+        Animations.SIT_GENERIC,
+        Animations.SIT_GROUND,
+        Animations.LAND,
+        Animations.MEDIUM_LAND,
+    };
     private readonly BotSession _bot;
     private readonly SpawnerClient _spawnerClient;
     private readonly bool _allowExternalFallback;
@@ -212,6 +241,12 @@ internal sealed class AgentLocator
             }
 
             var preferredLocalId = previous?.LocalId;
+
+            if (TryBuildStatusFromAvatarUpdate(currentSim, sampledUpdate, out var fromAvatarUpdate))
+            {
+                return fromAvatarUpdate;
+            }
+            
             if (currentSim != null && TryFindAvatarByIdInSim(currentSim, targetId, preferredLocalId, out var foundAvatar))
             {
                 var knownPosition = foundAvatar?.Position;
@@ -229,11 +264,6 @@ internal sealed class AgentLocator
                     AvatarUpdateSeen: latestUpdate != null,
                     AvatarUpdateSim: latestUpdate?.SimulatorName,
                     CacheVsAvatarUpdate: DescribeCacheVsAvatarUpdate(currentSim, knownPosition, latestUpdate));
-            }
-
-            if (TryBuildStatusFromAvatarUpdate(currentSim, sampledUpdate, out var fromAvatarUpdate))
-            {
-                return fromAvatarUpdate;
             }
 
             if (TryFindAvatarByIdAcrossSims(connectedClient, targetId, preferredLocalId, out _, out var offRegionAvatar))
@@ -416,17 +446,54 @@ internal sealed class AgentLocator
 
     private static bool? ReadFlyingSignal(Avatar avatar)
     {
-        if ((avatar.Flags & PrimFlags.Flying) != 0)
-        {
-            return true;
-        }
-
         if ((avatar.ControlFlags & AgentManager.ControlFlags.AGENT_CONTROL_FLY) != 0)
         {
             return true;
         }
 
-        return null;
+        if ((avatar.Flags & PrimFlags.Flying) != 0)
+        {
+            return true;
+        }
+
+        var fromAnimations = TryReadFlyingSignalFromAnimations(avatar);
+        if (fromAnimations.HasValue)
+        {
+            return fromAnimations.Value;
+        }
+
+        // If we can see the avatar but have no explicit flying evidence, treat it as not flying.
+        return false;
+    }
+
+    private static bool? TryReadFlyingSignalFromAnimations(Avatar avatar)
+    {
+        List<Animation>? snapshot = null;
+        lock (avatar)
+        {
+            if (avatar.Animations == null || avatar.Animations.Count == 0)
+            {
+                return null;
+            }
+
+            snapshot = avatar.Animations.ToList();
+        }
+
+        var sawGrounded = false;
+        foreach (var animation in snapshot)
+        {
+            if (FlyingAnimationIds.Contains(animation.AnimationID))
+            {
+                return true;
+            }
+
+            if (GroundedAnimationIds.Contains(animation.AnimationID))
+            {
+                sawGrounded = true;
+            }
+        }
+
+        return sawGrounded ? false : null;
     }
 
     private static bool TryFindAvatarByIdInSim(
@@ -934,12 +1001,14 @@ internal sealed class AgentLocator
                 if (_client != null)
                 {
                     _client.Objects.AvatarUpdate -= OnAvatarUpdate;
+                    _client.Objects.TerseObjectUpdate -= OnTerseObjectUpdate;
                 }
 
                 _client = client;
                 if (_client != null)
                 {
                     _client.Objects.AvatarUpdate += OnAvatarUpdate;
+                    _client.Objects.TerseObjectUpdate += OnTerseObjectUpdate;
                 }
             }
         }
@@ -965,8 +1034,6 @@ internal sealed class AgentLocator
             {
                 return;
             }
-            
-            Console.WriteLine($"[AvatarUpdateTracker] Received update for {_targetId} at {DateTimeOffset.UtcNow:u} in simulator {e.Simulator?.Name ?? "unknown"}");
 
             var simulator = e.Simulator;
             var sample = new AvatarUpdateSample(
@@ -978,6 +1045,44 @@ internal sealed class AgentLocator
                 ReadFlyingSignal(avatar),
                 avatar.LocalID,
                 e.IsNew);
+
+            lock (_lock)
+            {
+                _latest = sample;
+            }
+        }
+
+        private void OnTerseObjectUpdate(object? _, TerseObjectUpdateEventArgs e)
+        {
+            var prim = e.Prim;
+            var avatar = prim as Avatar;
+
+            // Terse updates are frequent and may arrive without a resolved avatar reference.
+            // Resolve by local ID when possible so the target sample stays fresh while moving.
+            if (avatar == null || avatar.ID != _targetId)
+            {
+                if (e.Simulator?.ObjectsAvatars.TryGetValue(e.Update.LocalID, out var resolved) == true
+                    && resolved != null
+                    && resolved.ID == _targetId)
+                {
+                    avatar = resolved;
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            var simulator = e.Simulator;
+            var sample = new AvatarUpdateSample(
+                DateTimeOffset.UtcNow,
+                simulator?.Handle ?? 0,
+                simulator?.Name,
+                e.Update.Position,
+                e.Update.Velocity,
+                ReadFlyingSignal(avatar),
+                e.Update.LocalID,
+                IsNew: false);
 
             lock (_lock)
             {

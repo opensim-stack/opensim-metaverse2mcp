@@ -506,18 +506,37 @@ internal sealed partial class BotSession
         var avatarLost = false;
         var targetStationary = false;
         var followMovementHardStopped = false;
+        var followMovementHardStoppedPreserveFlight = false;
+        bool? lastLoggedTargetFlying = null;
 
-        void EnsureFollowMovementStopped()
+        void EnsureFollowMovementStopped(bool preserveFlight = false)
         {
-            if (followMovementHardStopped)
+            if (followMovementHardStopped && followMovementHardStoppedPreserveFlight == preserveFlight)
             {
                 return;
             }
 
+            if (IsFollowDiagnosticsEnabled())
+            {
+                Console.WriteLine(
+                    $"[follow][flydiag] stop begin target={label} preserveFlight={preserveFlight} botFlyBefore={client.Self.Movement.Fly} hardStopped={followMovementHardStopped}");
+            }
+
             client.Self.AutoPilotCancel();
             client.Self.Movement.ResetControlFlags();
+            if (preserveFlight)
+            {
+                client.Self.Fly(true);
+            }
             client.Self.Movement.SendUpdate(true);
             followMovementHardStopped = true;
+            followMovementHardStoppedPreserveFlight = preserveFlight;
+
+            if (IsFollowDiagnosticsEnabled())
+            {
+                Console.WriteLine(
+                    $"[follow][flydiag] stop done target={label} preserveFlight={preserveFlight} botFlyAfter={client.Self.Movement.Fly}");
+            }
         }
 
         var completion = BotToolResult.OkResult($"Follow ended for {label}.");
@@ -544,6 +563,7 @@ internal sealed partial class BotSession
                 Vector3 targetPos;
                 var targetIsCrossRegion = false;
                 var suppressMovementForStationary = false;
+                var preserveFlightOnStop = false;
                 ulong crossRegionTargetHandle = 0;
                 Vector3 crossRegionTargetLocal = Vector3.Zero;
                 float distance;
@@ -620,6 +640,13 @@ internal sealed partial class BotSession
 
                         var statusRegionHandle = monitorStatus.RegionHandle.Value;
                         var statusPosition = ClampLocalPosition(monitorStatus.Position.Value);
+                        preserveFlightOnStop = monitorStatus.IsFlying == true;
+                        if (IsFollowDiagnosticsEnabled() && lastLoggedTargetFlying != preserveFlightOnStop)
+                        {
+                            Console.WriteLine(
+                                $"[follow][flydiag] target-fly target={label} targetIsFlying={monitorStatus.IsFlying?.ToString() ?? "null"} preserveFlightOnStop={preserveFlightOnStop}");
+                            lastLoggedTargetFlying = preserveFlightOnStop;
+                        }
                         crossRegionTargetHandle = statusRegionHandle;
                         crossRegionTargetLocal = statusPosition;
                         lastKnownCrossRegionHandle = statusRegionHandle;
@@ -830,7 +857,7 @@ internal sealed partial class BotSession
 
                 if (suppressMovementForStationary)
                 {
-                    EnsureFollowMovementStopped();
+                    EnsureFollowMovementStopped(preserveFlightOnStop);
                     continue;
                 }
 
@@ -851,13 +878,19 @@ internal sealed partial class BotSession
                                 (int)MathF.Round(targetPos.Y),
                                 targetPos.Z);
                         }
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][flydiag] move target={label} distance={distance:F2} buffer={buffer:F2} preserveFlightOnStop={preserveFlightOnStop} botFly={client.Self.Movement.Fly} waypointZ={targetPos.Z:F2} botZ={client.Self.SimPosition.Z:F2}");
+                        }
                         followMovementHardStopped = false;
+                        followMovementHardStoppedPreserveFlight = false;
                         lastPilotAt = DateTime.UtcNow;
                     }
                 }
                 else
                 {
-                    EnsureFollowMovementStopped();
+                    EnsureFollowMovementStopped(preserveFlightOnStop);
                 }
             }
             catch (OperationCanceledException)
