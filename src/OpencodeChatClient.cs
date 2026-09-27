@@ -305,6 +305,12 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             return false;
         }
 
+        if (normalizedEventType.Equals("message.part.delta", StringComparison.OrdinalIgnoreCase) ||
+            normalizedEventType.Equals("server.heartbeat", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         if (!normalizedEventType.Equals("message.part.updated", StringComparison.OrdinalIgnoreCase)
             || root.ValueKind != JsonValueKind.Object)
         {
