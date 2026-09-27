@@ -508,6 +508,25 @@ internal sealed partial class BotSession
         var followMovementHardStopped = false;
         var followMovementHardStoppedPreserveFlight = false;
         bool? lastLoggedTargetFlying = null;
+        bool? lastAppliedFlyMode = null;
+        bool? lastAppliedRunMode = null;
+
+        void ApplyFollowLocomotionMode(bool flyModeDesired, bool runModeDesired)
+        {
+            if (lastAppliedFlyMode != flyModeDesired)
+            {
+                client.Self.Fly(flyModeDesired);
+                lastAppliedFlyMode = flyModeDesired;
+            }
+
+            if (lastAppliedRunMode != runModeDesired)
+            {
+                client.Self.Movement.FastAt = runModeDesired;
+                client.Self.Movement.FastLeft = runModeDesired;
+                client.Self.Movement.SendUpdate(true);
+                lastAppliedRunMode = runModeDesired;
+            }
+        }
 
         void EnsureFollowMovementStopped(bool preserveFlight = false)
         {
@@ -564,6 +583,8 @@ internal sealed partial class BotSession
                 var targetIsCrossRegion = false;
                 var suppressMovementForStationary = false;
                 var preserveFlightOnStop = false;
+                var flyModeDesired = false;
+                var runModeDesired = false;
                 ulong crossRegionTargetHandle = 0;
                 Vector3 crossRegionTargetLocal = Vector3.Zero;
                 float distance;
@@ -640,12 +661,12 @@ internal sealed partial class BotSession
 
                         var statusRegionHandle = monitorStatus.RegionHandle.Value;
                         var statusPosition = ClampLocalPosition(monitorStatus.Position.Value);
-                        preserveFlightOnStop = monitorStatus.IsFlying == true;
-                        if (IsFollowDiagnosticsEnabled() && lastLoggedTargetFlying != preserveFlightOnStop)
+                        var targetFlyingNow = monitorStatus.IsFlying == true;
+                        if (IsFollowDiagnosticsEnabled() && lastLoggedTargetFlying != targetFlyingNow)
                         {
                             Console.WriteLine(
-                                $"[follow][flydiag] target-fly target={label} targetIsFlying={monitorStatus.IsFlying?.ToString() ?? "null"} preserveFlightOnStop={preserveFlightOnStop}");
-                            lastLoggedTargetFlying = preserveFlightOnStop;
+                                $"[follow][flydiag] target-fly target={label} targetIsFlying={monitorStatus.IsFlying?.ToString() ?? "null"} targetVelocity={monitorStatus.Velocity?.Length().ToString("0.00", CultureInfo.InvariantCulture) ?? "null"}");
+                            lastLoggedTargetFlying = targetFlyingNow;
                         }
                         crossRegionTargetHandle = statusRegionHandle;
                         crossRegionTargetLocal = statusPosition;
@@ -659,6 +680,22 @@ internal sealed partial class BotSession
                             statusPosition,
                             out distance,
                             out targetIsCrossRegion);
+
+                        var deltaZ = MathF.Abs(statusPosition.Z - client.Self.SimPosition.Z);
+                        var runThreshold = MathF.Max(buffer + 1.5f, buffer * 1.6f);
+                        var flyCatchupThreshold = MathF.Max(runThreshold + 6f, buffer * 3f);
+                        var flyCatchupZThreshold = 3.5f;
+                        var beyondRunThreshold = distance > runThreshold;
+                        var veryBehind = distance > flyCatchupThreshold;
+                        var largeVerticalGap = deltaZ > flyCatchupZThreshold;
+
+                        // Only mirror target flying when close. Farther out, prefer running first, then fly catch-up.
+                        flyModeDesired = !targetIsCrossRegion
+                            && (beyondRunThreshold
+                                ? (veryBehind || largeVerticalGap)
+                                : targetFlyingNow);
+                        runModeDesired = !targetIsCrossRegion && beyondRunThreshold && !flyModeDesired;
+                        preserveFlightOnStop = flyModeDesired;
 
                         var velocityMagnitude = monitorStatus.Velocity?.Length() ?? -1f;
                         var isStationaryNow = velocityMagnitude >= 0f && velocityMagnitude < 0.05f;
@@ -867,6 +904,8 @@ internal sealed partial class BotSession
                     if (!holdPositionForTeleportAssist
                         && (DateTime.UtcNow - lastPilotAt) >= TimeSpan.FromSeconds(1))
                     {
+                        ApplyFollowLocomotionMode(flyModeDesired, runModeDesired);
+
                         if (targetIsCrossRegion && crossRegionTargetHandle != 0)
                         {
                             AutoPilotToRegionLocal(client, crossRegionTargetHandle, crossRegionTargetLocal);
@@ -881,7 +920,7 @@ internal sealed partial class BotSession
                         if (IsFollowDiagnosticsEnabled())
                         {
                             Console.WriteLine(
-                                $"[follow][flydiag] move target={label} distance={distance:F2} buffer={buffer:F2} preserveFlightOnStop={preserveFlightOnStop} botFly={client.Self.Movement.Fly} waypointZ={targetPos.Z:F2} botZ={client.Self.SimPosition.Z:F2}");
+                                $"[follow][flydiag] move target={label} distance={distance:F2} buffer={buffer:F2} preserveFlightOnStop={preserveFlightOnStop} flyDesired={flyModeDesired} runDesired={runModeDesired} botFly={client.Self.Movement.Fly} waypointZ={targetPos.Z:F2} botZ={client.Self.SimPosition.Z:F2}");
                         }
                         followMovementHardStopped = false;
                         followMovementHardStoppedPreserveFlight = false;
@@ -916,6 +955,9 @@ internal sealed partial class BotSession
         {
             // Best-effort cleanup.
         }
+
+        lastAppliedFlyMode = null;
+        lastAppliedRunMode = null;
 
         if (!string.IsNullOrWhiteSpace(monitorTaskHandle))
         {
