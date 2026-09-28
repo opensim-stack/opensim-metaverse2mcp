@@ -537,6 +537,11 @@ internal sealed partial class BotSession
                 client.Self.Movement.FastAt = runModeDesired;
                 client.Self.Movement.FastLeft = runModeDesired;
                 client.Self.Movement.SendUpdate(true);
+                if (IsFollowDiagnosticsEnabled())
+                {
+                    Console.WriteLine(
+                        $"[follow][runmode] controls_applied target={label} runDesired={runModeDesired} fastAt={client.Self.Movement.FastAt} fastLeft={client.Self.Movement.FastLeft} alwaysRunNow={client.Self.Movement.AlwaysRun}");
+                }
                 lastAppliedRunMode = runModeDesired;
             }
         }
@@ -723,6 +728,7 @@ internal sealed partial class BotSession
                         var beyondRunThreshold = distance > runThreshold;
                         var veryBehind = distance > flyCatchupThreshold;
                         var largeVerticalGap = deltaZ > flyCatchupZThreshold;
+                        var velocityMagnitude = monitorStatus.Velocity?.Length() ?? -1f;
 
                         // Only mirror target flying when close. Farther out, prefer running first, then fly catch-up.
                         flyModeDesired = !targetIsCrossRegion
@@ -730,9 +736,13 @@ internal sealed partial class BotSession
                                 ? (veryBehind || largeVerticalGap)
                                 : targetFlyingNow);
                         runModeDesired = !targetIsCrossRegion && beyondRunThreshold && !flyModeDesired;
+                        if (IsFollowDiagnosticsEnabled() && lastLoggedRunDesired != runModeDesired)
+                        {
+                            Console.WriteLine(
+                                $"[follow][runmode] desired target={label} runDesired={runModeDesired} distance={distance:F2} runThreshold={runThreshold:F2} flyDesired={flyModeDesired} targetFlying={targetFlyingNow} targetSpeed={velocityMagnitude:0.00}");                          
+                        }
                         preserveFlightOnStop = flyModeDesired;
 
-                        var velocityMagnitude = monitorStatus.Velocity?.Length() ?? -1f;
                         var isStationaryNow = velocityMagnitude >= 0f && velocityMagnitude < 0.05f;
                         var holdForStationary = isStationaryNow && distance <= buffer;
                         if (isStationaryNow)
