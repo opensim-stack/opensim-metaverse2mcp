@@ -736,11 +736,6 @@ internal sealed partial class BotSession
                                 ? (veryBehind || largeVerticalGap)
                                 : targetFlyingNow);
                         runModeDesired = !targetIsCrossRegion && beyondRunThreshold && !flyModeDesired;
-                        if (IsFollowDiagnosticsEnabled() && lastLoggedRunDesired != runModeDesired)
-                        {
-                            Console.WriteLine(
-                                $"[follow][runmode] desired target={label} runDesired={runModeDesired} distance={distance:F2} runThreshold={runThreshold:F2} flyDesired={flyModeDesired} targetFlying={targetFlyingNow} targetSpeed={velocityMagnitude:0.00}");                          
-                        }
                         preserveFlightOnStop = flyModeDesired;
 
                         var isStationaryNow = velocityMagnitude >= 0f && velocityMagnitude < 0.05f;
