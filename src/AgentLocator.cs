@@ -197,7 +197,6 @@ internal sealed class AgentLocator
             status.HeadingDegrees,
             status.Source,
             status.LocalId,
-            status.AvatarRegionHandle,
             status.AvatarUpdateSeen,
             status.AvatarUpdateSim,
             status.CacheVsAvatarUpdate);
@@ -241,7 +240,6 @@ internal sealed class AgentLocator
                     HeadingDegrees: null,
                     Source: "avatarUpdate.offRegion",
                     LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId,
-                    AvatarRegionHandle: resolvedOffRegion.RegionHandle,
                     AvatarUpdateSeen: true,
                     AvatarUpdateSim: latestUpdate.SimulatorName,
                     CacheVsAvatarUpdate: "cache:stale|avatarUpdate:otherRegion");
@@ -262,7 +260,6 @@ internal sealed class AgentLocator
                     HeadingDegrees: null,
                     Source: "avatarUpdate.offRegion.sticky",
                     LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId,
-                    AvatarRegionHandle: resolvedOffRegion.RegionHandle,
                     AvatarUpdateSeen: true,
                     AvatarUpdateSim: latestUpdate.SimulatorName,
                     CacheVsAvatarUpdate: "cache:blocked|avatarUpdate:otherRegion");
@@ -287,15 +284,14 @@ internal sealed class AgentLocator
                 var knownPosition = foundAvatar?.Position;
                 return new AgentMonitorStatus(
                     Online: true,
-                    RegionName: string.IsNullOrWhiteSpace(currentSim.Name) ? null : currentSim.Name,
-                    RegionHandle: currentSim.Handle,
+                    RegionName: RegionNameFromHandle(client, foundAvatar?.RegionHandle ?? 0),
+                    RegionHandle: foundAvatar?.RegionHandle,
                     Position: knownPosition,
                     IsFlying: foundAvatar == null ? null : ReadFlyingSignal(foundAvatar),
                     Velocity: foundAvatar?.Velocity,
                     HeadingDegrees: null,
                     Source: "simCache.currentRegion",
                     LocalId: foundAvatar?.LocalID,
-                    AvatarRegionHandle: foundAvatar?.RegionHandle,
                     AvatarUpdateSeen: latestUpdate != null,
                     AvatarUpdateSim: latestUpdate?.SimulatorName,
                     CacheVsAvatarUpdate: DescribeCacheVsAvatarUpdate(currentSim, knownPosition, latestUpdate));
@@ -305,15 +301,14 @@ internal sealed class AgentLocator
             {
                 return new AgentMonitorStatus(
                     Online: true,
-                    RegionName: null,
-                    RegionHandle: null,
+                    RegionName: RegionNameFromHandle(client, offRegionAvatar?.RegionHandle ?? 0),
+                    RegionHandle: offRegionAvatar?.RegionHandle,
                     Position: null,
                     IsFlying: null,
                     Velocity: null,
                     HeadingDegrees: null,
                     Source: "simCache.offRegion",
                     LocalId: offRegionAvatar?.LocalID,
-                    AvatarRegionHandle: offRegionAvatar?.RegionHandle,
                     AvatarUpdateSeen: latestUpdate != null,
                     AvatarUpdateSim: latestUpdate?.SimulatorName,
                     CacheVsAvatarUpdate: "cache:offRegion");
@@ -331,7 +326,6 @@ internal sealed class AgentLocator
                     HeadingDegrees: null,
                     Source: "avatarUpdate.offRegion",
                     LocalId: null,
-                    AvatarRegionHandle: resolvedOffRegion.RegionHandle,
                     AvatarUpdateSeen: true,
                     AvatarUpdateSim: latestUpdate.SimulatorName,
                     CacheVsAvatarUpdate: "cache:lost|avatarUpdate:offRegion");
@@ -388,7 +382,6 @@ internal sealed class AgentLocator
         {
             Source = "simCache.lost",
             LocalId = null,
-            AvatarRegionHandle = null,
             AvatarUpdateSeen = hadAvatarUpdate,
             AvatarUpdateSim = hadAvatarUpdate ? lastUpdate?.SimulatorName : null,
             CacheVsAvatarUpdate = hadAvatarUpdate ? "cache:lost|avatarUpdate:stale" : "cache:lost"
@@ -418,15 +411,14 @@ internal sealed class AgentLocator
 
         status = new AgentMonitorStatus(
             Online: true,
-            RegionName: string.IsNullOrWhiteSpace(currentSim.Name) ? null : currentSim.Name,
-            RegionHandle: currentSim.Handle,
+            RegionName: latestUpdate.SimulatorHandle == 0 ? string.IsNullOrWhiteSpace(currentSim.Name) ? null : currentSim.Name : latestUpdate.SimulatorName,
+            RegionHandle: latestUpdate.SimulatorHandle == 0 ? currentSim.Handle : latestUpdate.SimulatorHandle,
             Position: latestUpdate.Position,
             IsFlying: latestUpdate.IsFlying,
             Velocity: latestUpdate.Velocity,
             HeadingDegrees: null,
             Source: "avatarUpdate.currentRegion",
             LocalId: latestUpdate.LocalId == 0 ? null : latestUpdate.LocalId,
-            AvatarRegionHandle: latestUpdate.SimulatorHandle == 0 ? null : latestUpdate.SimulatorHandle,
             AvatarUpdateSeen: true,
             AvatarUpdateSim: latestUpdate.SimulatorName,
             CacheVsAvatarUpdate: "cache:miss|avatarUpdate:currentRegion");
@@ -722,6 +714,27 @@ internal sealed class AgentLocator
         return (null, latestUpdate?.Position, latestUpdate?.SimulatorName);
     }
 
+
+    private static string? RegionNameFromHandle(GridClient client, ulong regionHandle)
+    {
+        
+        var byName = client.Network.Simulators.FirstOrDefault(candidate =>
+            !string.IsNullOrWhiteSpace(candidate.Name)
+            && candidate.Handle == regionHandle);
+            
+        if(byName == null)
+        {
+            return regionHandle > 0
+                ? regionHandle.ToString(CultureInfo.InvariantCulture)
+                : null;
+        }
+        else
+        {
+            return byName.Name;
+        }
+    }
+
+
     private static string? ResolveRegionName(string? preferredRegionName, Simulator? simulator, ulong regionHandle)
     {
         if (!string.IsNullOrWhiteSpace(preferredRegionName))
@@ -758,7 +771,6 @@ internal sealed class AgentLocator
             ["headingDegrees"] = status.HeadingDegrees?.ToString("0.###", CultureInfo.InvariantCulture),
             ["source"] = status.Source,
             ["localId"] = status.LocalId?.ToString(CultureInfo.InvariantCulture),
-            ["avatarRegionHandle"] = status.AvatarRegionHandle?.ToString(CultureInfo.InvariantCulture),
             ["avatarUpdateSeen"] = status.AvatarUpdateSeen.HasValue ? (status.AvatarUpdateSeen.Value ? "true" : "false") : null,
             ["avatarUpdateSim"] = status.AvatarUpdateSim,
             ["cacheVsAvatarUpdate"] = status.CacheVsAvatarUpdate
@@ -781,7 +793,6 @@ internal sealed class AgentLocator
             && NullableFloatEquals(previous.HeadingDegrees, current.HeadingDegrees)
             && string.Equals(previous.Source, current.Source, StringComparison.OrdinalIgnoreCase)
             && previous.LocalId == current.LocalId
-            && previous.AvatarRegionHandle == current.AvatarRegionHandle
             && previous.AvatarUpdateSeen == current.AvatarUpdateSeen
             && string.Equals(previous.AvatarUpdateSim, current.AvatarUpdateSim, StringComparison.OrdinalIgnoreCase)
             && string.Equals(previous.CacheVsAvatarUpdate, current.CacheVsAvatarUpdate, StringComparison.OrdinalIgnoreCase);
@@ -1101,12 +1112,11 @@ internal sealed class AgentLocator
         float? HeadingDegrees,
         string? Source,
         uint? LocalId,
-        ulong? AvatarRegionHandle,
         bool? AvatarUpdateSeen,
         string? AvatarUpdateSim,
         string? CacheVsAvatarUpdate)
     {
-        public static AgentMonitorStatus Unknown { get; } = new(null, null, null, null, null, null, null, null, null, null, null, null, null);
+        public static AgentMonitorStatus Unknown { get; } = new(null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private sealed class AvatarUpdateTracker : IDisposable
@@ -1245,7 +1255,6 @@ internal sealed record AgentMonitorSnapshot(
     float? HeadingDegrees,
     string? Source,
     uint? LocalId,
-    ulong? AvatarRegionHandle,
     bool? AvatarUpdateSeen,
     string? AvatarUpdateSim,
     string? CacheVsAvatarUpdate);

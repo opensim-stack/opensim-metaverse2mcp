@@ -401,22 +401,6 @@ internal sealed partial class BotSession
             return;
         }
 
-        if (IsFollowDiagnosticsEnabled())
-        {
-            UUID trackedAvatarId;
-            lock (_movementLock)
-            {
-                trackedAvatarId = _followTrackedAvatarId;
-            }
-
-            if (trackedAvatarId != UUID.Zero && objectId == trackedAvatarId)
-            {
-                var currentSim = _client?.Network.CurrentSim;
-                Console.WriteLine(
-                    $"[follow][diag] object_update_for_target targetUuid={trackedAvatarId} eventSim={DescribeSimulator(e.Simulator)} eventLocalId={prim.LocalID} eventPos={prim.Position.X:0.###},{prim.Position.Y:0.###},{prim.Position.Z:0.###} botCurrentSim={DescribeSimulator(currentSim)}");
-            }
-        }
-
         var throttleKey ="object.updated";
         var now = DateTimeOffset.UtcNow;
         if (_objectEventThrottle.TryGetValue(throttleKey, out var lastSeen)

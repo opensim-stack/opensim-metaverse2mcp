@@ -15,11 +15,6 @@ internal sealed partial class BotSession
     private CancellationTokenSource? _movementAutoStopCts;
     private string? _activeFollowTaskHandle;
     private string? _activeFollowMonitorTaskHandle;
-    private string? _followTargetDescription;
-    private UUID _followTrackedAvatarId = UUID.Zero;
-    private uint _followTrackedLocalId;
-    private ulong _followAnchorSimHandle;
-    private readonly SpawnerClient _followSpawnerClient;
 
     private enum FollowMode
     {
@@ -39,6 +34,7 @@ internal sealed partial class BotSession
     private static readonly TimeSpan FollowTeleportAssistTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan FollowTeleportVerificationTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan FollowSameRegionStuckWindow = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan FollowSeamPressureWindow = TimeSpan.FromSeconds(4);
     private static readonly float FollowSameRegionProgressEpsilonMeters = 0.9f;
     private static readonly float FollowSameRegionTeleportMinDistanceMeters = 10f;
     
@@ -360,7 +356,7 @@ internal sealed partial class BotSession
                         {
                             return BotToolResult.Fail("No current simulator available.");
                         }
-
+                        
                         uint localId;
                         string label;
                         var trackedId = UUID.Zero;
@@ -422,13 +418,7 @@ internal sealed partial class BotSession
 
                     var followResult = await FollowLoopAsync(
                         taskHandle.Handle,
-                        activeResolution.Client,
-                        activeResolution.Simulator,
-                        activeResolution.IsObject,
-                        activeResolution.TrackedId,
-                        activeResolution.LocalId,
-                        activeResolution.Label,
-                        activeResolution.MonitorHandle,
+                        activeResolution,
                         buffer,
                         taskCancellationToken).ConfigureAwait(false);
 
@@ -475,10 +465,6 @@ internal sealed partial class BotSession
         {
             _activeFollowTaskHandle = followTaskHandle;
             _activeFollowMonitorTaskHandle = monitorTaskHandle;
-            _followTargetDescription = $"{(isObject ? "object" : "avatar")} {label}";
-            _followTrackedAvatarId = isObject ? UUID.Zero : trackedId;
-            _followTrackedLocalId = localId;
-            _followAnchorSimHandle = sim.Handle;
         }
 
         if (IsFollowDiagnosticsEnabled())
@@ -490,21 +476,17 @@ internal sealed partial class BotSession
 
     private async Task<BotToolResult> FollowLoopAsync(
         string followTaskHandle,
-        GridClient client,
-        Simulator sim,
-        bool isObject,
-        UUID trackedId,
-        uint localId,
-        string label,
-        string? monitorTaskHandle,
+        FollowResolution followSetup,
         float buffer,
         CancellationToken cancellationToken)
     {
         // Stage 0: Initialize follow state and safety trackers.
         // These variables track movement cadence, cross-region transitions,
         // and anti-stall telemetry/recovery.
-        var targetSim = sim;
-        var targetLocalId = localId;
+        var targetSim = followSetup.Simulator;
+        var client = followSetup.Client;
+        var targetLocalId = followSetup.LocalId;
+        var label = followSetup.Label;
         var lastPilotAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
         var lastDiagAt = DateTime.UtcNow - TimeSpan.FromSeconds(10);
         var crossRegionStateSince = DateTime.MinValue;
@@ -514,7 +496,7 @@ internal sealed partial class BotSession
         var teleportRequestSent = false;
         ulong lastKnownCrossRegionHandle = 0;
         var lastKnownCrossRegionLocal = Vector3.Zero;
-        var followStartRegionHandle = sim.Handle;
+        var followStartRegionHandle = followSetup.Simulator.Handle;
         var followStartLocal = ClampLocalPosition(client.Self.SimPosition);
         var avatarLost = false;
         var targetStationary = false;
@@ -681,7 +663,7 @@ internal sealed partial class BotSession
                 ulong crossRegionTargetHandle = 0;
                 Vector3 crossRegionTargetLocal = Vector3.Zero;
                 float distance;
-                if (isObject)
+                if (followSetup.IsObject)
                 {
                     // Stage 3b: Object follow path (same-region only).
                     if (!ReferenceEquals(botSim, targetSim))
@@ -704,8 +686,8 @@ internal sealed partial class BotSession
                 else
                 {
                     // Stage 3c: Avatar follow path (driven by AgentLocator monitor).
-                    if (string.IsNullOrWhiteSpace(monitorTaskHandle)
-                        || !_agentLocator.TryGetLatestStatus(monitorTaskHandle, out var monitorStatus))
+                    if (string.IsNullOrWhiteSpace(followSetup.MonitorHandle)
+                        || !_agentLocator.TryGetLatestStatus(followSetup.MonitorHandle, out var monitorStatus))
                     {
                         EnsureFollowMovementStopped();
                         continue;
@@ -729,18 +711,6 @@ internal sealed partial class BotSession
                     if (monitorStatus.LocalId.HasValue)
                     {
                         targetLocalId = monitorStatus.LocalId.Value;
-                        lock (_movementLock)
-                        {
-                            _followTrackedLocalId = targetLocalId;
-                        }
-                    }
-
-                    if (monitorStatus.RegionHandle.HasValue)
-                    {
-                        lock (_movementLock)
-                        {
-                            _followAnchorSimHandle = monitorStatus.RegionHandle.Value;
-                        }
                     }
 
                     if (monitorStatus.RegionHandle.HasValue && monitorStatus.Position.HasValue)
@@ -841,7 +811,7 @@ internal sealed partial class BotSession
                         if (IsFollowDiagnosticsEnabled())
                         {
                             Console.WriteLine(
-                                $"[follow][diag] off-region target={label} source={monitorStatus.Source ?? "unknown"} online={(monitorStatus.Online.HasValue ? (monitorStatus.Online.Value ? "true" : "false") : "null")} avatarRegionHandle={(monitorStatus.AvatarRegionHandle?.ToString() ?? "null")} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
+                                $"[follow][diag] off-region target={label} source={monitorStatus.Source ?? "unknown"} online={(monitorStatus.Online.HasValue ? (monitorStatus.Online.Value ? "true" : "false") : "null")} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
                         }
 
                         if (!avatarLost)
@@ -855,9 +825,14 @@ internal sealed partial class BotSession
 
                         targetStationary = false;
 
-                        var offRegionHandle = monitorStatus.AvatarRegionHandle ?? lastKnownCrossRegionHandle;
+                        var offRegionHandle = monitorStatus.RegionHandle ?? lastKnownCrossRegionHandle;
                         if (offRegionHandle == 0)
                         {
+                            if(IsFollowDiagnosticsEnabled())
+                            {
+                                Console.WriteLine(
+                                    $"[follow][diag] off-region no-handle target={label} source={monitorStatus.Source ?? "unknown"} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
+                            }
                             EnsureFollowMovementStopped();
                             continue;
                         }
@@ -913,6 +888,13 @@ internal sealed partial class BotSession
                         lastCrossRegionProgressAt = DateTime.UtcNow;
                         crossRegionTeleportAttempts = 0;
                         teleportRequestSent = false;
+                        
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] cross_region_start target={label} followMode={followMovementMode} lastDistance={lastCrossRegionDistance:F2} currentDistance={distance:F2}");
+                        }
+                        
                         EmitFollowProgressEvent(
                             followTaskHandle,
                             "follow.cross_region.walk_border",
@@ -931,6 +913,14 @@ internal sealed partial class BotSession
                         followMovementMode = FollowMode.TeleportingToTarget;
                         crossRegionStateSince = DateTime.UtcNow;
                         client.Self.AutoPilotCancel();
+                        
+                        
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] cross_region_stalled target={label} lastDistance={lastCrossRegionDistance:F2} currentDistance={distance:F2} noProgressSeconds={(DateTime.UtcNow - lastCrossRegionProgressAt).TotalSeconds:F1} attempts={crossRegionTeleportAttempts}");
+                        }
+                        
                         EmitFollowProgressEvent(
                             followTaskHandle,
                             "follow.cross_region.teleport_attempt",
@@ -998,6 +988,13 @@ internal sealed partial class BotSession
                         {
                             followMovementMode = FollowMode.AwaitingTeleportAssist;
                             crossRegionStateSince = DateTime.UtcNow;
+                            
+                            if(IsFollowDiagnosticsEnabled())
+                            {
+                                Console.WriteLine(
+                                    $"[follow][diag] cross_region_awaiting_assist target={label} attempts={crossRegionTeleportAttempts} lastKnownHandle={lastKnownCrossRegionHandle} lastKnownLocal={FormatPosition(lastKnownCrossRegionLocal)}");
+                            }
+                            
                             EmitFollowProgressEvent(
                                 followTaskHandle,
                                 "follow.cross_region.awaiting_assist",
@@ -1008,12 +1005,19 @@ internal sealed partial class BotSession
                     if (!viewerCrossingInProgress
                         && followMovementMode == FollowMode.AwaitingTeleportAssist
                         && !teleportRequestSent
-                        && trackedId != UUID.Zero)
+                        && followSetup.TrackedId != UUID.Zero)
                     {
                         client.Self.SendTeleportLureRequest(
-                            trackedId,
+                           followSetup.TrackedId,
                             "Could you send me a teleport? I lost pathing while following you across regions.");
                         teleportRequestSent = true;
+                        
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] assist_requested target={label} targetUuid={followSetup.TrackedId} lastKnownHandle={lastKnownCrossRegionHandle} lastKnownLocal={FormatPosition(lastKnownCrossRegionLocal)}");
+                        }
+                        
                         EmitFollowProgressEvent(
                             followTaskHandle,
                             "follow.cross_region.assist_requested",
@@ -1200,9 +1204,9 @@ internal sealed partial class BotSession
         lastAppliedLocomotionMode = null;
         followMovementMode = FollowMode.None;
 
-        if (!string.IsNullOrWhiteSpace(monitorTaskHandle))
+        if (!string.IsNullOrWhiteSpace(followSetup.MonitorHandle))
         {
-            _botTaskManager.TryCancel(monitorTaskHandle, out _);
+            _botTaskManager.TryCancel(followSetup.MonitorHandle, out _);
         }
 
         ClearFollowTrackingState(followTaskHandle);
@@ -1423,10 +1427,6 @@ internal sealed partial class BotSession
 
             _activeFollowTaskHandle = null;
             _activeFollowMonitorTaskHandle = null;
-            _followTargetDescription = null;
-            _followTrackedAvatarId = UUID.Zero;
-            _followTrackedLocalId = 0;
-            _followAnchorSimHandle = 0;
         }
     }
 
@@ -1440,10 +1440,6 @@ internal sealed partial class BotSession
             monitorHandle = _activeFollowMonitorTaskHandle;
             _activeFollowTaskHandle = null;
             _activeFollowMonitorTaskHandle = null;
-            _followTargetDescription = null;
-            _followTrackedAvatarId = UUID.Zero;
-            _followTrackedLocalId = 0;
-            _followAnchorSimHandle = 0;
         }
 
         if (!string.IsNullOrWhiteSpace(monitorHandle))
@@ -1942,7 +1938,7 @@ internal sealed partial class BotSession
         return hasDoorHint || scripted;
     }
 
-    private static float DistancePointToSegment2D(Vector3 point, Vector3 segmentStart, Vector3 segmentEnd)
+   private static float DistancePointToSegment2D(Vector3 point, Vector3 segmentStart, Vector3 segmentEnd)
     {
         var ax = segmentStart.X;
         var ay = segmentStart.Y;

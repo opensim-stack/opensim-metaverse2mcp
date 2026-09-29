@@ -242,6 +242,7 @@ internal sealed partial class BotSession : IDisposable
     private bool _connected;
     private string _lastLoginMessage = string.Empty;
     private int _reconnectLoopActive;
+    private readonly SpawnerClient _followSpawnerClient;
 
     public BotSession(AppOptions options)
     {
@@ -2356,40 +2357,6 @@ internal sealed partial class BotSession : IDisposable
 
                 var sim = client.Network.CurrentSim;
                 if (sim == null) return;
-
-                if (IsFollowDiagnosticsEnabled())
-                {
-                    UUID trackedAvatarId;
-                    uint trackedLocalId;
-                    ulong anchorHandle;
-                    string targetDescription;
-                    lock (_movementLock)
-                    {
-                        trackedAvatarId = _followTrackedAvatarId;
-                        trackedLocalId = _followTrackedLocalId;
-                        anchorHandle = _followAnchorSimHandle;
-                        targetDescription = _followTargetDescription ?? "(none)";
-                    }
-
-                    if (trackedAvatarId != UUID.Zero)
-                    {
-                        if (TryFindAvatarByIdAcrossSims(client, trackedAvatarId, out var seenSim, out var seenAvatar))
-                        {
-                            Console.WriteLine(
-                                $"[follow][diag] sim_changed activeFollow={targetDescription} anchorHandle={anchorHandle} trackedUuid={trackedAvatarId} trackedLocalId={trackedLocalId} botSim={DescribeSimulator(sim)} seenSim={DescribeSimulator(seenSim)} seenLocalId={seenAvatar!.LocalID} seenPos={FormatPosition(seenAvatar.Position)} botPos={FormatPosition(client.Self.SimPosition)}");
-                        }
-                        else
-                        {
-                            Console.WriteLine(
-                                $"[follow][diag] sim_changed activeFollow={targetDescription} anchorHandle={anchorHandle} trackedUuid={trackedAvatarId} trackedLocalId={trackedLocalId} botSim={DescribeSimulator(sim)} seenSim=(not visible) knownSims={client.Network.Simulators.Count}");
-                        }
-                    }
-                    else if (!string.IsNullOrWhiteSpace(targetDescription))
-                    {
-                        Console.WriteLine(
-                            $"[follow][diag] sim_changed activeFollow={targetDescription} anchorHandle={anchorHandle} botSim={DescribeSimulator(sim)} (object/non-uuid target)");
-                    }
-                }
 
                 Console.WriteLine($"[dialog-bridge] current sim: name={sim.Name} handle={sim.Handle} primitives={sim.ObjectsPrimitives?.Count ?? 0}");
 
