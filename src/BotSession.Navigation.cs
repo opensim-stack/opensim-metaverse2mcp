@@ -548,6 +548,12 @@ internal sealed partial class BotSession
                 or FollowMode.RunningToBorder
                 or FollowMode.FlyingToBorder;
 
+        static bool IsViewerCrossingInProgress(AgentManager.CrossingState state)
+            => state is AgentManager.CrossingState.PreparingCross
+                or AgentManager.CrossingState.Connecting
+                or AgentManager.CrossingState.WaitingForComplete
+                or AgentManager.CrossingState.Recovering;
+
         static FollowMode ResolveBorderFollowMode(FollowMode currentMode, FollowMode fallbackMode)
             => ResolveLocomotionControlMode(currentMode) switch
             {
@@ -887,6 +893,8 @@ internal sealed partial class BotSession
                     lastDiagAt = DateTime.UtcNow;
                 }
 
+                var viewerCrossingInProgress = IsViewerCrossingInProgress(client.Self.GetCrossingState());
+
                 if (targetIsCrossRegion)
                 {
                     // Stage 3e: Cross-region state machine.
@@ -916,7 +924,8 @@ internal sealed partial class BotSession
                         lastCrossRegionProgressAt = DateTime.UtcNow;
                     }
 
-                    if (IsBorderWalkPhase(followMovementMode)
+                    if (!viewerCrossingInProgress
+                        && IsBorderWalkPhase(followMovementMode)
                         && (DateTime.UtcNow - lastCrossRegionProgressAt) >= TimeSpan.FromSeconds(8))
                     {
                         followMovementMode = FollowMode.TeleportingToTarget;
@@ -928,7 +937,8 @@ internal sealed partial class BotSession
                             $"Border pathing stalled while following {label}; attempting teleport.");
                     }
 
-                    if (followMovementMode == FollowMode.TeleportingToTarget
+                    if (!viewerCrossingInProgress
+                        && followMovementMode == FollowMode.TeleportingToTarget
                         && crossRegionTeleportAttempts < 2
                         && lastKnownCrossRegionHandle != 0)
                     {
@@ -995,7 +1005,8 @@ internal sealed partial class BotSession
                         }
                     }
 
-                    if (followMovementMode == FollowMode.AwaitingTeleportAssist
+                    if (!viewerCrossingInProgress
+                        && followMovementMode == FollowMode.AwaitingTeleportAssist
                         && !teleportRequestSent
                         && trackedId != UUID.Zero)
                     {
@@ -1009,7 +1020,8 @@ internal sealed partial class BotSession
                             $"Requested teleport assist from {label}.");
                     }
 
-                    if (followMovementMode == FollowMode.AwaitingTeleportAssist
+                    if (!viewerCrossingInProgress
+                        && followMovementMode == FollowMode.AwaitingTeleportAssist
                         && crossRegionStateSince != DateTime.MinValue
                         && (DateTime.UtcNow - crossRegionStateSince) >= FollowTeleportAssistTimeout)
                     {
@@ -1039,16 +1051,19 @@ internal sealed partial class BotSession
                     // Stage 3f: Same-region reset path.
                     // Clear cross-region state and track local movement progress
                     // for anti-stall recovery.
-                    if (IsCrossRegionPhase(followMovementMode))
+                    if (!viewerCrossingInProgress)
                     {
-                        followMovementMode = FollowMode.None;
+                        if (IsCrossRegionPhase(followMovementMode))
+                        {
+                            followMovementMode = FollowMode.None;
+                        }
+                        crossRegionStateSince = DateTime.MinValue;
+                        lastCrossRegionDistance = float.MaxValue;
+                        lastCrossRegionProgressAt = DateTime.UtcNow;
+                        crossRegionTeleportAttempts = 0;
+                        teleportRequestSent = false;
+                        lastKnownCrossRegionHandle = 0;
                     }
-                    crossRegionStateSince = DateTime.MinValue;
-                    lastCrossRegionDistance = float.MaxValue;
-                    lastCrossRegionProgressAt = DateTime.UtcNow;
-                    crossRegionTeleportAttempts = 0;
-                    teleportRequestSent = false;
-                    lastKnownCrossRegionHandle = 0;
 
                     if (distance < sameRegionBestDistance - FollowSameRegionProgressEpsilonMeters)
                     {
@@ -1077,7 +1092,8 @@ internal sealed partial class BotSession
                     // Stage 3g: Same-region anti-stall recovery.
                     // If we are in-region, far from target, and making no real
                     // progress for a while, perform controlled teleport recovery.
-                    if (!targetIsCrossRegion
+                    if (!viewerCrossingInProgress
+                        && !targetIsCrossRegion
                         && distance >= FollowSameRegionTeleportMinDistanceMeters
                         && (DateTime.UtcNow - sameRegionLastProgressAt) >= FollowSameRegionStuckWindow
                         && (DateTime.UtcNow - sameRegionLastRecoveryAt) >= TimeSpan.FromSeconds(8)
