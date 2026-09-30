@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -83,7 +84,7 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AppearanceWearFolderResult> AppearanceWearFolderAsync(string folderId, bool replaceItems, CancellationToken cancellationToken)
+    public async Task<AppearanceWearFolderResult> AppearanceWearFolderAsync(string folderId, bool replaceItems, bool removeExistingItems, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(folderId, out var folderUuid))
         {
@@ -169,6 +170,20 @@ internal sealed partial class BotSession
             }
 
             var resolvedItems = wearTargets.OfType<InventoryItem>().ToList();
+            if (resolvedItems.Count == 0)
+            {
+                return AppearanceWearFolderResult.FailResult(
+                    replaceItems,
+                    $"No wearable or attachment items were found in folder {folderUuid}. sourceEntries={entries.Count}. Nothing to wear.");
+            }
+
+            string removeSummary = string.Empty;
+            if (removeExistingItems)
+            {
+                var clear = await RemoveCurrentlyWornItemsAsync(client, token).ConfigureAwait(false);
+                removeSummary = $", removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}";
+            }
+
             var categoryResolutions = await BuildOutfitCategoryResolutionsAsync(client, resolvedItems, replaceItems, token).ConfigureAwait(false);
             await client.Appearance.WearOutfitAsync(wearTargets, replaceItems).ConfigureAwait(false);
 
@@ -185,8 +200,62 @@ internal sealed partial class BotSession
                 entries.Count,
                 resolvedItems.Count,
                 categoryResolutions,
-                $"Requested {mode} outfit from folder {folderUuid}: sourceEntries={entries.Count}, wearableCandidates={resolvedItems.Count}, overlappingCategories={overlapCount}.");
+                $"Requested {mode} outfit from folder {folderUuid}: sourceEntries={entries.Count}, wearableCandidates={resolvedItems.Count}, overlappingCategories={overlapCount}, removeExistingItems={removeExistingItems}{removeSummary}.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<(int RemovedWearableCount, int DetachedAttachmentCount)> RemoveCurrentlyWornItemsAsync(
+        GridClient client,
+        CancellationToken cancellationToken)
+    {
+        var removedWearables = 0;
+        using (var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client))
+        {
+            var allWearables = new List<InventoryItem>();
+            foreach (var wearableType in Enum.GetValues<WearableType>())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                List<InventoryItem> wornOfType;
+                try
+                {
+                    wornOfType = await cof.GetWornAtAsync(wearableType, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (wornOfType.Count == 0)
+                {
+                    continue;
+                }
+
+                allWearables.AddRange(wornOfType);
+            }
+
+            if (allWearables.Count > 0)
+            {
+                var uniqueWearables = allWearables
+                    .GroupBy(w => w.UUID)
+                    .Select(group => group.First())
+                    .ToList();
+
+                await cof.RemoveFromOutfitAsync(uniqueWearables, cancellationToken).ConfigureAwait(false);
+                removedWearables = uniqueWearables.Count;
+            }
+        }
+
+        var detachedAttachments = 0;
+        var attachmentsByItem = await CollectAttachmentPointMappingsAsync(client, cancellationToken).ConfigureAwait(false);
+        foreach (var attachmentItemId in attachmentsByItem.Keys)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            client.Appearance.Detach(attachmentItemId);
+            detachedAttachments++;
+        }
+
+        return (removedWearables, detachedAttachments);
     }
 
     private static bool IsNotecardInventoryItem(InventoryItem item)
@@ -454,6 +523,7 @@ internal sealed partial class BotSession
             var parentId = root.UUID;
             if (!string.IsNullOrWhiteSpace(parentFolderId))
             {
+                Console.WriteLine($"[appearance] saving current outfit to folder '{folderName}' under parent folder '{parentFolderId}'.");
                 if (!UUID.TryParse(parentFolderId, out var parsedParentId))
                 {
                     return OutfitSaveResult.FailResult("parentFolderId is not a valid UUID.");
@@ -465,13 +535,16 @@ internal sealed partial class BotSession
                 }
 
                 parentId = parsedParentId;
+                Console.WriteLine($"[appearance] using parent folder {parentId} as parent for new outfit folder.");
             }
             else
             {
+                Console.WriteLine($"[appearance] saving current outfit to folder '{folderName}' under default Clothing folder.");
                 var clothingFolder = client.Inventory.FindFolderForType(FolderType.Clothing);
                 if (clothingFolder != UUID.Zero)
                 {
                     parentId = clothingFolder;
+                    Console.WriteLine($"[appearance] using Clothing folder {parentId} as parent for new outfit folder.");
                 }
             }
 
@@ -515,11 +588,23 @@ internal sealed partial class BotSession
                 }
             }
 
+            if (linkedCount == 0)
+            {
+                var reason = linkTargets.Count == 0
+                    ? "No currently worn outfit links were available to save."
+                    : $"All link creation requests failed ({failedCount}/{linkTargets.Count}).";
+
+                return OutfitSaveResult.FailResult(
+                    $"Failed to save current outfit links to folder '{folderName.Trim()}' ({destinationFolderId}). {reason}");
+            }
+
             return OutfitSaveResult.OkResult(
                 destinationFolderId.ToString(),
                 linkedCount,
                 failedCount,
-                $"Saved current outfit links to folder '{folderName.Trim()}' ({destinationFolderId}). Linked={linkedCount}, failed={failedCount}.");
+                failedCount == 0
+                    ? $"Saved current outfit links to folder '{folderName.Trim()}' ({destinationFolderId}). Linked={linkedCount}, failed={failedCount}."
+                    : $"Saved current outfit links to folder '{folderName.Trim()}' ({destinationFolderId}) with partial failures. Linked={linkedCount}, failed={failedCount}." );
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1685,7 +1770,7 @@ internal sealed partial class BotSession
                 $"Provisioning folder '{importedFolder.Name}' has no wearable or attachment items to apply.");
         }
 
-        var wearFolder = await AppearanceWearFolderAsync(importedFolder.UUID.ToString(), replaceItems: true, cancellationToken).ConfigureAwait(false);
+        var wearFolder = await AppearanceWearFolderAsync(importedFolder.UUID.ToString(), replaceItems: true, removeExistingItems: true, cancellationToken).ConfigureAwait(false);
         if (!wearFolder.Ok)
         {
             return DialogBridgeInstallResult.FailResult(
@@ -1803,166 +1888,243 @@ internal sealed partial class BotSession
             installMessage);
     }
 
-    public async Task<InventoryQueryResult> InventoryListAsync(
+    public Task<BotTaskHandle> InventoryListAsync(
         string? folderIdOrPath,
         bool recursive,
+        CancellationToken cancellationToken)
+    {
+        var resultHandle = BuildInventoryListResultHandle(folderIdOrPath, recursive);
+        var description = recursive
+            ? $"Inventory list folder '{folderIdOrPath ?? "<root>"}' recursively."
+            : $"Inventory list folder '{folderIdOrPath ?? "<root>"}'.";
+            
+        Console.WriteLine($"[inventory-list] start handle='{resultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
+
+        return Task.FromResult(StartBotTask(
+            description,
+            async (taskHandle, taskCancellationToken) =>
+            {
+                try
+                {
+                    RegisterInventoryListTaskHandle(taskHandle.Handle, resultHandle);
+                    Console.WriteLine($"[inventory-list] task started handle='{taskHandle.Handle}' resultHandle='{resultHandle}'");
+                    EmitInventoryListProgressEvent(taskHandle.Handle, "Starting inventory list retrieval.", 5);
+
+                    if (TryGetInventoryListResult(resultHandle, out _, out _))
+                    {
+                        EmitInventoryListCompleteEvent(taskHandle.Handle, resultHandle, true, $"Inventory list already cached as '{resultHandle}'.");
+                        return;
+                    }
+
+                    Console.WriteLine($"[inventory-list] retrieving inventory list for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}");
+                    var result = await FetchInventoryListAsync(folderIdOrPath, recursive, taskCancellationToken).ConfigureAwait(false);
+                    if (!result.Ok)
+                    {
+                        Console.WriteLine($"[inventory-list] retrieval failed for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}: {result.Message}");
+                        EmitInventoryListCompleteEvent(taskHandle.Handle, resultHandle, false, result.Message);
+                        return;
+                    }
+
+                    Console.WriteLine($"[inventory-list] retrieval complete for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}; materialized {result.Entries.Count} entries");
+                    StoreInventoryListResult(taskHandle.Handle, resultHandle, result);
+                    Console.WriteLine($"[inventory-list] result cached for handle='{resultHandle}'");
+                    EmitInventoryListCompleteEvent(
+                        taskHandle.Handle,
+                        resultHandle,
+                        true,
+                        $"Inventory list retrieval complete; materialized {result.Entries.Count} entries for result handle '{resultHandle}'.");
+                }
+                catch (OperationCanceledException) when (taskCancellationToken.IsCancellationRequested)
+                {
+                    Console.WriteLine($"[inventory-list] retrieval cancelled for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}");
+                    EmitInventoryListCompleteEvent(taskHandle.Handle, resultHandle, false, "Inventory list task was cancelled.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[inventory-list] retrieval failed for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}: {ex.GetType().Name}: {ex.Message}");
+                    EmitInventoryListCompleteEvent(taskHandle.Handle, resultHandle, false, $"Inventory list task failed: {ex.Message}");
+                }
+            }));
+    }
+
+    public Task<InventoryQueryResult> InventoryListRetrieveAsync(
+        string resultHandle,
         int maxResults,
+        int pageSize,
         string? nameContains,
         string? type,
         string? createdAfterUtc,
         string? createdBeforeUtc,
         string? creatorId,
         string? cursor,
-        int pageSize,
         CancellationToken cancellationToken)
     {
+        var normalizedResultHandle = (resultHandle ?? string.Empty).Trim();
         var overallStopwatch = Stopwatch.StartNew();
-        Console.WriteLine($"[inventory-list] start folderIdOrPath='{folderIdOrPath ?? ""}' recursive={recursive} maxResults={maxResults} pageSize={pageSize} cursor='{cursor ?? ""}' nameContains='{nameContains ?? ""}' type='{type ?? ""}' creatorId='{creatorId ?? ""}' createdAfterUtc='{createdAfterUtc ?? ""}' createdBeforeUtc='{createdBeforeUtc ?? ""}' canceled={cancellationToken.IsCancellationRequested}");
+        Console.WriteLine($"[inventory-list-retrieve] start handle='{normalizedResultHandle}' maxResults={maxResults} pageSize={pageSize} cursor='{cursor ?? ""}' nameContains='{nameContains ?? ""}' type='{type ?? ""}' creatorId='{creatorId ?? ""}' createdAfterUtc='{createdAfterUtc ?? ""}' createdBeforeUtc='{createdBeforeUtc ?? ""}' canceled={cancellationToken.IsCancellationRequested}");
 
         try
         {
-        if (!TryParseOptionalUtc(createdAfterUtc, "createdAfterUtc", out var createdAfter, out var createdAfterError))
-        {
-            Console.WriteLine($"[inventory-list] invalid createdAfterUtc='{createdAfterUtc ?? ""}': {createdAfterError ?? "createdAfterUtc is invalid."}");
-            return InventoryQueryResult.FailResult(createdAfterError ?? "createdAfterUtc is invalid.");
-        }
-
-        if (!TryParseOptionalUtc(createdBeforeUtc, "createdBeforeUtc", out var createdBefore, out var createdBeforeError))
-        {
-            Console.WriteLine($"[inventory-list] invalid createdBeforeUtc='{createdBeforeUtc ?? ""}': {createdBeforeError ?? "createdBeforeUtc is invalid."}");
-            return InventoryQueryResult.FailResult(createdBeforeError ?? "createdBeforeUtc is invalid.");
-        }
-
-        if (createdAfter.HasValue && createdBefore.HasValue && createdAfter.Value > createdBefore.Value)
-        {
-            Console.WriteLine($"[inventory-list] invalid utc range createdAfterUtc={createdAfter.Value:O} createdBeforeUtc={createdBefore.Value:O}");
-            return InventoryQueryResult.FailResult("createdAfterUtc must be earlier than or equal to createdBeforeUtc.");
-        }
-
-        UUID? creatorUuid = null;
-        if (!string.IsNullOrWhiteSpace(creatorId))
-        {
-            if (!UUID.TryParse(creatorId, out var parsedCreatorUuid))
+            if (!TryParseOptionalUtc(createdAfterUtc, "createdAfterUtc", out var createdAfter, out var createdAfterError))
             {
-                Console.WriteLine($"[inventory-list] invalid creatorId='{creatorId}'");
-                return InventoryQueryResult.FailResult("creatorId is not a valid UUID.");
+                Console.WriteLine($"[inventory-list-retrieve] invalid createdAfterUtc='{createdAfterUtc ?? ""}': {createdAfterError ?? "createdAfterUtc is invalid."}");
+                return Task.FromResult(InventoryQueryResult.FailResult(createdAfterError ?? "createdAfterUtc is invalid."));
             }
 
-            creatorUuid = parsedCreatorUuid;
-        }
-
-        if (!TryDecodeInventoryCursor(cursor, out var cursorOffset, out var cursorError))
-        {
-            Console.WriteLine($"[inventory-list] invalid cursor='{cursor ?? ""}': {cursorError ?? "cursor is invalid."}");
-            return InventoryQueryResult.FailResult(cursorError ?? "cursor is invalid.");
-        }
-
-        var normalizedNameContains = string.IsNullOrWhiteSpace(nameContains) ? null : nameContains.Trim();
-        var normalizedType = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
-        var effectivePageSize = Math.Clamp(pageSize <= 0 ? 200 : pageSize, 1, 500);
-        Console.WriteLine($"[inventory-list] normalized cursorOffset={cursorOffset} pageSize={effectivePageSize} nameContains='{normalizedNameContains ?? ""}' type='{normalizedType ?? ""}' creatorUuid='{creatorUuid?.ToString() ?? ""}'");
-
-        return await ExecuteLockedAsync(async (client, token) =>
-        {
-            var lockStopwatch = Stopwatch.StartNew();
-            Console.WriteLine("[inventory-list] execute-locked begin");
-
-            var store = client.Inventory.Store;
-            var root = store?.RootFolder;
-            if (store == null || root == null)
+            if (!TryParseOptionalUtc(createdBeforeUtc, "createdBeforeUtc", out var createdBefore, out var createdBeforeError))
             {
-                Console.WriteLine("[inventory-list] inventory store/root not initialized");
-                return InventoryQueryResult.FailResult("Inventory store is not initialized.");
+                Console.WriteLine($"[inventory-list-retrieve] invalid createdBeforeUtc='{createdBeforeUtc ?? ""}': {createdBeforeError ?? "createdBeforeUtc is invalid."}");
+                return Task.FromResult(InventoryQueryResult.FailResult(createdBeforeError ?? "createdBeforeUtc is invalid."));
             }
 
-            if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: true, parameterName: "folderIdOrPath", out var folderUuid, out var folderResolveError))
+            if (createdAfter.HasValue && createdBefore.HasValue && createdAfter.Value > createdBefore.Value)
             {
-                Console.WriteLine($"[inventory-list] folder resolve failed folderIdOrPath='{folderIdOrPath ?? ""}': {folderResolveError}");
-                return InventoryQueryResult.FailResult(folderResolveError);
+                Console.WriteLine($"[inventory-list-retrieve] invalid utc range createdAfterUtc={createdAfter.Value:O} createdBeforeUtc={createdBefore.Value:O}");
+                return Task.FromResult(InventoryQueryResult.FailResult("createdAfterUtc must be earlier than or equal to createdBeforeUtc."));
             }
 
-            var limit = Math.Clamp(maxResults, 1, 10000);
-            var owner = client.Self.AgentID;
-            var entries = new List<InventoryBase>();
-            Console.WriteLine($"[inventory-list] querying folder={folderUuid} owner={owner} recursive={recursive} limit={limit}");
-
-            if (!TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
+            UUID? creatorUuid = null;
+            if (!string.IsNullOrWhiteSpace(creatorId))
             {
-                Console.WriteLine($"[inventory-list] folder not found in local store folder={folderUuid}");
-                return InventoryQueryResult.FailResult($"Folder {folderUuid} was not found in local inventory store.");
-            }
-
-            entries.Add(folder);
-
-            if (recursive)
-            {
-                var folders = new List<InventoryFolder>();
-                var items = new List<InventoryItem>();
-                await client.Inventory.GetInventoryRecursiveAsync(folderUuid, owner, folders, items, token).ConfigureAwait(false);
-                entries.AddRange(folders);
-                entries.AddRange(items);
-                Console.WriteLine($"[inventory-list] recursive fetch completed folders={folders.Count} items={items.Count} totalEntries={entries.Count}");
-            }
-            else
-            {
-                var contents = await client.Inventory
-                    .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, token)
-                    .ConfigureAwait(false);
-                entries.AddRange(contents);
-                Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
-            }
-
-            var materialized = new List<InventoryEntry>(entries.Count);
-            foreach (var entry in entries)
-            {
-                if (entry is InventoryItem item)
+                if (!UUID.TryParse(creatorId, out var parsedCreatorUuid))
                 {
-                    materialized.Add(ToInventoryEntry(item));
+                    Console.WriteLine($"[inventory-list-retrieve] invalid creatorId='{creatorId}'");
+                    return Task.FromResult(InventoryQueryResult.FailResult("creatorId is not a valid UUID."));
+                }
+
+                creatorUuid = parsedCreatorUuid;
+            }
+
+            if (!TryDecodeInventoryCursor(cursor, out var cursorOffset, out var cursorError))
+            {
+                Console.WriteLine($"[inventory-list-retrieve] invalid cursor='{cursor ?? ""}': {cursorError ?? "cursor is invalid."}");
+                return Task.FromResult(InventoryQueryResult.FailResult(cursorError ?? "cursor is invalid."));
+            }
+
+            var normalizedNameContains = string.IsNullOrWhiteSpace(nameContains) ? null : nameContains.Trim();
+            var normalizedType = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
+            var effectivePageSize = Math.Clamp(pageSize <= 0 ? 200 : pageSize, 1, 500);
+
+            if (!TryGetInventoryListResult(normalizedResultHandle, out var storedResult, out var storeError))
+            {
+                Console.WriteLine($"[inventory-list-retrieve] lookup failed handle='{normalizedResultHandle}': {storeError}");
+                return Task.FromResult(InventoryQueryResult.FailResult(storeError));
+            }
+
+            var filtered = FilterInventoryEntries(
+                storedResult.Entries,
+                normalizedNameContains,
+                normalizedType,
+                createdAfter,
+                createdBefore,
+                creatorUuid,
+                cursorOffset,
+                maxResults,
+                effectivePageSize,
+                out var filterError);
+
+            if (filterError != null)
+            {
+                Console.WriteLine($"[inventory-list-retrieve] filter failed handle='{normalizedResultHandle}': {filterError}");
+                return Task.FromResult(InventoryQueryResult.FailResult(filterError));
+            }
+
+            Console.WriteLine($"[inventory-list-retrieve] complete handle='{normalizedResultHandle}' matched={filtered.TotalMatched} page={filtered.Entries.Count} elapsedMs={overallStopwatch.ElapsedMilliseconds}");
+            return Task.FromResult(filtered);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[inventory-list-retrieve] failed elapsedMs={overallStopwatch.ElapsedMilliseconds} error={ex.GetType().Name}: {ex.Message}");
+            return Task.FromResult(InventoryQueryResult.FailResult(ex.Message));
+        }
+    }
+
+    public Task<BotToolResult> InventoryListClearAsync(string taskHandle)
+    {
+        if (string.IsNullOrWhiteSpace(taskHandle))
+        {
+            return Task.FromResult(BotToolResult.Fail("taskHandle is required."));
+        }
+
+        var handle = taskHandle.Trim();
+        return Task.FromResult(RemoveInventoryListResult(handle)
+            ? BotToolResult.OkResult($"Cleared materialized inventory list results for handle '{handle}'.")
+            : BotToolResult.Fail($"No materialized inventory list results were found for handle '{handle}'."));
+    }
+
+    private async Task<InventoryQueryResult> FetchInventoryListAsync(
+        string? folderIdOrPath,
+        bool recursive,
+        CancellationToken cancellationToken)
+    {
+        var overallStopwatch = Stopwatch.StartNew();
+        Console.WriteLine($"[inventory-list] start folderIdOrPath='{folderIdOrPath ?? ""}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
+
+        try
+        {
+            return await ExecuteLockedAsync(async (client, token) =>
+            {
+                var lockStopwatch = Stopwatch.StartNew();
+                Console.WriteLine("[inventory-list] execute-locked begin");
+
+                var store = client.Inventory.Store;
+                var root = store?.RootFolder;
+                if (store == null || root == null)
+                {
+                    Console.WriteLine("[inventory-list] inventory store/root not initialized");
+                    return InventoryQueryResult.FailResult("Inventory store is not initialized.");
+                }
+
+                if (!TryResolveInventoryFolderUuid(client, store, folderIdOrPath, allowEmptyForRoot: true, parameterName: "folderIdOrPath", out var folderUuid, out var folderResolveError))
+                {
+                    Console.WriteLine($"[inventory-list] folder resolve failed folderIdOrPath='{folderIdOrPath ?? ""}': {folderResolveError}");
+                    return InventoryQueryResult.FailResult(folderResolveError);
+                }
+
+                var owner = client.Self.AgentID;
+                var entries = new List<InventoryBase>();
+                Console.WriteLine($"[inventory-list] querying folder={folderUuid} owner={owner} recursive={recursive}");
+
+                if (!TryGetInventoryFolderFromStore(store, folderUuid, out var folder))
+                {
+                    Console.WriteLine($"[inventory-list] folder not found in local store folder={folderUuid}");
+                    return InventoryQueryResult.FailResult($"Folder {folderUuid} was not found in local inventory store.");
+                }
+
+                Console.WriteLine($"[inventory-list] folder found in local store folder={folderUuid} name='{folder.Name}'");
+                entries.Add(folder);
+
+                if (recursive)
+                {
+                    Console.WriteLine($"[inventory-list] performing recursive inventory fetch for folder={folderUuid}");
+                    var folders = new List<InventoryFolder>();
+                    var items = new List<InventoryItem>();
+                    await client.Inventory.GetInventoryRecursiveAsync(folderUuid, owner, folders, items, token).ConfigureAwait(false);
+                    entries.AddRange(folders);
+                    entries.AddRange(items);
+                    Console.WriteLine($"[inventory-list] recursive fetch completed folders={folders.Count} items={items.Count} totalEntries={entries.Count}");
                 }
                 else
                 {
-                    materialized.Add(ToInventoryEntry(entry));
+                    Console.WriteLine($"[inventory-list] performing non-recursive inventory fetch for folder={folderUuid}");
+                    var contents = await client.Inventory
+                        .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, token)
+                        .ConfigureAwait(false);
+                    entries.AddRange(contents);
+                    Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
                 }
-            }
 
-            var filtered = materialized
-                .OrderBy(e => e.Kind, StringComparer.Ordinal)
-                .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(e => e.Id, StringComparer.Ordinal)
-                .Where(e => MatchesInventoryFilter(
-                    e,
-                    normalizedNameContains,
-                    normalizedType,
-                    createdAfter,
-                    createdBefore,
-                    creatorUuid))
-                .Take(limit)
-                .ToList();
-            Console.WriteLine($"[inventory-list] materialized={materialized.Count} filtered={filtered.Count} limit={limit}");
+                var materialized = new List<InventoryEntry>(entries.Count);
+                foreach (var entry in entries)
+                {
+                    materialized.Add(entry is InventoryItem item ? ToInventoryEntry(item) : ToInventoryEntry(entry));
+                }
 
-            if (cursorOffset > filtered.Count)
-            {
-                Console.WriteLine($"[inventory-list] cursor offset out of range cursorOffset={cursorOffset} filteredCount={filtered.Count}");
-                return InventoryQueryResult.FailResult($"cursor offset {cursorOffset} is beyond available results ({filtered.Count}).");
-            }
-
-            var page = filtered
-                .Skip(cursorOffset)
-                .Take(effectivePageSize)
-                .ToList();
-
-            var nextOffset = cursorOffset + page.Count;
-            var hasMore = nextOffset < filtered.Count;
-            var nextCursor = hasMore ? EncodeInventoryCursor(nextOffset) : null;
-            Console.WriteLine($"[inventory-list] page={page.Count} nextOffset={nextOffset} hasMore={hasMore} nextCursor='{nextCursor ?? ""}' elapsedMs={lockStopwatch.ElapsedMilliseconds}");
-
-            return InventoryQueryResult.OkResult(
-                page,
-                $"Returned {page.Count} inventory entries (offset={cursorOffset}, matched={filtered.Count}, pageSize={effectivePageSize}, hasMore={hasMore.ToString().ToLowerInvariant()}).",
-                nextCursor,
-                hasMore,
-                filtered.Count);
-        }, cancellationToken).ConfigureAwait(false);
+                Console.WriteLine($"[inventory-list] materialized={materialized.Count} elapsedMs={lockStopwatch.ElapsedMilliseconds}");
+                return InventoryQueryResult.OkResult(
+                    materialized,
+                    $"Materialized {materialized.Count} inventory entries for folder {folderUuid}.");
+            }, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException ex)
         {
@@ -1977,6 +2139,165 @@ internal sealed partial class BotSession
         finally
         {
             Console.WriteLine($"[inventory-list] end elapsedMs={overallStopwatch.ElapsedMilliseconds}");
+        }
+    }
+
+    private static InventoryQueryResult FilterInventoryEntries(
+        IReadOnlyList<InventoryEntry> entries,
+        string? nameContains,
+        string? type,
+        DateTimeOffset? createdAfter,
+        DateTimeOffset? createdBefore,
+        UUID? creatorUuid,
+        int cursorOffset,
+        int maxResults,
+        int pageSize,
+        out string? error)
+    {
+        error = null;
+        var limit = Math.Clamp(maxResults <= 0 ? 25 : maxResults, 1, 10000);
+        var filtered = entries
+            .OrderBy(e => e.Kind, StringComparer.Ordinal)
+            .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(e => e.Id, StringComparer.Ordinal)
+            .Where(e => MatchesInventoryFilter(
+                e,
+                nameContains,
+                type,
+                createdAfter,
+                createdBefore,
+                creatorUuid))
+            .Take(limit)
+            .ToList();
+
+        if (cursorOffset > filtered.Count)
+        {
+            error = $"cursor offset {cursorOffset} is beyond available results ({filtered.Count}).";
+            return InventoryQueryResult.FailResult(error);
+        }
+
+        var page = filtered
+            .Skip(cursorOffset)
+            .Take(pageSize)
+            .ToList();
+
+        var nextOffset = cursorOffset + page.Count;
+        var hasMore = nextOffset < filtered.Count;
+        var nextCursor = hasMore ? EncodeInventoryCursor(nextOffset) : null;
+
+        return InventoryQueryResult.OkResult(
+            page,
+            $"Returned {page.Count} inventory entries (offset={cursorOffset}, matched={filtered.Count}, pageSize={pageSize}, hasMore={hasMore.ToString().ToLowerInvariant()}).",
+            nextCursor,
+            hasMore,
+            filtered.Count);
+    }
+
+    private void StoreInventoryListResult(string taskHandle, string resultHandle, InventoryQueryResult result)
+    {
+        lock (_inventoryListResultLock)
+        {
+            _inventoryListResultsByHandle[resultHandle] = result;
+            _inventoryListResultHandleByTaskHandle[taskHandle] = resultHandle;
+
+            if (!_inventoryListResultOrder.Contains(resultHandle, StringComparer.OrdinalIgnoreCase))
+            {
+                _inventoryListResultOrder.Enqueue(resultHandle);
+            }
+
+            while (_inventoryListResultOrder.Count > _inventoryListResultCacheLimit)
+            {
+                var expired = _inventoryListResultOrder.Dequeue();
+                _inventoryListResultsByHandle.Remove(expired);
+                var expiredTasks = _inventoryListResultHandleByTaskHandle
+                    .Where(pair => string.Equals(pair.Value, expired, StringComparison.OrdinalIgnoreCase))
+                    .Select(pair => pair.Key)
+                    .ToList();
+                foreach (var taskKey in expiredTasks)
+                {
+                    _inventoryListResultHandleByTaskHandle.Remove(taskKey);
+                }
+            }
+        }
+    }
+
+    private bool TryGetInventoryListResult(string handle, out InventoryQueryResult result, out string error)
+    {
+        result = InventoryQueryResult.FailResult("Inventory list result not found.");
+        error = "Inventory list result not found.";
+
+        lock (_inventoryListResultLock)
+        {
+            if (_inventoryListResultsByHandle.TryGetValue(handle, out var stored))
+            {
+                result = stored;
+                error = string.Empty;
+                return true;
+            }
+
+            if (_inventoryListResultHandleByTaskHandle.TryGetValue(handle, out var canonicalHandle)
+                && _inventoryListResultsByHandle.TryGetValue(canonicalHandle, out stored))
+            {
+                result = stored;
+                error = string.Empty;
+                return true;
+            }
+        }
+
+        error = $"No materialized inventory list results were found for handle '{handle}'.";
+        return false;
+    }
+
+    private bool RemoveInventoryListResult(string handle)
+    {
+        lock (_inventoryListResultLock)
+        {
+            var canonicalHandle = handle;
+            if (!_inventoryListResultsByHandle.ContainsKey(handle)
+                && !_inventoryListResultHandleByTaskHandle.TryGetValue(handle, out canonicalHandle))
+            {
+                _inventoryListDiscardedHandles.Add(handle);
+                return false;
+            }
+
+            _inventoryListDiscardedHandles.Add(handle);
+            _inventoryListDiscardedHandles.Add(canonicalHandle);
+            _inventoryListResultsByHandle.Remove(canonicalHandle);
+            _inventoryListResultOrder.Clear();
+            foreach (var key in _inventoryListResultsByHandle.Keys.ToList())
+            {
+                _inventoryListResultOrder.Enqueue(key);
+            }
+
+            var taskAliases = _inventoryListResultHandleByTaskHandle
+                .Where(pair => string.Equals(pair.Value, canonicalHandle, StringComparison.OrdinalIgnoreCase) || string.Equals(pair.Key, handle, StringComparison.OrdinalIgnoreCase))
+                .Select(pair => pair.Key)
+                .ToList();
+            foreach (var taskKey in taskAliases)
+            {
+                _inventoryListResultHandleByTaskHandle.Remove(taskKey);
+            }
+
+            return true;
+        }
+    }
+
+    private static string BuildInventoryListResultHandle(string? folderIdOrPath, bool recursive)
+    {
+        var normalizedFolder = string.IsNullOrWhiteSpace(folderIdOrPath)
+            ? "<root>"
+            : folderIdOrPath.Trim().Replace('\\', '/');
+
+        var signature = $"{normalizedFolder}|recursive={recursive.ToString().ToLowerInvariant()}";
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(signature));
+        return $"inventory-list:{Convert.ToHexString(hash).ToLowerInvariant()}";
+    }
+
+    private void RegisterInventoryListTaskHandle(string taskHandle, string resultHandle)
+    {
+        lock (_inventoryListResultLock)
+        {
+            _inventoryListResultHandleByTaskHandle[taskHandle] = resultHandle;
         }
     }
 
@@ -3345,32 +3666,53 @@ internal sealed partial class BotSession
         }
     }
 
-    public async Task<(bool Exists, string? FolderId, string? Error)> TryResolveFolderPathAsync(IReadOnlyList<string> segments, CancellationToken cancellationToken)
+    public Task<(bool Exists, string? FolderId, string? Error)> TryResolveFolderPathAsync(IReadOnlyList<string> segments, CancellationToken cancellationToken)
     {
-        string? parentFolderId = null;
+        cancellationToken.ThrowIfCancellationRequested();
 
-        foreach (var segment in segments)
+        if (segments == null || segments.Count == 0)
         {
-            var listing = await ListFolderAsync(parentFolderId, cancellationToken).ConfigureAwait(false);
-            if (!listing.Ok)
-            {
-                return (false, null, listing.Message);
-            }
-
-            var child = listing.Entries.FirstOrDefault(e =>
-                e.Kind == "folder" &&
-                string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(e.Id, parentFolderId, StringComparison.OrdinalIgnoreCase));
-
-            if (child == null)
-            {
-                return (false, null, null);
-            }
-
-            parentFolderId = child.Id;
+            return Task.FromResult<(bool Exists, string? FolderId, string? Error)>((false, null, "Inventory folder path must contain at least one segment."));
         }
 
-        return (true, parentFolderId, null);
+        if (_client?.Inventory?.Store?.RootFolder == null)
+        {
+            return Task.FromResult<(bool Exists, string? FolderId, string? Error)>((false, null, "Inventory root folder is not initialized."));
+        }
+
+        var normalizedSegments = segments
+            .Where(segment => !string.IsNullOrWhiteSpace(segment))
+            .Select(segment => segment.Trim())
+            .ToList();
+
+        if (normalizedSegments.Count == 0)
+        {
+            return Task.FromResult<(bool Exists, string? FolderId, string? Error)>((false, null, "Inventory folder path must contain at least one segment."));
+        }
+
+        if (normalizedSegments[0].Equals("Inventory", StringComparison.OrdinalIgnoreCase))
+        {
+            normalizedSegments.RemoveAt(0);
+        }
+
+        if (normalizedSegments.Count == 0)
+        {
+            return Task.FromResult<(bool Exists, string? FolderId, string? Error)>((true, _client.Inventory.Store.RootFolder.UUID.ToString(), null));
+        }
+
+        var found = _client.Inventory.LocalFind(_client.Inventory.Store.RootFolder.UUID, normalizedSegments.ToArray(), 0, true);
+        var matchedFolders = found.OfType<InventoryFolder>().ToList();
+        if (matchedFolders.Count == 1)
+        {
+            return Task.FromResult<(bool Exists, string? FolderId, string? Error)>((true, matchedFolders[0].UUID.ToString(), null));
+        }
+
+        if (matchedFolders.Count == 0)
+        {
+            return Task.FromResult<(bool Exists, string? FolderId, string? Error)>((false, null, null));
+        }
+
+        return Task.FromResult<(bool Exists, string? FolderId, string? Error)>((false, null, $"Inventory folder path '{string.Join("/", normalizedSegments)}' is ambiguous ({matchedFolders.Count} matches). Use a folder UUID instead."));
     }
 
     public async Task<BotToolResult?> EnsureFolderPathExistsAsync(IReadOnlyList<string> segments,
@@ -3479,18 +3821,8 @@ internal sealed partial class BotSession
 
     private async Task<InventoryQueryResult> ListFolderAsync(string? parentFolderId, CancellationToken cancellationToken = default)
     {
-        return await InventoryListAsync(
-            parentFolderId,
-            false,
-            1000,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            200,
-            cancellationToken).ConfigureAwait(false);
+        var listing = await FetchInventoryListAsync(parentFolderId, false, cancellationToken).ConfigureAwait(false);
+        return listing.Ok ? InventoryQueryResult.OkResult(listing.Entries, listing.Message) : listing;
     }
 
     private static string DescribeFolderEntries(InventoryQueryResult listing, int maxEntries = 12)
@@ -4387,7 +4719,7 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<(
+    private static Task<(
         bool Ok,
         InventoryFolder? SetupFolder,
         InventoryFolder? ImportedFolder,
@@ -4398,48 +4730,111 @@ internal sealed partial class BotSession
         string? setupFolderName,
         CancellationToken cancellationToken)
     {
+        static Task<(bool Ok, InventoryFolder? SetupFolder, InventoryFolder? ImportedFolder, IReadOnlyList<InventoryItem> WearableItems, IReadOnlyList<InventoryItem> AttachmentItems, string? Error)> Result(
+            bool ok,
+            InventoryFolder? setupFolder,
+            InventoryFolder? importedFolder,
+            IReadOnlyList<InventoryItem> wearableItems,
+            IReadOnlyList<InventoryItem> attachmentItems,
+            string? error)
+            => Task.FromResult<(bool Ok, InventoryFolder? SetupFolder, InventoryFolder? ImportedFolder, IReadOnlyList<InventoryItem> WearableItems, IReadOnlyList<InventoryItem> AttachmentItems, string? Error)>((
+                ok,
+                setupFolder,
+                importedFolder,
+                wearableItems,
+                attachmentItems,
+                error));
+
         var effectiveSetupFolderName = string.IsNullOrWhiteSpace(setupFolderName)
             ? "Setup"
             : setupFolderName.Trim();
 
-        var rootFolder = client.Inventory.Store?.RootFolder;
+        var inventoryStore = client.Inventory.Store;
+        if (inventoryStore == null)
+        {
+            return Result(false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(), "Inventory store is not initialized.");
+        }
+
+        var rootFolder = inventoryStore.RootFolder;
         if (rootFolder == null)
         {
-            return (false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(), "Inventory root folder is not initialized.");
+            return Result(false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(), "Inventory root folder is not initialized.");
         }
 
-        var folders = new List<InventoryFolder>();
-        var items = new List<InventoryItem>();
-        await client.Inventory.GetInventoryRecursiveAsync(rootFolder.UUID, client.Self.AgentID, folders, items, cancellationToken).ConfigureAwait(false);
-
-        var setupFolder = folders.FirstOrDefault(f => f.ParentUUID == rootFolder.UUID
-            && string.Equals(f.Name?.Trim(), effectiveSetupFolderName, StringComparison.OrdinalIgnoreCase));
-        if (setupFolder == null)
+        List<InventoryBase> rootContents;
+        try
         {
-            return (false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(),
-                $"Required root inventory folder '{effectiveSetupFolderName}' was not found.");
+            rootContents = inventoryStore.GetContents(rootFolder.UUID);
         }
+        catch (Exception ex)
+        {
+            return Result(false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(),
+                $"Failed reading inventory root folder from local store: {ex.Message}");
+        }
+
+        var setupCandidates = rootContents
+            .OfType<InventoryFolder>()
+            .Where(f => string.Equals(f.Name?.Trim(), effectiveSetupFolderName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (setupCandidates.Count == 0)
+        {
+            return Result(false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(),
+                $"Required root inventory folder '{effectiveSetupFolderName}' was not found in local store.");
+        }
+
+        if (setupCandidates.Count > 1)
+        {
+            return Result(false, null, null, Array.Empty<InventoryItem>(), Array.Empty<InventoryItem>(),
+                $"Root inventory folder name '{effectiveSetupFolderName}' is ambiguous ({setupCandidates.Count} matches).");
+        }
+
+        var setupFolder = setupCandidates[0];
 
         var provisioningFolder = setupFolder;
 
         var descendantFolderIds = new HashSet<UUID> { provisioningFolder.UUID };
+        var discoveredItems = new List<InventoryItem>();
         var pending = new Queue<UUID>();
         pending.Enqueue(provisioningFolder.UUID);
         while (pending.Count > 0)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             var current = pending.Dequeue();
-            foreach (var child in folders.Where(f => f.ParentUUID == current))
+            List<InventoryBase> contents;
+            try
             {
-                if (descendantFolderIds.Add(child.UUID))
+                contents = inventoryStore.GetContents(current);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var node in contents)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (node is InventoryFolder childFolder)
                 {
-                    pending.Enqueue(child.UUID);
+                    if (descendantFolderIds.Add(childFolder.UUID))
+                    {
+                        pending.Enqueue(childFolder.UUID);
+                    }
+
+                    continue;
+                }
+
+                if (node is InventoryItem inventoryItem)
+                {
+                    discoveredItems.Add(inventoryItem);
                 }
             }
         }
 
-        var itemsInSetupImport = items
-            .Where(i => descendantFolderIds.Contains(i.ParentUUID))
-            .Select(i => ResolveLinkedInventoryItem(client.Inventory.Store, i))
+        var itemsInSetupImport = discoveredItems
+            .Select(i => ResolveLinkedInventoryItem(inventoryStore, i))
             .ToList();
 
         var wearableItems = itemsInSetupImport
@@ -4450,7 +4845,7 @@ internal sealed partial class BotSession
             .Where(i => i.AssetType == AssetType.Object)
             .ToList();
 
-        return (true, setupFolder, provisioningFolder, wearableItems, attachmentItems, null);
+        return Result(true, setupFolder, provisioningFolder, wearableItems, attachmentItems, null);
     }
 
     private static async Task<List<WearableInfo>> CollectWornWearablesAsync(

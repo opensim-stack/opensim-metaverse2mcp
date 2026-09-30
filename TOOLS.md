@@ -88,6 +88,8 @@ The server publishes tools including:
 - `WalletGetBalance`
 - `Pay`
 - `InventoryList`
+- `InventoryListRetrieve`
+- `InventoryListClear`
 - `InventoryGiveItem`
 - `InventoryGiveFolder`
 - `TaskInventoryList`
@@ -292,16 +294,19 @@ Use these as practical MCP call sequences when building assistants/agents on top
 
 ### 1) Wear an outfit folder and adjust attachments
 
-1. Find the folder UUID for your outfit with `InventoryList`.
-2. Apply the outfit with `AppearanceWearFolder(folderId, replaceItems=true)`.
-3. Check current state with `AppearanceListWorn`.
-4. Optionally attach/detach specific items with `AppearanceAttachItem` / `AppearanceDetachItem`.
-5. If the grid needs it, request final update with `AppearanceRebake(forceRebake=true)`.
+1. Start an inventory listing for the outfit folder with `InventoryList`.
+2. Retrieve the materialized results with `InventoryListRetrieve` to find the folder UUID.
+3. Apply the outfit with `AppearanceWearFolder(folderId, replaceItems=true)`.
+4. Check current state with `AppearanceListWorn`.
+5. Optionally attach/detach specific items with `AppearanceAttachItem` / `AppearanceDetachItem`.
+6. If the grid needs it, request final update with `AppearanceRebake(forceRebake=true)`.
 
 Suggested tool flow:
 
 ```text
-InventoryList(folderId="", recursive=true, maxResults=500)
+InventoryList(folderIdOrPath="", recursive=true)
+InventoryListRetrieve(taskHandle="<inventory-list-task-handle>", maxResults=500, pageSize=500)
+InventoryListClear(taskHandle="<inventory-list-task-handle>")
 AppearanceWearFolder(folderId="<outfit-folder-uuid>", replaceItems=true)
 AppearanceListWorn()
 AppearanceAttachItem(itemId="<attachment-item-uuid>", attachmentPoint="RightHand", replace=true)

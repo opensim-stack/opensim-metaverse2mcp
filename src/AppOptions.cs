@@ -14,6 +14,7 @@ internal sealed class AppOptions
 
     public string? InventoryOfferPolicyFile { get; set; }
     public bool InventoryOfferPolicyAutoSave { get; set; } = true;
+    public int InventoryListResultCacheLimit { get; set; } = 10;
 
     public string? BotFirstName { get; set; }
     public string? BotLastName { get; set; }
@@ -264,6 +265,11 @@ internal sealed class AppOptions
             {
                 errors.Add("Inventory offer policy file path is invalid.");
             }
+        }
+
+        if (InventoryListResultCacheLimit < 1)
+        {
+            errors.Add("Inventory list result cache limit must be at least 1.");
         }
 
         if (string.IsNullOrWhiteSpace(BotFirstName))

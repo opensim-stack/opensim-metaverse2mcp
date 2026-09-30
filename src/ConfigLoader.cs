@@ -14,6 +14,7 @@ internal static class ConfigLoader
             McpHttpDisallowDelete = ParseBool(Env("METAVERSE_MCP_HTTP_DISALLOW_DELETE"), false),
             InventoryOfferPolicyFile = FirstDefined("INVENTORY_OFFER_POLICY_FILE", "OPENSIM_INVENTORY_OFFER_POLICY_FILE"),
             InventoryOfferPolicyAutoSave = ParseBool(FirstDefined("INVENTORY_OFFER_POLICY_AUTOSAVE", "OPENSIM_INVENTORY_OFFER_POLICY_AUTOSAVE"), true),
+            InventoryListResultCacheLimit = ParseInt(FirstDefined("INVENTORY_LIST_RESULT_CACHE_LIMIT", "OPENSIM_INVENTORY_LIST_RESULT_CACHE_LIMIT"), 10),
             BotFirstName = FirstDefined("OPENSIM_BOT_FIRST", "BOT_FIRSTNAME"),
             BotLastName = FirstDefined("OPENSIM_BOT_LAST", "BOT_LASTNAME"),
             BotPassword = FirstDefined("OPENSIM_BOT_PASSWORD", "BOT_PASSWORD"),

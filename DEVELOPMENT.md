@@ -91,18 +91,18 @@ docker run --rm \
 To build with the LibreMetaverse fork during development:
 
 ```bash
-docker build --build-arg USE_LIBREMETAVERSE_FORK=true -t opensim-metaverse2mcp:fork .
+docker build --build-arg USE_LIBREMETAVERSE_GIT=true -t opensim-metaverse2mcp:fork .
 ```
 
-For local development without Docker, ensure the fork is cloned to `../libremetaverse` relative to the workspace:
+For local development without Docker, ensure Git is cloned to `../libremetaverse` relative to the workspace:
 
 ```bash
 cd /path/to/opensim-metaverse2mcp
 git clone https://github.com/opensim-stack/libremetaverse.git ../libremetaverse
 
 # Then build/run as normal:
-dotnet build ./src/opensim-metaverse2mcp.csproj -c Release /p:UseLibreMetaverseFork=true
-dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release /p:UseLibreMetaverseFork=true
+dotnet build ./src/opensim-metaverse2mcp.csproj -c Release /p:UseLibreMetaverseGit=true
+dotnet run --project ./src/opensim-metaverse2mcp.csproj -c Release /p:UseLibreMetaverseGit=true
 ```
 
-To revert to using official NuGet packages, omit the `/p:UseLibreMetaverseFork` property or set it to `false`.
+To revert to using official NuGet packages, omit the `/p:UseLibreMetaverseGit` property or set it to `false`.

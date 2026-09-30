@@ -172,7 +172,7 @@ internal sealed partial class BotSession
         // the action gate); internal delays use CancellationToken.None so a
         // caller disconnect cannot abort the sequence half-applied.
         var actions = new List<string>();
-        var wear = await AppearanceWearFolderAsync(folderId, true, CancellationToken.None).ConfigureAwait(false);
+        var wear = await AppearanceWearFolderAsync(folderId, true, removeExistingItems: true, CancellationToken.None).ConfigureAwait(false);
         if (!wear.Ok)
         {
             return AppearanceAutoRepairResult.FailResult($"Re-wear of outfit folder {folderId} failed: {wear.Message}");

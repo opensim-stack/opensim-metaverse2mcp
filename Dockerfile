@@ -1,15 +1,15 @@
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
-ARG USE_LIBREMETAVERSE_FORK=false
+ARG USE_LIBREMETAVERSE_GIT=false
 WORKDIR /src
 
 # Clone LibreMetaverse fork if requested
-RUN if [ "$USE_LIBREMETAVERSE_FORK" = "true" ] ; then \
-    git clone https://github.com/opensim-stack/libremetaverse.git /libremetaverse ; \
+RUN if [ "$USE_LIBREMETAVERSE_GIT" = "true" ] ; then \
+    git clone https://github.com/cinderblocks/libremetaverse.git /libremetaverse ; \
     fi
 
 COPY src/opensim-metaverse2mcp.csproj src/
-RUN if [ "$USE_LIBREMETAVERSE_FORK" = "true" ] ; then \
-    dotnet restore src/opensim-metaverse2mcp.csproj /p:UseLibreMetaverseFork=true ; \
+RUN if [ "$USE_LIBREMETAVERSE_GIT" = "true" ] ; then \
+    dotnet restore src/opensim-metaverse2mcp.csproj /p:UseLibreMetaverseGit=true ; \
     else \
     dotnet restore src/opensim-metaverse2mcp.csproj ; \
     fi
@@ -17,7 +17,7 @@ RUN if [ "$USE_LIBREMETAVERSE_FORK" = "true" ] ; then \
 COPY src/ src/
 RUN dotnet publish src/opensim-metaverse2mcp.csproj -c Release -o /out \
     /p:UseAppHost=false \
-    /p:UseLibreMetaverseFork=$USE_LIBREMETAVERSE_FORK \
+    /p:UseLibreMetaverseGit=$USE_LIBREMETAVERSE_GIT \
     --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime

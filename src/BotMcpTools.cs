@@ -1960,32 +1960,37 @@ internal sealed class BotMcpTools
         return _bot.PayAsync(targetType, targetId, amount, description, cancellationToken);
     }
 
-    [McpServerTool, Description("List inventory entries under a folder UUID/path (or root if omitted), with optional filtering and cursor pagination.")]
-    public Task<InventoryQueryResult> InventoryList(
+    [McpServerTool, Description("Start listing inventory entries under a folder UUID/path (or root if omitted). This queues a background BotTask because large inventories, especially recursive queries, may take time. The completion event returns a deterministic resultHandle for InventoryListRetrieve and InventoryListClear, which also enables rudimentary caching by folder path plus recursion mode.")]
+    public Task<BotTaskHandle> InventoryList(
         [Description("True to recurse into subfolders.")] bool recursive = false,
+        [Description("Optional inventory folder UUID or slash-separated path (e.g. 'My Folder/Sub Folder'). Leave empty for inventory root.")] string? folderIdOrPath = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.InventoryListAsync(folderIdOrPath, recursive, CancellationToken.None);
+    }
+
+    [McpServerTool, Description("Retrieve materialized results using the InventoryList completion resultHandle. Call InventoryListClear when finished searching to release cached results.")]
+    public Task<InventoryQueryResult> InventoryListRetrieve(
+        [Description("InventoryList resultHandle returned by the completion event.")] string resultHandle,
         [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults = 25,
         [Description("Page size for this response (1..500).") ] int pageSize = 25,
-        [Description("Optional inventory folder UUID or slash-separated path (e.g. 'My Folder/Sub Folder'). Leave empty for inventory root.")] string? folderIdOrPath = null,
         [Description("Optional case-insensitive substring filter applied to entry names.")] string? nameContains = null,
         [Description("Optional type filter (matches kind/assetType/inventoryType, case-insensitive).") ] string? type = null,
         [Description("Optional lower-bound creation timestamp (ISO-8601 UTC).") ] string? createdAfterUtc = null,
         [Description("Optional upper-bound creation timestamp (ISO-8601 UTC).") ] string? createdBeforeUtc = null,
         [Description("Optional creator avatar UUID filter (items only).") ] string? creatorId = null,
-        [Description("Optional cursor from a prior InventoryList response.")] string? cursor = null,
+        [Description("Optional cursor from a prior InventoryListRetrieve response.")] string? cursor = null,
         CancellationToken cancellationToken = default)
     {
-        return _bot.InventoryListAsync(
-            folderIdOrPath,
-            recursive,
-            maxResults,
-            nameContains,
-            type,
-            createdAfterUtc,
-            createdBeforeUtc,
-            creatorId,
-            cursor,
-            pageSize,
-            cancellationToken);
+        return _bot.InventoryListRetrieveAsync(resultHandle, maxResults, pageSize, nameContains, type, createdAfterUtc, createdBeforeUtc, creatorId, cursor, cancellationToken);
+    }
+
+    [McpServerTool, Description("Clear cached materialized results for a completed InventoryList BotTask.")]
+    public Task<BotToolResult> InventoryListClear(
+        [Description("InventoryList resultHandle returned by the completion event.")] string resultHandle,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.InventoryListClearAsync(resultHandle);
     }
 
     [McpServerTool, Description("Create a new inventory folder under a parent folder UUID/path (or root if omitted).")]
@@ -2185,7 +2190,6 @@ internal sealed class BotMcpTools
                 {
                     _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Starting IAR import.", 5);
 
-                    // Call spawner API to import IAR.
                     var importResult = await _spawnerClient.ImportIarUrlAsync(botFirst, botLast, url, inventoryPath, taskCancellationToken).ConfigureAwait(false);
                     if (!importResult.Ok)
                     {
@@ -2210,17 +2214,21 @@ internal sealed class BotMcpTools
                     _bot.EmitInventoryImportProgressEvent(taskHandle.Handle, "Waiting for inventory index update.", 70);
                     await Task.Delay(500, taskCancellationToken).ConfigureAwait(false);
 
-                    var inventory = await _bot.InventoryListAsync(
+                    var inventoryTask = await _bot.InventoryListAsync(
                         BotSession.GetParentPath(inventoryPath),
                         false,
+                        taskCancellationToken).ConfigureAwait(false);
+
+                    var inventory = await _bot.InventoryListRetrieveAsync(
+                        inventoryTask.Handle,
                         1000,
+                        100,
                         BotSession.GetBasePath(inventoryPath),
                         null,
                         null,
                         null,
                         null,
                         null,
-                        100,
                         taskCancellationToken).ConfigureAwait(false);
 
                     if (!inventory.Ok)
@@ -2280,7 +2288,8 @@ internal sealed class BotMcpTools
                         _bot.EmitInventoryImportCompleteEvent(taskHandle.Handle, false, $"IAR imported but transfer to agent failed: {giveResult.Message}");
                         return;
                     }
-                    else {
+                    else
+                    {
                         Console.WriteLine($"Successfully transferred imported folder {importedFolderId} to agent {targetAgentId.Trim()}.");
                     }
 
@@ -2708,9 +2717,10 @@ internal sealed class BotMcpTools
     public Task<AppearanceWearFolderResult> AppearanceWearFolder(
         [Description("Folder UUID containing outfit items/links.")] string folderId,
         [Description("True to replace current outfit, false to add.")] bool replaceItems,
-        CancellationToken cancellationToken)
+        [Description("True to first remove currently worn wearables and detach current attachments before wearing the folder.")] bool removeExistingItems = true,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.AppearanceWearFolderAsync(folderId, replaceItems, cancellationToken);
+        return _bot.AppearanceWearFolderAsync(folderId, replaceItems, removeExistingItems, CancellationToken.None);
     }
 
     [McpServerTool, Description("Save the current outfit links into a new inventory folder snapshot.")]
@@ -2719,7 +2729,7 @@ internal sealed class BotMcpTools
         [Description("Optional parent folder UUID. Empty uses Clothing folder when available.")] string? parentFolderId = null,
         CancellationToken cancellationToken = default)
     {
-        return _bot.AppearanceSaveCurrentOutfitAsync(folderName, parentFolderId, cancellationToken);
+        return _bot.AppearanceSaveCurrentOutfitAsync(folderName, parentFolderId, CancellationToken.None);
     }
 
     [McpServerTool, Description("Attach an inventory attachment/object item.")]
@@ -2736,15 +2746,15 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> AppearanceWearWearableItem(
         [Description("Wearable inventory item UUID.")] string itemId,
         [Description("True to replace already-worn wearables in the same slot/type.")] bool replaceExistingSlot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
-        return _bot.AppearanceWearWearableItemAsync(itemId, replaceExistingSlot, cancellationToken);
+        return _bot.AppearanceWearWearableItemAsync(itemId, replaceExistingSlot, CancellationToken.None);
     }
 
     [McpServerTool, Description("Remove a currently worn wearable item directly via COF.")]
     public Task<WearableDirectControlResult> AppearanceRemoveWearableItem(
         [Description("Wearable inventory item UUID.")] string itemId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceRemoveWearableItemAsync(itemId, cancellationToken);
     }
@@ -2753,7 +2763,7 @@ internal sealed class BotMcpTools
     public Task<WearableDirectControlResult> AppearanceRemoveWearablesByType(
         [Description("WearableType enum name (e.g. Shirt, Pants, Alpha).") ] string wearableType,
         [Description("True to remove all layers of the type, false for one layer.")] bool removeAllLayers,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceRemoveWearablesByTypeAsync(wearableType, removeAllLayers, cancellationToken);
     }
@@ -2767,7 +2777,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Resolve a worn attachment inventory item UUID to its current in-world object UUID/local ID.")]
     public Task<AttachmentObjectResolutionResult> AttachmentResolveObject(
         [Description("Worn attachment inventory item UUID.")] string itemId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AttachmentResolveObjectAsync(itemId, cancellationToken);
     }
@@ -2777,7 +2787,7 @@ internal sealed class BotMcpTools
         [Description("Attachment inventory item UUID.")] string itemId,
         [Description("AttachmentPoint enum name (e.g. Spine, Chest, RightHand).") ] string attachmentPoint,
         [Description("True to replace any existing attachment at the target point.")] bool replace,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceSetAttachmentPointMappingAsync(itemId, attachmentPoint, replace, cancellationToken);
     }
@@ -2785,7 +2795,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Detach a currently worn attachment item by inventory item UUID.")]
     public Task<BotToolResult> AppearanceDetachItem(
         [Description("Inventory item UUID.")] string itemId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceDetachItemAsync(itemId, cancellationToken);
     }
@@ -2793,7 +2803,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Get cached transform snapshot for a worn attachment item.")]
     public Task<AttachmentTransformResult> AppearanceGetAttachedItemTransform(
         [Description("Worn attachment inventory item UUID.")] string itemId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceGetAttachedItemTransformAsync(itemId, cancellationToken);
     }
@@ -2890,7 +2900,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Bootstrap-install the dialog bridge by uploading and attaching prim containing scripts.")]
     public Task<DialogBridgeInstallResult> DialogBridgeInstall(CancellationToken cancellationToken)
     {
-        return _bot.DialogBridgeInstallAsync(cancellationToken);
+        return _bot.DialogBridgeInstallAsync(CancellationToken.None);
     }
 
     [McpServerTool, Description("Uninstall the dialog bridge: delete pinned bridge prim in-world and clear trust pins.")]

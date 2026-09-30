@@ -345,6 +345,47 @@ internal sealed partial class BotSession
             });
     }
 
+    public void EmitInventoryListProgressEvent(string handle, string message, int progressPercent)
+    {
+        var normalizedMessage = string.IsNullOrWhiteSpace(message) ? "Inventory list is in progress." : message.Trim();
+        var clampedPercent = Math.Clamp(progressPercent, 0, 100);
+
+        EmitRuntimeEvent(
+            "progress",
+            "inventory.list.message",
+            "inventory.list",
+            normalizedMessage,
+            new Dictionary<string, string?>
+            {
+                ["handle"] = handle,
+                ["progressPercent"] = clampedPercent.ToString(CultureInfo.InvariantCulture)
+            });
+    }
+
+    public void EmitInventoryListCompleteEvent(string handle, string resultHandle, bool success, string message)
+    {
+        _botTaskManager.TryReportCompletion(handle, success, message);
+
+        var normalizedMessage = string.IsNullOrWhiteSpace(message)
+            ? (success ? "Inventory list completed." : "Inventory list failed.")
+            : message.Trim();
+
+        EmitRuntimeEvent(
+            "progress",
+            "inventory.list.complete",
+            "inventory.list",
+            normalizedMessage,
+            new Dictionary<string, string?>
+            {
+                ["handle"] = handle,
+                ["resultHandle"] = resultHandle,
+                ["success"] = success ? "true" : "false"
+            });
+    }
+
+    public void EmitInventoryListCompleteEvent(string handle, bool success, string message)
+        => EmitInventoryListCompleteEvent(handle, string.Empty, success, message);
+
     private void EmitRuntimeEvent(
         string channel,
         string eventType,

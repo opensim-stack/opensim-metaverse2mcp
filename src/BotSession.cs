@@ -193,6 +193,12 @@ internal sealed partial class BotSession : IDisposable
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private readonly CancellationTokenSource _lifecycleCts = new();
     private readonly BotTaskManager _botTaskManager;
+    private readonly object _inventoryListResultLock = new();
+    private readonly Dictionary<string, InventoryQueryResult> _inventoryListResultsByHandle = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _inventoryListResultHandleByTaskHandle = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Queue<string> _inventoryListResultOrder = new();
+    private readonly HashSet<string> _inventoryListDiscardedHandles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly int _inventoryListResultCacheLimit;
     private readonly AgentLocator _agentLocator;
     private readonly HashSet<ChatType> _receiveChatAllowedTypes;
 
@@ -248,6 +254,7 @@ internal sealed partial class BotSession : IDisposable
     {
         _options = options;
         _botTaskManager = new BotTaskManager(_lifecycleCts.Token);
+        _inventoryListResultCacheLimit = Math.Max(1, options.InventoryListResultCacheLimit);
         _followSpawnerClient = new SpawnerClient(options);
         _agentLocator = new AgentLocator(this, _followSpawnerClient);
         _receiveChatAllowedTypes = ParseLocalChatAllowedTypes(_options.ReceiveChatAllowedTypes, out var invalidLocalChatTypeNames);

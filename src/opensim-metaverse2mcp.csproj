@@ -5,11 +5,11 @@
     <RootNamespace>opensim_metaverse2mcp</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- Set to 'true' to use local LibreMetaverse fork instead of NuGet packages -->
-    <UseLibreMetaverseFork>false</UseLibreMetaverseFork>
+    <!-- Set to 'true' to use local LibreMetaverse Git instead of NuGet packages -->
+    <UseLibreMetaverseGit>false</UseLibreMetaverseGit>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(UseLibreMetaverseFork)' != 'true'">
+  <ItemGroup Condition="'$(UseLibreMetaverseGit)' != 'true'">
     <!-- Official NuGet packages -->
     <PackageReference Include="LibreMetaverse" Version="3.1.6" />
     <PackageReference Include="LibreMetaverse.RLV" Version="3.1.6" />
@@ -17,7 +17,7 @@
     <PackageReference Include="LibreMetaverse.Voice.WebRTC" Version="3.1.6" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(UseLibreMetaverseFork)' == 'true'">
+  <ItemGroup Condition="'$(UseLibreMetaverseGit)' == 'true'">
     <!-- Local fork projects -->
     <ProjectReference Include="../../libremetaverse/LibreMetaverse/LibreMetaverse.csproj" />
     <ProjectReference Include="../../libremetaverse/LibreMetaverse.RLV/LibreMetaverse.RLV.csproj" />
