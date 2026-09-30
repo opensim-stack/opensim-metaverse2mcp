@@ -236,6 +236,7 @@ internal sealed partial class BotSession : IDisposable
     private bool _connected;
     private string _lastLoginMessage = string.Empty;
     private int _reconnectLoopActive;
+    private int _startupSetupProvisionAttempted;
     private readonly SpawnerClient _followSpawnerClient;
 
     public BotSession(AppOptions options)
@@ -419,6 +420,7 @@ internal sealed partial class BotSession : IDisposable
 
             // client already assigned to _client above; mark connected.
             _connected = true;
+            Interlocked.Exchange(ref _startupSetupProvisionAttempted, 0);
             EmitRuntimeEvent(
                 "general",
                 "login.connected",
@@ -2187,6 +2189,8 @@ internal sealed partial class BotSession : IDisposable
                     Console.WriteLine("[sim-change] client not fully initialized yet; postponing follow-up work until next sim change.");
                     return;
                 }
+
+                await RunStartupSetupProvisioningIfNeededAsync(_lifecycleCts.Token).ConfigureAwait(false);
                 
                 client.Self.Movement.SetFOVVerticalAngle(Utils.TWO_PI - 0.05f);
             }

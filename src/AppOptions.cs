@@ -26,7 +26,7 @@ internal sealed class AppOptions
     public string? SpawnerToken { get; set; }
     public string BotLoginUri { get; set; } = "http://opensim:9000";
     public string BotStartLocation { get; set; } = "last";
-    public string WearFolderName { get; set; } = "";
+    public string WearFolderName { get; set; } = "Setup";
     public string CacheDir { get; set; } = "";
     public bool CacheEnabled { get; set; } = true;
     public long CacheMaxSize { get; set; } = 1024L * 1024 * 1024;

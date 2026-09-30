@@ -204,6 +204,142 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task RunStartupSetupProvisioningIfNeededAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.CompareExchange(ref _startupSetupProvisionAttempted, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var setupFolderName = string.IsNullOrWhiteSpace(_options.WearFolderName)
+            ? "Setup"
+            : _options.WearFolderName.Trim();
+
+        var prep = (Found: false, SetupFolderId: UUID.Zero, SetupFolderName: string.Empty, ProvisioningFolderId: UUID.Zero, ProvisioningFolderName: string.Empty);
+
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            var store = client.Inventory.Store;
+            var rootFolder = store?.RootFolder;
+            if (store == null || rootFolder == null)
+            {
+                return;
+            }
+
+            List<InventoryBase> rootContents;
+            try
+            {
+                rootContents = store.GetContents(rootFolder.UUID);
+            }
+            catch
+            {
+                return;
+            }
+
+            var setupFolder = rootContents
+                .OfType<InventoryFolder>()
+                .FirstOrDefault(folder => string.Equals(folder.Name?.Trim(), setupFolderName, StringComparison.OrdinalIgnoreCase));
+
+            if (setupFolder == null)
+            {
+                return;
+            }
+
+            var setupContents = await client.Inventory
+                .FolderContentsAsync(setupFolder.UUID, client.Self.AgentID, true, true, InventorySortOrder.ByName, cancellationToken)
+                .ConfigureAwait(false);
+
+            var provisioningFolder = setupContents.OfType<InventoryFolder>().FirstOrDefault();
+            if (provisioningFolder != null)
+            {
+                var objectsFolderId = client.Inventory.FindFolderForType(FolderType.Object);
+                if (objectsFolderId != UUID.Zero && provisioningFolder.ParentUUID != objectsFolderId)
+                {
+                    await client.Inventory.MoveFolderAsync(provisioningFolder.UUID, objectsFolderId, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            var agentsNotecard = setupContents
+                .OfType<InventoryItem>()
+                .FirstOrDefault(item => IsNotecardInventoryItem(item)
+                    && string.Equals(item.Name?.Trim(), "AGENTS.md", StringComparison.OrdinalIgnoreCase));
+
+            if (agentsNotecard != null)
+            {
+                var notecardsFolderId = client.Inventory.FindFolderForType(FolderType.Notecard);
+                if (notecardsFolderId != UUID.Zero && agentsNotecard.ParentUUID != notecardsFolderId)
+                {
+                    await client.Inventory.MoveItemAsync(agentsNotecard.UUID, notecardsFolderId, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            prep = (
+                true,
+                setupFolder.UUID,
+                setupFolder.Name ?? setupFolderName,
+                provisioningFolder?.UUID ?? UUID.Zero,
+                provisioningFolder?.Name ?? string.Empty);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+
+        if (!prep.Found)
+        {
+            return;
+        }
+
+        var setupFolderId = prep.SetupFolderId;
+        var setupFolderDisplayName = prep.SetupFolderName;
+        var provisioningFolderId = prep.ProvisioningFolderId;
+        var provisioningFolderDisplayName = prep.ProvisioningFolderName;
+
+        if (provisioningFolderId != UUID.Zero)
+        {
+            var wearResult = await AppearanceWearFolderAsync(
+                    provisioningFolderId.ToString(),
+                    replaceItems: true,
+                    removeExistingItems: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (wearResult.Ok)
+            {
+                Console.WriteLine($"[provisioning] applied startup wear-folder '{provisioningFolderDisplayName}' ({provisioningFolderId}) from setup folder '{setupFolderDisplayName}'.");
+            }
+            else
+            {
+                Console.WriteLine($"[provisioning] startup wear-folder apply failed for '{provisioningFolderDisplayName}' ({provisioningFolderId}): {wearResult.Message}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"[provisioning] setup folder '{setupFolderDisplayName}' found but contains no child folder to wear.");
+        }
+
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            var trashFolderId = client.Inventory.FindFolderForType(FolderType.Trash);
+            if (trashFolderId == UUID.Zero)
+            {
+                Console.WriteLine($"[provisioning] startup cleanup skipped: could not resolve Trash folder for setup folder '{setupFolderDisplayName}' ({setupFolderId}).");
+                return;
+            }
+
+            await client.Inventory.MoveFolderAsync(setupFolderId, trashFolderId, cancellationToken).ConfigureAwait(false);
+            Console.WriteLine($"[provisioning] moved setup folder '{setupFolderDisplayName}' ({setupFolderId}) to Trash.");
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
     private async Task<(int RemovedWearableCount, int DetachedAttachmentCount)> RemoveCurrentlyWornItemsAsync(
         GridClient client,
         CancellationToken cancellationToken)
