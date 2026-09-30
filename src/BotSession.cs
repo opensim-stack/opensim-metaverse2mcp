@@ -245,6 +245,9 @@ internal sealed partial class BotSession : IDisposable
     private static readonly IReadOnlyList<string> LslPermissionDialogOptions = new[] { "yes", "no", "yes always", "no always" };
 
     private GridClient? _client;
+    private readonly object _cofLock = new();
+    private LibreMetaverse.Appearance.CurrentOutfitFolder? _sharedCurrentOutfitFolder;
+    private GridClient? _sharedCurrentOutfitFolderClient;
     private bool _connected;
     private string _lastLoginMessage = string.Empty;
     private int _reconnectLoopActive;
@@ -653,6 +656,7 @@ internal sealed partial class BotSession : IDisposable
         __busyHarnessSessions.Clear();
         ClearBusyHoverText();
         DisposeVoiceSupport();
+        ResetSharedCurrentOutfitFolder();
         _client = null;
         _connected = false;
         StopFollowInternal();
@@ -2358,176 +2362,176 @@ internal sealed partial class BotSession : IDisposable
                 
                 client.Self.Movement.SetFOVVerticalAngle(Utils.TWO_PI - 0.05f);
 
-                // Allow some time for the simulator to populate object updates in the client's
-                // local cache after we've become ready.
-                await Task.Delay(1500).ConfigureAwait(false);
+                // // Allow some time for the simulator to populate object updates in the client's
+                // // local cache after we've become ready.
+                // await Task.Delay(1500).ConfigureAwait(false);
 
-                var sim = client.Network.CurrentSim;
-                if (sim == null) return;
+                // var sim = client.Network.CurrentSim;
+                // if (sim == null) return;
 
-                Console.WriteLine($"[dialog-bridge] current sim: name={sim.Name} handle={sim.Handle} primitives={sim.ObjectsPrimitives?.Count ?? 0}");
+                // Console.WriteLine($"[dialog-bridge] current sim: name={sim.Name} handle={sim.Handle} primitives={sim.ObjectsPrimitives?.Count ?? 0}");
 
-                // If we already have a pinned bridge object in this sim, probe its AGENTS.md now
-                // so prompt status reflects bridge-source state even before any dialog reply arrives.
-                if (TryGetPinnedBridgeObjectInCurrentSim(out var pinnedBridgeObjectId, out _))
-                {
-                    QueueBridgeAgentsPromptProbe(pinnedBridgeObjectId, "trusted bridge object");
-                    Console.WriteLine("[dialog-bridge] pinned bridge object present in new region; no auto-provision needed.");
-                    return;
-                }
+                // // If we already have a pinned bridge object in this sim, probe its AGENTS.md now
+                // // so prompt status reflects bridge-source state even before any dialog reply arrives.
+                // if (TryGetPinnedBridgeObjectInCurrentSim(out var pinnedBridgeObjectId, out _))
+                // {
+                //     QueueBridgeAgentsPromptProbe(pinnedBridgeObjectId, "trusted bridge object");
+                //     Console.WriteLine("[dialog-bridge] pinned bridge object present in new region; no auto-provision needed.");
+                //     return;
+                // }
 
-                var botItems = await ResolveSetupProvisioningItemsAsync(client, _options.WearFolderName, CancellationToken.None).ConfigureAwait(false);
-                if (botItems.Ok)
-                {
-                    var appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
-                    var allAttachmentsWorn = false;
-                    var allWearablesWorn = false;
-                    if (appearance.Ok)
-                    {
-                        var wornAttachmentIds = appearance.Attachments
-                            .Select(a => a.ItemId)
-                            .Where(id => !string.IsNullOrWhiteSpace(id))
-                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                // var botItems = await ResolveSetupProvisioningItemsAsync(client, _options.WearFolderName, CancellationToken.None).ConfigureAwait(false);
+                // if (botItems.Ok)
+                // {
+                //     var appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
+                //     var allAttachmentsWorn = false;
+                //     var allWearablesWorn = false;
+                //     if (appearance.Ok)
+                //     {
+                //         var wornAttachmentIds = appearance.Attachments
+                //             .Select(a => a.ItemId)
+                //             .Where(id => !string.IsNullOrWhiteSpace(id))
+                //             .ToHashSet(StringComparer.OrdinalIgnoreCase);
                             
-                            /*
-                        var wornWearableIds = appearance.Wearables
-                            .Select(w => w.ItemId)
-                            .Where(id => !string.IsNullOrWhiteSpace(id))
-                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                             */
+                //             /*
+                //         var wornWearableIds = appearance.Wearables
+                //             .Select(w => w.ItemId)
+                //             .Where(id => !string.IsNullOrWhiteSpace(id))
+                //             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                //              */
 
-                        allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
-                        //allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
-                        //var provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
-                        var provisionedStateSatisfied = allAttachmentsWorn;
-                        //if (!allWearablesWorn)
-                        //{
-                          //  LogWearableProvisioningMatches("sim-change initial verification", botItems.WearableItems, wornWearableIds);
-                        //}
+                //         allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
+                //         //allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
+                //         //var provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
+                //         var provisionedStateSatisfied = allAttachmentsWorn;
+                //         //if (!allWearablesWorn)
+                //         //{
+                //           //  LogWearableProvisioningMatches("sim-change initial verification", botItems.WearableItems, wornWearableIds);
+                //         //}
 
-                        // Appearance snapshots can briefly lag right after login/sim change.
-                        // Re-check a few times before deciding setup items are missing.
+                //         // Appearance snapshots can briefly lag right after login/sim change.
+                //         // Re-check a few times before deciding setup items are missing.
                         
-                        /*
-                        for (var verifyAttempt = 1; verifyAttempt <= 3 && !provisionedStateSatisfied; verifyAttempt++)
-                        {
-                            await Task.Delay(5000).ConfigureAwait(false);
-                            appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
-                            if (!appearance.Ok)
-                            {
-                                break;
-                            }
+                //         /*
+                //         for (var verifyAttempt = 1; verifyAttempt <= 3 && !provisionedStateSatisfied; verifyAttempt++)
+                //         {
+                //             await Task.Delay(5000).ConfigureAwait(false);
+                //             appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
+                //             if (!appearance.Ok)
+                //             {
+                //                 break;
+                //             }
 
-                            wornAttachmentIds = appearance.Attachments
-                                .Select(a => a.ItemId)
-                                .Where(id => !string.IsNullOrWhiteSpace(id))
-                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                            wornWearableIds = appearance.Wearables
-                                .Select(w => w.ItemId)
-                                .Where(id => !string.IsNullOrWhiteSpace(id))
-                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                //             wornAttachmentIds = appearance.Attachments
+                //                 .Select(a => a.ItemId)
+                //                 .Where(id => !string.IsNullOrWhiteSpace(id))
+                //                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                //             wornWearableIds = appearance.Wearables
+                //                 .Select(w => w.ItemId)
+                //                 .Where(id => !string.IsNullOrWhiteSpace(id))
+                //                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-                            allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
-                            allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
-                            provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
-                            if (!allWearablesWorn)
-                            {
-                                LogWearableProvisioningMatches($"sim-change verification attempt {verifyAttempt}/3", botItems.WearableItems, wornWearableIds);
-                            }
-                        }
-                         */
+                //             allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
+                //             allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
+                //             provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
+                //             if (!allWearablesWorn)
+                //             {
+                //                 LogWearableProvisioningMatches($"sim-change verification attempt {verifyAttempt}/3", botItems.WearableItems, wornWearableIds);
+                //             }
+                //         }
+                //          */
 
-                        if (provisionedStateSatisfied)
-                        {
-                            InventoryItem? anyPinnedAttachment = null;
-                            UUID attachedObjectId = UUID.Zero;
-                            uint attachedLocalId = 0;
-                            foreach (var attachmentItem in botItems.AttachmentItems)
-                            {
-                                if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out attachedObjectId, out attachedLocalId))
-                                {
-                                    anyPinnedAttachment = attachmentItem;
-                                    break;
-                                }
-                            }
+                //         if (provisionedStateSatisfied)
+                //         {
+                //             InventoryItem? anyPinnedAttachment = null;
+                //             UUID attachedObjectId = UUID.Zero;
+                //             uint attachedLocalId = 0;
+                //             foreach (var attachmentItem in botItems.AttachmentItems)
+                //             {
+                //                 if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out attachedObjectId, out attachedLocalId))
+                //                 {
+                //                     anyPinnedAttachment = attachmentItem;
+                //                     break;
+                //                 }
+                //             }
 
-                            if (attachedObjectId != UUID.Zero)
-                            {
-                                lock (_dialogBridgeTrustLock)
-                                {
-                                    _trustedDialogBridgeObjectId = attachedObjectId;
-                                    _trustedDialogBridgeOwnerId = client.Self.AgentID;
-                                }
-                                TrySaveDialogBridgeTrustStateToFile();
-                                QueueBridgeAgentsPromptProbe(attachedObjectId, "worn setup attachment");
-                                Console.WriteLine($"[dialog-bridge] setup attachment already worn; refreshed trusted pin from attachment '{anyPinnedAttachment?.Name}' object={attachedObjectId} localId={attachedLocalId}.");
-                            }
-                            else
-                            {
-                                Console.WriteLine("[dialog-bridge] setup attachment already worn; trusted pin refresh is waiting for simulator cache visibility.");
-                            }
+                //             if (attachedObjectId != UUID.Zero)
+                //             {
+                //                 lock (_dialogBridgeTrustLock)
+                //                 {
+                //                     _trustedDialogBridgeObjectId = attachedObjectId;
+                //                     _trustedDialogBridgeOwnerId = client.Self.AgentID;
+                //                 }
+                //                 TrySaveDialogBridgeTrustStateToFile();
+                //                 QueueBridgeAgentsPromptProbe(attachedObjectId, "worn setup attachment");
+                //                 Console.WriteLine($"[dialog-bridge] setup attachment already worn; refreshed trusted pin from attachment '{anyPinnedAttachment?.Name}' object={attachedObjectId} localId={attachedLocalId}.");
+                //             }
+                //             else
+                //             {
+                //                 Console.WriteLine("[dialog-bridge] setup attachment already worn; trusted pin refresh is waiting for simulator cache visibility.");
+                //             }
 
-                            if (!allWearablesWorn)
-                            {
-                                Console.WriteLine("[dialog-bridge] provisioning attachment is already worn; wearable verification still reports pending items.");
-                            }
+                //             if (!allWearablesWorn)
+                //             {
+                //                 Console.WriteLine("[dialog-bridge] provisioning attachment is already worn; wearable verification still reports pending items.");
+                //             }
 
-                            return;
-                        }
+                //             return;
+                //         }
 
-                        Console.WriteLine("[dialog-bridge] setup inventory was found but not all setup wearables/attachments are currently worn.");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[dialog-bridge] could not verify current setup worn state: {appearance.Message}");
-                    }
-                }
-                else
-                {
-                    Console.WriteLine($"[dialog-bridge] setup inventory lookup failed: {botItems.Error}");
-                }
+                //         Console.WriteLine("[dialog-bridge] setup inventory was found but not all setup wearables/attachments are currently worn.");
+                //     }
+                //     else
+                //     {
+                //         Console.WriteLine($"[dialog-bridge] could not verify current setup worn state: {appearance.Message}");
+                //     }
+                // }
+                // else
+                // {
+                //     Console.WriteLine($"[dialog-bridge] setup inventory lookup failed: {botItems.Error}");
+                // }
 
-                if (!_options.BridgeAutoProvisionOnRegionEnter)
-                {
-                    Console.WriteLine("[dialog-bridge] bridge missing in new region but auto-provision is disabled.");
-                    return;
-                }
+                // if (!_options.BridgeAutoProvisionOnRegionEnter)
+                // {
+                //     Console.WriteLine("[dialog-bridge] bridge missing in new region but auto-provision is disabled.");
+                //     return;
+                // }
 
-                if (Interlocked.CompareExchange(ref _dialogBridgeAutoProvisionInFlight, 1, 0) != 0)
-                {
-                    Console.WriteLine("[dialog-bridge] auto-provision already in progress; skipping duplicate trigger.");
-                    return;
-                }
+                // if (Interlocked.CompareExchange(ref _dialogBridgeAutoProvisionInFlight, 1, 0) != 0)
+                // {
+                //     Console.WriteLine("[dialog-bridge] auto-provision already in progress; skipping duplicate trigger.");
+                //     return;
+                // }
 
-                try
-                {
-                    var now = DateTimeOffset.UtcNow;
-                    lock (_dialogBridgeAutoProvisionLock)
-                    {
-                        if ((now - _lastDialogBridgeAutoProvisionAttemptAt) < TimeSpan.FromSeconds(45))
-                        {
-                            Console.WriteLine("[dialog-bridge] auto-provision suppressed by cooldown.");
-                            return;
-                        }
+                // try
+                // {
+                //     var now = DateTimeOffset.UtcNow;
+                //     lock (_dialogBridgeAutoProvisionLock)
+                //     {
+                //         if ((now - _lastDialogBridgeAutoProvisionAttemptAt) < TimeSpan.FromSeconds(45))
+                //         {
+                //             Console.WriteLine("[dialog-bridge] auto-provision suppressed by cooldown.");
+                //             return;
+                //         }
 
-                        _lastDialogBridgeAutoProvisionAttemptAt = now;
-                    }
+                //         _lastDialogBridgeAutoProvisionAttemptAt = now;
+                //     }
 
-                    Console.WriteLine("[dialog-bridge] bridge missing in new region; attempting automatic install...");
-                    var install = await DialogBridgeInstallAsync(CancellationToken.None).ConfigureAwait(false);
-                    if (install.Ok)
-                    {
-                        Console.WriteLine($"[dialog-bridge] auto-installed bridge: {install.Message}");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[dialog-bridge] auto-install failed: {install.Message}");
-                    }
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref _dialogBridgeAutoProvisionInFlight, 0);
-                }
+                //     Console.WriteLine("[dialog-bridge] bridge missing in new region; attempting automatic install...");
+                //     var install = await DialogBridgeInstallAsync(CancellationToken.None).ConfigureAwait(false);
+                //     if (install.Ok)
+                //     {
+                //         Console.WriteLine($"[dialog-bridge] auto-installed bridge: {install.Message}");
+                //     }
+                //     else
+                //     {
+                //         Console.WriteLine($"[dialog-bridge] auto-install failed: {install.Message}");
+                //     }
+                // }
+                // finally
+                // {
+                //     Interlocked.Exchange(ref _dialogBridgeAutoProvisionInFlight, 0);
+                // }
             }
             catch (Exception ex)
             {
@@ -2637,6 +2641,8 @@ internal sealed partial class BotSession : IDisposable
 
     private void CleanupClient(GridClient client, bool logout)
     {
+        ResetSharedCurrentOutfitFolder(client);
+
         try { client.Self.IM -= OnInstantMessage; } catch { }
         try { client.Self.IM -= OnSocialInstantMessage; } catch { }
         try { client.Self.ChatFromSimulator -= OnChatFromSimulator; } catch { }
@@ -2666,6 +2672,63 @@ internal sealed partial class BotSession : IDisposable
         }
 
         try { client.Dispose(); } catch { }
+    }
+
+    private LibreMetaverse.Appearance.CurrentOutfitFolder GetSharedCurrentOutfitFolder(GridClient client)
+    {
+        lock (_cofLock)
+        {
+            if (_sharedCurrentOutfitFolder != null && !ReferenceEquals(_sharedCurrentOutfitFolderClient, client))
+            {
+                try
+                {
+                    _sharedCurrentOutfitFolder.Dispose();
+                }
+                catch
+                {
+                    // Best-effort cleanup while switching clients.
+                }
+
+                _sharedCurrentOutfitFolder = null;
+                _sharedCurrentOutfitFolderClient = null;
+            }
+
+            if (_sharedCurrentOutfitFolder == null)
+            {
+                _sharedCurrentOutfitFolder = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+                _sharedCurrentOutfitFolderClient = client;
+            }
+
+            return _sharedCurrentOutfitFolder;
+        }
+    }
+
+    private void ResetSharedCurrentOutfitFolder(GridClient? onlyForClient = null)
+    {
+        lock (_cofLock)
+        {
+            if (_sharedCurrentOutfitFolder == null)
+            {
+                return;
+            }
+
+            if (onlyForClient != null && !ReferenceEquals(_sharedCurrentOutfitFolderClient, onlyForClient))
+            {
+                return;
+            }
+
+            try
+            {
+                _sharedCurrentOutfitFolder.Dispose();
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            _sharedCurrentOutfitFolder = null;
+            _sharedCurrentOutfitFolderClient = null;
+        }
     }
 }
 

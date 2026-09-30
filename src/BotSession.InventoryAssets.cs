@@ -204,12 +204,12 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<(int RemovedWearableCount, int DetachedAttachmentCount)> RemoveCurrentlyWornItemsAsync(
+    private async Task<(int RemovedWearableCount, int DetachedAttachmentCount)> RemoveCurrentlyWornItemsAsync(
         GridClient client,
         CancellationToken cancellationToken)
     {
         var removedWearables = 0;
-        using (var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client))
+        var cof = GetSharedCurrentOutfitFolder(client);
         {
             var allWearables = new List<InventoryItem>();
             foreach (var wearableType in Enum.GetValues<WearableType>())
@@ -549,17 +549,38 @@ internal sealed partial class BotSession
             }
 
             var destinationFolderId = client.Inventory.CreateFolder(parentId, folderName.Trim(), FolderType.None);
-            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            var cof = GetSharedCurrentOutfitFolder(client);
             var currentLinks = await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+
+            Console.WriteLine($"[appearance] preparing to save current outfit links to folder '{destinationFolderId}'.");
 
             var linkTargets = new List<InventoryItem>();
             var seen = new HashSet<UUID>();
             foreach (var link in currentLinks)
             {
+                Console.WriteLine($"[appearance] resolving link for item '{link.Name}' ({link.UUID}).");
                 var resolved = ResolveLinkedInventoryItem(store, link);
+
+                if (link.InventoryType == InventoryType.Folder || resolved.InventoryType == InventoryType.Folder)
+                {
+                    Console.WriteLine($"[appearance] skipping COF folder link '{link.Name}' ({link.UUID}).");
+                    continue;
+                }
+
+                if (resolved is not InventoryWearable && resolved is not InventoryObject && resolved.AssetType != AssetType.Gesture)
+                {
+                    Console.WriteLine($"[appearance] skipping non-outfit link target '{resolved.Name}' ({resolved.UUID}), assetType={resolved.AssetType}, inventoryType={resolved.InventoryType}.");
+                    continue;
+                }
+
                 if (seen.Add(resolved.UUID))
                 {
+                    Console.WriteLine($"[appearance] resolved link for item '{resolved.Name}' ({resolved.UUID}).");
                     linkTargets.Add(resolved);
+                }
+                else
+                {
+                    Console.WriteLine($"[appearance] failed to resolve link for item '{link.Name}' ({link.UUID}).");
                 }
             }
 
@@ -568,6 +589,8 @@ internal sealed partial class BotSession
             foreach (var target in linkTargets)
             {
                 token.ThrowIfCancellationRequested();
+
+                Console.WriteLine($"[appearance] creating link for item '{target.Name}' ({target.UUID}) in folder '{destinationFolderId}'.");
 
                 var createdLink = await client.Inventory.CreateLinkAsync(
                     destinationFolderId,
@@ -640,7 +663,7 @@ internal sealed partial class BotSession
                     $"Inventory item {resolved.UUID} ('{resolved.Name}') is not a wearable (assetType={resolved.AssetType}, inventoryType={resolved.InventoryType}).");
             }
 
-            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            var cof = GetSharedCurrentOutfitFolder(client);
             await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
             await cof.RemoveFromOutfitAsync(wearable, token).ConfigureAwait(false);
 
@@ -662,7 +685,7 @@ internal sealed partial class BotSession
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
-            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            var cof = GetSharedCurrentOutfitFolder(client);
             var wornOfType = await cof.GetWornAtAsync(parsedType, token).ConfigureAwait(false);
             if (wornOfType.Count == 0)
             {
@@ -913,7 +936,7 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<List<OutfitCategoryResolutionInfo>> BuildOutfitCategoryResolutionsAsync(
+    private async Task<List<OutfitCategoryResolutionInfo>> BuildOutfitCategoryResolutionsAsync(
         GridClient client,
         IReadOnlyList<InventoryItem> incomingItems,
         bool replaceItems,
@@ -970,7 +993,7 @@ internal sealed partial class BotSession
         map[key] = 1;
     }
 
-    private static async Task<Dictionary<UUID, AttachmentPoint>> CollectAttachmentPointMappingsAsync(
+    private async Task<Dictionary<UUID, AttachmentPoint>> CollectAttachmentPointMappingsAsync(
         GridClient client,
         CancellationToken cancellationToken)
     {
@@ -1005,7 +1028,7 @@ internal sealed partial class BotSession
             }
         }
 
-        using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+        var cof = GetSharedCurrentOutfitFolder(client);
         var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
         foreach (var link in links)
         {
@@ -4705,7 +4728,7 @@ internal sealed partial class BotSession
             // Best effort COF persistence so subsequent sessions still discover the link.
             try
             {
-                using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+                var cof = GetSharedCurrentOutfitFolder(client);
                 await cof.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
                 await cof.AddToOutfitAsync(wearable, replace: replaceExistingSlot, cancellationToken: token).ConfigureAwait(false);
             }
@@ -4848,7 +4871,7 @@ internal sealed partial class BotSession
         return Result(true, setupFolder, provisioningFolder, wearableItems, attachmentItems, null);
     }
 
-    private static async Task<List<WearableInfo>> CollectWornWearablesAsync(
+    private async Task<List<WearableInfo>> CollectWornWearablesAsync(
         GridClient client,
         CancellationToken cancellationToken)
     {
@@ -4886,7 +4909,7 @@ internal sealed partial class BotSession
         {
             // Merge COF links when available, but do not fail worn-state collection if
             // FetchInventory2/CAPS is unstable.
-            using var cof = new LibreMetaverse.Appearance.CurrentOutfitFolder(client);
+            var cof = GetSharedCurrentOutfitFolder(client);
             var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
             foreach (var link in links)
             {
