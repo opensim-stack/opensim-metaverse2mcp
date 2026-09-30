@@ -16,19 +16,14 @@ internal sealed partial class BotSession
 
         var from = e.IM.FromAgentName;
         var text = e.IM.Message?.Trim() ?? string.Empty;
-        var isDialogBridgeReplyPayload = text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase);
-        var isDialogBridgeAckPayload = text.StartsWith(LslDialogBridgeAckPrefix + "|", StringComparison.OrdinalIgnoreCase);
-        var isDialogBridgePayload = isDialogBridgeReplyPayload || isDialogBridgeAckPayload;
         if (e.IM.FromAgentID == client.Self.AgentID
-            && e.IM.Dialog != InstantMessageDialog.MessageFromObject
-            && !isDialogBridgePayload)
+            && e.IM.Dialog != InstantMessageDialog.MessageFromObject)
         {
             return;
         }
         if (e.IM.Dialog != InstantMessageDialog.MessageFromAgent
             && e.IM.Dialog != InstantMessageDialog.SessionSend
-            && e.IM.Dialog != InstantMessageDialog.MessageFromObject
-            && !isDialogBridgePayload)
+            && e.IM.Dialog != InstantMessageDialog.MessageFromObject)
         {
             // Diagnostic visibility for viewer/system IM dialogs (including voice-call control signals).
             Console.WriteLine($"[im][diag] ignored dialog={e.IM.Dialog} group={e.IM.GroupIM} session={e.IM.IMSessionID} from={from} to={e.IM.ToAgentID} text={SanitizeImLogText(text)}");
@@ -43,19 +38,13 @@ internal sealed partial class BotSession
             return;
         }
 
-        if (e.IM.Dialog == InstantMessageDialog.MessageFromObject || isDialogBridgePayload)
+        if (e.IM.Dialog == InstantMessageDialog.MessageFromObject)
         {
             if (e.IM.Dialog == InstantMessageDialog.MessageFromObject
-                && !isDialogBridgePayload
                 && TryHandleRlvInstantMessage(e.IM.FromAgentID, e.IM.FromAgentName, text))
             {
                 return;
             }
-
-            _ = Task.Run(async () =>
-            {
-                await TryHandleLslDialogBridgeReplyAsync(client, e.IM.FromAgentID, e.IM.FromAgentName, text).ConfigureAwait(false);
-            });
             return;
         }
 
@@ -559,30 +548,6 @@ internal sealed partial class BotSession
         return false;
     }
 
-    private bool IsDuplicateDialogBridgeReply(string conversationKey, string requestId, string answer)
-    {
-        var now = DateTimeOffset.UtcNow;
-        var key = $"{conversationKey}:{requestId}:{answer}";
-        var duplicateWindow = TimeSpan.FromSeconds(10);
-
-        if (_recentDialogBridgeReplies.TryGetValue(key, out var seenAt) && now - seenAt <= duplicateWindow)
-        {
-            return true;
-        }
-
-        _recentDialogBridgeReplies[key] = now;
-
-        foreach (var entry in _recentDialogBridgeReplies)
-        {
-            if (now - entry.Value > TimeSpan.FromMinutes(5))
-            {
-                _recentDialogBridgeReplies.TryRemove(entry.Key, out _);
-            }
-        }
-
-        return false;
-    }
-
     private void OnChatFromSimulator(object? sender, ChatEventArgs e)
     {
         var client = _client;
@@ -592,18 +557,6 @@ internal sealed partial class BotSession
         }
 
         var text = e.Message?.Trim() ?? string.Empty;
-        var isDialogBridgeChatReply = text.StartsWith(LslDialogBridgeReplyPrefix + "|", StringComparison.OrdinalIgnoreCase);
-        var isDialogBridgeChatAck = text.StartsWith(LslDialogBridgeAckPrefix + "|", StringComparison.OrdinalIgnoreCase);
-        if (isDialogBridgeChatReply || isDialogBridgeChatAck)
-        {
-            Console.WriteLine($"[chat] ({e.SourceType}/{e.Type}) {e.FromName}: {SanitizeImLogText(text)}");
-            _ = Task.Run(async () =>
-            {
-                await TryHandleLslDialogBridgeReplyAsync(client, e.SourceID, e.FromName, text).ConfigureAwait(false);
-            });
-            return;
-        }
-
         if (string.IsNullOrWhiteSpace(text)
             || e.SourceType != ChatSourceType.Agent
             || e.SourceID == UUID.Zero)

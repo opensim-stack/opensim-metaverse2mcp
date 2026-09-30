@@ -174,7 +174,6 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, PendingScriptDialog> _latestScriptDialogByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PendingDialogPromptWait> _pendingDialogPromptWaitByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PendingTextPromptReply> _pendingTextPromptReplyByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _recentDialogBridgeReplies = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
@@ -186,10 +185,8 @@ internal sealed partial class BotSession : IDisposable
     private readonly string? _parentFullName;
     private readonly object _promptStateLock = new();
     private readonly object _recentImSpeakerLock = new();
-    private readonly object _dialogBridgeTrustLock = new();
     private readonly object _handlerConfigLock = new();
     private readonly object _typingStateLock = new();
-    private readonly object _dialogBridgeAutoProvisionLock = new();
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private readonly CancellationTokenSource _lifecycleCts = new();
     private readonly BotTaskManager _botTaskManager;
@@ -211,20 +208,10 @@ internal sealed partial class BotSession : IDisposable
     private string? _activeAgentsNotecardSourceName;
     private string? _activeAgentsNotecardItemId;
     private DateTimeOffset? _activeAgentsNotecardInstalledAt;
-    private string? _bridgeAgentsPrompt;
-    private string? _bridgeAgentsPromptSourceName;
-    private string? _bridgeAgentsPromptItemId;
-    private UUID _bridgeAgentsPromptObjectId = UUID.Zero;
-    private DateTimeOffset? _bridgeAgentsPromptInstalledAt;
-    private UUID _bridgeAgentsProbeObjectId = UUID.Zero;
-    private bool _bridgeAgentsProbeInFlight;
     private UUID _lastImSpeakerAgentId = UUID.Zero;
     private string? _lastImSpeakerName;
     private string? _lastImConversationKey;
     private long _scriptDialogSequence;
-    private UUID _trustedDialogBridgeObjectId = UUID.Zero;
-    private UUID _trustedDialogBridgeOwnerId = UUID.Zero;
-    private bool _lslDialogBridgeRequireTrustedSender = true;
     private readonly ConcurrentDictionary<string, byte> __busyHarnessSessions = new(StringComparer.OrdinalIgnoreCase);
     private string? _restoredHarnessSessionId;
     private HashSet<string> _handlerNames = new(StringComparer.OrdinalIgnoreCase);
@@ -237,8 +224,6 @@ internal sealed partial class BotSession : IDisposable
     private bool _typingIndicatorActive;
     private DateTimeOffset _lastHoverBusyUpdateAt = DateTimeOffset.MinValue;
     private int _busyHoverDots;
-    private int _dialogBridgeAutoProvisionInFlight;
-    private DateTimeOffset _lastDialogBridgeAutoProvisionAttemptAt = DateTimeOffset.MinValue;
     private const string LocalChatConversationKey = "local-chat";
     private const int TypingPulseMinimumIntervalMs = 2000;
     private const int TypingStopDelayMs = 2500;
@@ -448,8 +433,6 @@ internal sealed partial class BotSession : IDisposable
                 });
             await EnsureVoiceBackendOnLoginAsync(client, cancellationToken).ConfigureAwait(false);
 
-            // Load persisted trust pins after login so {bot_uuid} path templates resolve per avatar.
-            TryLoadDialogBridgeTrustStateFromFile();
             TryLoadOpencodeSessionStateFromFile();
 
             await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
@@ -1308,13 +1291,11 @@ internal sealed partial class BotSession : IDisposable
         {
             try
             {
-                client.Self.Chat(string.Empty, 0, ChatType.StartTyping);
-                client.Self.AnimationStart(Animations.TYPE, false);
-                SendImTypingState(client, isTyping: true, sessionIdHint);
+                client.Self.Chat("[typing] start", 0, ChatType.Normal);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[typing] failed to emit StartTyping: {ex.Message}");
+                Console.WriteLine($"[typing] failed to broadcast start marker: {ex.Message}");
             }
         }
 
@@ -1361,69 +1342,11 @@ internal sealed partial class BotSession : IDisposable
 
         try
         {
-            client.Self.Chat(string.Empty, 0, ChatType.StopTyping);
-            client.Self.AnimationStop(Animations.TYPE, false);
-            SendImTypingState(client, isTyping: false, sessionIdHint: null);
+            client.Self.Chat("[typing] stop", 0, ChatType.Normal);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[typing] failed to emit StopTyping: {ex.Message}");
-        }
-    }
-
-    private void SendImTypingState(GridClient client, bool isTyping, string? sessionIdHint)
-    {
-        var dialog = isTyping ? InstantMessageDialog.StartTyping : InstantMessageDialog.StopTyping;
-        var targets = new HashSet<UUID>();
-
-        if (_harnessClient != null && !string.IsNullOrWhiteSpace(sessionIdHint))
-        {
-            foreach (var pair in _conversationAgentByKey)
-            {
-                if (pair.Value == UUID.Zero)
-                {
-                    continue;
-                }
-
-                var mappedSessionId = _harnessClient.GetConversationSessionId(pair.Key);
-                if (!string.IsNullOrWhiteSpace(mappedSessionId)
-                    && mappedSessionId.Equals(sessionIdHint, StringComparison.OrdinalIgnoreCase))
-                {
-                    targets.Add(pair.Value);
-                }
-            }
-        }
-
-        if (targets.Count == 0)
-        {
-            lock (_recentImSpeakerLock)
-            {
-                if (_lastImSpeakerAgentId != UUID.Zero)
-                {
-                    targets.Add(_lastImSpeakerAgentId);
-                }
-            }
-        }
-
-        foreach (var target in targets)
-        {
-            try
-            {
-                client.Self.InstantMessage(
-                    client.Self.Name,
-                    target,
-                    string.Empty,
-                    UUID.Zero,
-                    dialog,
-                    InstantMessageOnline.Online,
-                    Vector3.Zero,
-                    UUID.Zero,
-                    Array.Empty<byte>());
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[typing] failed to emit {(isTyping ? "StartTyping" : "StopTyping")} IM state: {ex.Message}");
-            }
+            Console.WriteLine($"[typing] failed to broadcast stop marker: {ex.Message}");
         }
     }
 
@@ -1659,14 +1582,6 @@ internal sealed partial class BotSession : IDisposable
         return visited.ToList();
     }
 
-    private bool IsDialogBridgePinned()
-    {
-        lock (_dialogBridgeTrustLock)
-        {
-            return _trustedDialogBridgeObjectId != UUID.Zero;
-        }
-    }
-
     private Task OfferPermissionPromptWithFallbackAsync(
         GridClient client,
         UUID agentId,
@@ -1687,21 +1602,6 @@ internal sealed partial class BotSession : IDisposable
 
         MarkPendingPromptActive(conversationKey, permission.Id);
         _latestPendingPermissionByConversation[conversationKey] = permission.Id;
-        if (!IsDialogBridgePinned())
-        {
-            Console.WriteLine($"[dialog-bridge] permission fallback to text: bridge not pinned. conversation={conversationKey} permission={permission.Id}");
-            ActivateTextPromptFallback(client, conversationKey, agentId, from, PendingPromptKind.Permission, sessionId, permission.Id, permission: permission);
-            return Task.CompletedTask;
-        }
-
-        if (TryOfferPermissionViaLslDialogBridge(client, conversationKey, permission))
-        {
-            _announcedPendingPermissionByConversation[conversationKey] = permission.Id;
-            ArmDialogPromptTimeout(client, conversationKey, agentId, from, PendingPromptKind.Permission, sessionId, permission.Id, permission: permission);
-            return Task.CompletedTask;
-        }
-
-        Console.WriteLine($"[dialog-bridge] permission fallback to text: offer failed. conversation={conversationKey} permission={permission.Id}");
         ActivateTextPromptFallback(client, conversationKey, agentId, from, PendingPromptKind.Permission, sessionId, permission.Id, permission: permission);
         return Task.CompletedTask;
     }
@@ -1726,69 +1626,8 @@ internal sealed partial class BotSession : IDisposable
 
         MarkPendingPromptActive(conversationKey, question.Id);
         _latestPendingQuestionByConversation[conversationKey] = question.Id;
-        if (!IsDialogBridgePinned())
-        {
-            Console.WriteLine($"[dialog-bridge] question fallback to text: bridge not pinned. conversation={conversationKey} question={question.Id}");
-            ActivateTextPromptFallback(client, conversationKey, agentId, from, PendingPromptKind.Question, sessionId, question.Id, question: question);
-            return Task.CompletedTask;
-        }
-
-        if (TryOfferQuestionViaLslDialogBridge(client, conversationKey, question))
-        {
-            _announcedPendingQuestionByConversation[conversationKey] = question.Id;
-            ArmDialogPromptTimeout(client, conversationKey, agentId, from, PendingPromptKind.Question, sessionId, question.Id, question: question);
-            return Task.CompletedTask;
-        }
-
-        Console.WriteLine($"[dialog-bridge] question fallback to text: offer failed. conversation={conversationKey} question={question.Id}");
         ActivateTextPromptFallback(client, conversationKey, agentId, from, PendingPromptKind.Question, sessionId, question.Id, question: question);
         return Task.CompletedTask;
-    }
-
-    private void ArmDialogPromptTimeout(
-        GridClient client,
-        string conversationKey,
-        UUID agentId,
-        string from,
-        PendingPromptKind kind,
-        string sessionId,
-        string requestId,
-        HarnessPendingPermission? permission = null,
-        HarnessPendingQuestion? question = null)
-    {
-        ClearPendingPromptWait(conversationKey);
-        _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-
-        var timeoutCts = new CancellationTokenSource();
-        var wait = new PendingDialogPromptWait(kind, sessionId, requestId, agentId, from, permission, question, timeoutCts);
-        _pendingDialogPromptWaitByConversation[conversationKey] = wait;
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(_options.BridgePromptResponseTimeoutSeconds), timeoutCts.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-
-            if (!_pendingDialogPromptWaitByConversation.TryGetValue(conversationKey, out var currentWait)
-                || !ReferenceEquals(currentWait, wait))
-            {
-                return;
-            }
-
-            if (!await IsPromptStillPendingAsync(wait, conversationKey).ConfigureAwait(false))
-            {
-                ClearPendingPromptWait(conversationKey);
-                return;
-            }
-
-            Console.WriteLine($"[dialog-bridge] prompt fallback to text: timeout after {_options.BridgePromptResponseTimeoutSeconds}s conversation={conversationKey} request={requestId}");
-            ActivateTextPromptFallback(client, conversationKey, wait.AgentId, wait.From, wait.Kind, wait.SessionId, wait.RequestId, wait.Permission, wait.Question);
-        });
     }
 
     private void ClearPendingPromptWait(string conversationKey)
@@ -2310,17 +2149,11 @@ internal sealed partial class BotSession : IDisposable
             {
                 var client = _client;
                 if (client == null) {
-                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: no client! autoProvisionEnabled={_options.BridgeAutoProvisionOnRegionEnter}");
+                Console.WriteLine("[sim-change] OnNetworkSimChanged: no client.");
                     return;
                 }
 
-                // Diagnostic: report auto-provision option and current trusted pin state so we can
-                // understand why automatic install may be skipped.
-                Console.WriteLine($"[dialog-bridge] OnNetworkSimChanged: autoProvisionEnabled={_options.BridgeAutoProvisionOnRegionEnter}");
-                lock (_dialogBridgeTrustLock)
-                {
-                    Console.WriteLine($"[dialog-bridge] current trusted bridge pin: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId}");
-                }
+                Console.WriteLine("[sim-change] OnNetworkSimChanged: processing region transition.");
 
                 // opensim-ai-docker#7: region transitions are the known trigger for
                 // server-side visual-param pollution; schedule the (guarded,
@@ -2328,12 +2161,7 @@ internal sealed partial class BotSession : IDisposable
                 // network event loop.
                 RunAppearancePostSimChangeCheck();
 
-                // Wait until the client appears fully initialized before attempting any automatic
-                // provisioning. In containerized/docker startup scenarios the GridClient may have
-                // connected at the UDP level but higher-level subsystems (inventory store, agent
-                // identity, appearance) may still be initializing. Attempt a brief readiness wait
-                // (total ~12s) and then allow a short extra delay for simulator object updates to
-                // arrive in the local cache.
+                // Wait for core client subsystems to settle before running post-transition actions.
                 var ready = false;
                 var readinessDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(12);
                 while (DateTime.UtcNow < readinessDeadline)
@@ -2356,186 +2184,15 @@ internal sealed partial class BotSession : IDisposable
 
                 if (!ready)
                 {
-                    Console.WriteLine("[dialog-bridge] OnNetworkSimChanged: client not fully initialized yet; postponing auto-provision until next sim change.");
+                    Console.WriteLine("[sim-change] client not fully initialized yet; postponing follow-up work until next sim change.");
                     return;
                 }
                 
                 client.Self.Movement.SetFOVVerticalAngle(Utils.TWO_PI - 0.05f);
-
-                // // Allow some time for the simulator to populate object updates in the client's
-                // // local cache after we've become ready.
-                // await Task.Delay(1500).ConfigureAwait(false);
-
-                // var sim = client.Network.CurrentSim;
-                // if (sim == null) return;
-
-                // Console.WriteLine($"[dialog-bridge] current sim: name={sim.Name} handle={sim.Handle} primitives={sim.ObjectsPrimitives?.Count ?? 0}");
-
-                // // If we already have a pinned bridge object in this sim, probe its AGENTS.md now
-                // // so prompt status reflects bridge-source state even before any dialog reply arrives.
-                // if (TryGetPinnedBridgeObjectInCurrentSim(out var pinnedBridgeObjectId, out _))
-                // {
-                //     QueueBridgeAgentsPromptProbe(pinnedBridgeObjectId, "trusted bridge object");
-                //     Console.WriteLine("[dialog-bridge] pinned bridge object present in new region; no auto-provision needed.");
-                //     return;
-                // }
-
-                // var botItems = await ResolveSetupProvisioningItemsAsync(client, _options.WearFolderName, CancellationToken.None).ConfigureAwait(false);
-                // if (botItems.Ok)
-                // {
-                //     var appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
-                //     var allAttachmentsWorn = false;
-                //     var allWearablesWorn = false;
-                //     if (appearance.Ok)
-                //     {
-                //         var wornAttachmentIds = appearance.Attachments
-                //             .Select(a => a.ItemId)
-                //             .Where(id => !string.IsNullOrWhiteSpace(id))
-                //             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                            
-                //             /*
-                //         var wornWearableIds = appearance.Wearables
-                //             .Select(w => w.ItemId)
-                //             .Where(id => !string.IsNullOrWhiteSpace(id))
-                //             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                //              */
-
-                //         allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
-                //         //allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
-                //         //var provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
-                //         var provisionedStateSatisfied = allAttachmentsWorn;
-                //         //if (!allWearablesWorn)
-                //         //{
-                //           //  LogWearableProvisioningMatches("sim-change initial verification", botItems.WearableItems, wornWearableIds);
-                //         //}
-
-                //         // Appearance snapshots can briefly lag right after login/sim change.
-                //         // Re-check a few times before deciding setup items are missing.
-                        
-                //         /*
-                //         for (var verifyAttempt = 1; verifyAttempt <= 3 && !provisionedStateSatisfied; verifyAttempt++)
-                //         {
-                //             await Task.Delay(5000).ConfigureAwait(false);
-                //             appearance = await AppearanceListWornAsync(CancellationToken.None).ConfigureAwait(false);
-                //             if (!appearance.Ok)
-                //             {
-                //                 break;
-                //             }
-
-                //             wornAttachmentIds = appearance.Attachments
-                //                 .Select(a => a.ItemId)
-                //                 .Where(id => !string.IsNullOrWhiteSpace(id))
-                //                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                //             wornWearableIds = appearance.Wearables
-                //                 .Select(w => w.ItemId)
-                //                 .Where(id => !string.IsNullOrWhiteSpace(id))
-                //                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                //             allAttachmentsWorn = botItems.AttachmentItems.All(item => wornAttachmentIds.Contains(item.UUID.ToString()));
-                //             allWearablesWorn = botItems.WearableItems.All(item => IsWearableItemPresent(item, wornWearableIds));
-                //             provisionedStateSatisfied = allAttachmentsWorn && allWearablesWorn;
-                //             if (!allWearablesWorn)
-                //             {
-                //                 LogWearableProvisioningMatches($"sim-change verification attempt {verifyAttempt}/3", botItems.WearableItems, wornWearableIds);
-                //             }
-                //         }
-                //          */
-
-                //         if (provisionedStateSatisfied)
-                //         {
-                //             InventoryItem? anyPinnedAttachment = null;
-                //             UUID attachedObjectId = UUID.Zero;
-                //             uint attachedLocalId = 0;
-                //             foreach (var attachmentItem in botItems.AttachmentItems)
-                //             {
-                //                 if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out attachedObjectId, out attachedLocalId))
-                //                 {
-                //                     anyPinnedAttachment = attachmentItem;
-                //                     break;
-                //                 }
-                //             }
-
-                //             if (attachedObjectId != UUID.Zero)
-                //             {
-                //                 lock (_dialogBridgeTrustLock)
-                //                 {
-                //                     _trustedDialogBridgeObjectId = attachedObjectId;
-                //                     _trustedDialogBridgeOwnerId = client.Self.AgentID;
-                //                 }
-                //                 TrySaveDialogBridgeTrustStateToFile();
-                //                 QueueBridgeAgentsPromptProbe(attachedObjectId, "worn setup attachment");
-                //                 Console.WriteLine($"[dialog-bridge] setup attachment already worn; refreshed trusted pin from attachment '{anyPinnedAttachment?.Name}' object={attachedObjectId} localId={attachedLocalId}.");
-                //             }
-                //             else
-                //             {
-                //                 Console.WriteLine("[dialog-bridge] setup attachment already worn; trusted pin refresh is waiting for simulator cache visibility.");
-                //             }
-
-                //             if (!allWearablesWorn)
-                //             {
-                //                 Console.WriteLine("[dialog-bridge] provisioning attachment is already worn; wearable verification still reports pending items.");
-                //             }
-
-                //             return;
-                //         }
-
-                //         Console.WriteLine("[dialog-bridge] setup inventory was found but not all setup wearables/attachments are currently worn.");
-                //     }
-                //     else
-                //     {
-                //         Console.WriteLine($"[dialog-bridge] could not verify current setup worn state: {appearance.Message}");
-                //     }
-                // }
-                // else
-                // {
-                //     Console.WriteLine($"[dialog-bridge] setup inventory lookup failed: {botItems.Error}");
-                // }
-
-                // if (!_options.BridgeAutoProvisionOnRegionEnter)
-                // {
-                //     Console.WriteLine("[dialog-bridge] bridge missing in new region but auto-provision is disabled.");
-                //     return;
-                // }
-
-                // if (Interlocked.CompareExchange(ref _dialogBridgeAutoProvisionInFlight, 1, 0) != 0)
-                // {
-                //     Console.WriteLine("[dialog-bridge] auto-provision already in progress; skipping duplicate trigger.");
-                //     return;
-                // }
-
-                // try
-                // {
-                //     var now = DateTimeOffset.UtcNow;
-                //     lock (_dialogBridgeAutoProvisionLock)
-                //     {
-                //         if ((now - _lastDialogBridgeAutoProvisionAttemptAt) < TimeSpan.FromSeconds(45))
-                //         {
-                //             Console.WriteLine("[dialog-bridge] auto-provision suppressed by cooldown.");
-                //             return;
-                //         }
-
-                //         _lastDialogBridgeAutoProvisionAttemptAt = now;
-                //     }
-
-                //     Console.WriteLine("[dialog-bridge] bridge missing in new region; attempting automatic install...");
-                //     var install = await DialogBridgeInstallAsync(CancellationToken.None).ConfigureAwait(false);
-                //     if (install.Ok)
-                //     {
-                //         Console.WriteLine($"[dialog-bridge] auto-installed bridge: {install.Message}");
-                //     }
-                //     else
-                //     {
-                //         Console.WriteLine($"[dialog-bridge] auto-install failed: {install.Message}");
-                //     }
-                // }
-                // finally
-                // {
-                //     Interlocked.Exchange(ref _dialogBridgeAutoProvisionInFlight, 0);
-                // }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[dialog-bridge] auto-provision error: {ex.Message}");
+                Console.WriteLine($"[sim-change] follow-up processing error: {ex.Message}");
             }
         });
     }

@@ -1,25 +1,13 @@
-using LibreMetaverse;
 using System.Text.Json;
+using LibreMetaverse;
 
 namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
-    private const string LslDialogBridgeRequestPrefix = "dlgreq";
-    private const string LslDialogBridgeTextRequestPrefix = "txtreq";
-    private const string LslDialogBridgeAckPrefix = "dlgack";
-    private const string LslDialogBridgeReplyPrefix = "dlgrep";
-    private const string LslDialogBridgePermissionRequestPrefix = "perm:";
-    private const string LslDialogBridgeMoodRequestPrefix = "moodreq";
-    // OpenSimulator tolerates larger chat payloads than strict SL-era assumptions.
-    // Keep this conservative enough to avoid most truncation while preserving prompt fidelity.
-    private const int LslDialogBridgeMaxPayloadLength = 255;
-    private const string LslDialogBridgeHoverRequestPrefix = "hovreq";
-    
     private readonly object _hoverStateLock = new();
     private const int HoverBusyUpdateMinimumIntervalMs = 600;
-    private const int LslDialogBridgeRequestChannel = -919191;
-    
+
     public async Task<BotToolResult> SetBotMoodAsync(string emotion, CancellationToken cancellationToken)
     {
         var normalizedEmotion = NormalizeMoodName(emotion);
@@ -30,105 +18,44 @@ internal sealed partial class BotSession
 
         return await ExecuteLockedAsync((client, _) =>
         {
-            UUID targetBridgeObjectId;
-            lock (_dialogBridgeTrustLock)
-            {
-                targetBridgeObjectId = _trustedDialogBridgeObjectId;
-            }
-
-            if (targetBridgeObjectId == UUID.Zero)
-            {
-                return Task.FromResult(BotToolResult.Fail("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply)."));
-            }
-
-            // Leave target object token empty so the currently running bridge script
-            // in the attachment processes the mood request even if persisted UUID pins are stale.
-            var payload = string.Join("|", new[]
-            {
-                LslDialogBridgeMoodRequestPrefix,
-                EncodeDialogToken(string.Empty),
-                EncodeDialogToken(normalizedEmotion)
-            });
-
-            client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-            Console.WriteLine($"[dialog-bridge] sent mood request: object={targetBridgeObjectId} emotion={normalizedEmotion}");
-            return Task.FromResult(BotToolResult.OkResult($"Requested bot mood '{normalizedEmotion}' via dialog bridge request channel {LslDialogBridgeRequestChannel}."));
+            var message = $"[mood] {normalizedEmotion}";
+            client.Self.Chat(message, 0, ChatType.Normal);
+            Console.WriteLine($"[mood] broadcast: {normalizedEmotion}");
+            return Task.FromResult(BotToolResult.OkResult($"Broadcast mood change on say channel: {message}"));
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<DataToolResult> BotMoodListAsync(bool includeUtilityTextures, CancellationToken cancellationToken)
+    public Task<DataToolResult> BotMoodListAsync(bool includeUtilityTextures, CancellationToken cancellationToken)
     {
-        return await ExecuteLockedAsync(async (client, token) =>
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var moodNames = new List<string>
         {
-            UUID targetBridgeObjectId;
-            lock (_dialogBridgeTrustLock)
-            {
-                targetBridgeObjectId = _trustedDialogBridgeObjectId;
-            }
+            "neutral",
+            "happy",
+            "sad",
+            "angry",
+            "surprised",
+            "confused",
+            "excited",
+            "tired"
+        };
 
-            if (targetBridgeObjectId == UUID.Zero)
-            {
-                return DataToolResult.FailResult("No trusted dialog bridge object is pinned yet. Establish bridge communication first (for example via a dialog reply).");
-            }
+        var utilityNames = new[] { "base", "cross" };
+        if (includeUtilityTextures)
+        {
+            moodNames.AddRange(utilityNames);
+        }
 
-            var sim = client.Network.CurrentSim;
-            if (sim == null)
-            {
-                return DataToolResult.FailResult("No current simulator available.");
-            }
+        var payload = JsonSerializer.Serialize(new
+        {
+            includeUtilityTextures,
+            moodCount = moodNames.Count,
+            utilityTextures = utilityNames,
+            moodNames
+        });
 
-            Primitive? bridgePrim = null;
-            foreach (var prim in sim.ObjectsPrimitives.Values)
-            {
-                if (prim.ID == targetBridgeObjectId)
-                {
-                    bridgePrim = prim;
-                    break;
-                }
-            }
-
-            if (bridgePrim == null)
-            {
-                return DataToolResult.FailResult($"Pinned dialog bridge object {targetBridgeObjectId} is not present in current simulator cache.");
-            }
-
-            var entries = await client.Inventory
-                .GetTaskInventoryAsync(targetBridgeObjectId, bridgePrim.LocalID, sim, token)
-                .ConfigureAwait(false);
-
-            var textureNames = entries
-                .OfType<InventoryItem>()
-                .Where(item => item.AssetType == AssetType.Texture)
-                .Select(item => item.Name?.Trim() ?? string.Empty)
-                .Where(name => !string.IsNullOrWhiteSpace(name))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            if (textureNames.Count == 0)
-            {
-                return DataToolResult.FailResult($"No texture assets were found in bridge object {targetBridgeObjectId} task inventory.");
-            }
-
-            var utilityNames = new[] { "base", "cross" };
-            var utilitySet = new HashSet<string>(utilityNames, StringComparer.OrdinalIgnoreCase);
-            var moodNames = textureNames
-                .Where(name => includeUtilityTextures || !utilitySet.Contains(name))
-                .ToList();
-
-            var payload = JsonSerializer.Serialize(new
-            {
-                bridgeObjectId = targetBridgeObjectId.ToString(),
-                includeUtilityTextures,
-                textureCount = textureNames.Count,
-                moodCount = moodNames.Count,
-                utilityTextures = utilityNames,
-                moodNames,
-                allTextureNames = textureNames
-            });
-
-            return DataToolResult.OkResult($"Found {moodNames.Count} mood texture name(s) on bridge object {targetBridgeObjectId}.", payload);
-        }, cancellationToken).ConfigureAwait(false);
+        return Task.FromResult(DataToolResult.OkResult($"Returned {moodNames.Count} available mood name(s).", payload));
     }
 
     private static string NormalizeMoodName(string? value)
@@ -152,33 +79,24 @@ internal sealed partial class BotSession
 
     private void UpdateBusyHoverText(bool incrementDots)
     {
-        var now = DateTimeOffset.UtcNow;
-        string hoverText;
         lock (_hoverStateLock)
         {
-            if (incrementDots && (now - _lastHoverBusyUpdateAt).TotalMilliseconds < HoverBusyUpdateMinimumIntervalMs)
-            {
-                return;
-            }
-
             if (incrementDots)
             {
-                _busyHoverDots++;
-                if (_busyHoverDots > 4)
+                var now = DateTimeOffset.UtcNow;
+                if ((now - _lastHoverBusyUpdateAt).TotalMilliseconds < HoverBusyUpdateMinimumIntervalMs)
                 {
-                    _busyHoverDots = 1;
+                    return;
                 }
+
+                _lastHoverBusyUpdateAt = now;
+                _busyHoverDots = (_busyHoverDots % 4) + 1;
             }
             else if (_busyHoverDots <= 0)
             {
                 _busyHoverDots = 1;
             }
-
-            _lastHoverBusyUpdateAt = now;
-            hoverText = "Thinking " + new string('.', _busyHoverDots);
         }
-
-        SendHoverBridgeCommand("set", hoverText);
     }
 
     private void ClearBusyHoverText()
@@ -188,669 +106,17 @@ internal sealed partial class BotSession
             _busyHoverDots = 0;
             _lastHoverBusyUpdateAt = DateTimeOffset.MinValue;
         }
-
-        SendHoverBridgeCommand("clear", string.Empty);
     }
 
-    private void SendHoverBridgeCommand(string mode, string text)
+    private UUID? ResolveCurrentBotUuid()
     {
         var client = _client;
-        if (!_connected || client == null)
+        if (client?.Self.AgentID is UUID liveAgentId && liveAgentId != UUID.Zero)
         {
-            return;
+            return liveAgentId;
         }
 
-        UUID pinnedObjectId;
-        lock (_dialogBridgeTrustLock)
-        {
-            pinnedObjectId = _trustedDialogBridgeObjectId;
-        }
-
-        var payload = string.Join("|", new[]
-        {
-            LslDialogBridgeHoverRequestPrefix,
-            EncodeDialogToken(pinnedObjectId == UUID.Zero ? string.Empty : pinnedObjectId.ToString()),
-            EncodeDialogToken(mode ?? string.Empty),
-            EncodeDialogToken(text ?? string.Empty)
-        });
-
-        try
-        {
-            client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[dialog-bridge] hover command failed: {ex.Message}");
-        }
-    }
-    
-    private bool TryOfferQuestionViaLslDialogBridge(GridClient client, string conversationKey, HarnessPendingQuestion question)
-    {
-        if (question.Options.Count == 0)
-        {
-            // Free-text prompt: use llTextBox through the bridge when custom answers are allowed.
-            if (question.AllowsCustom != false)
-            {
-                return TryOfferQuestionTextInputViaLslDialogBridge(client, conversationKey, question);
-            }
-
-            Console.WriteLine($"[dialog-bridge] skip offer: no options/custom input disabled for question {question.Id}.");
-            return false;
-        }
-
-        if (!_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
-            || targetAgentId == UUID.Zero)
-        {
-            Console.WriteLine($"[dialog-bridge] skip offer: no target agent mapped for conversation {conversationKey}.");
-            return false;
-        }
-
-        // Payload format:
-        // dlgreq|conversation|requestId|target|replyTarget|header|prompt|optionCount|opt1|opt2|...
-        var header = question.Header?.Trim() ?? string.Empty;
-        var prompt = BuildCompactQuestionDialogPrompt(question);
-        var payload = BuildLslDialogBridgeRequestPayloadWithinLimit(
-            conversationKey,
-            question.Id,
-            targetAgentId,
-            client.Self.AgentID,
-            header,
-            prompt,
-            question.Options,
-            out var wasCompacted);
-        if (wasCompacted)
-        {
-            Console.WriteLine($"[dialog-bridge] compacted question payload for {question.Id}: {payload.Length} chars.");
-        }
-
-        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-        if (payload.Length > LslDialogBridgeMaxPayloadLength)
-        {
-            Console.WriteLine($"[dialog-bridge] warning: payload length {payload.Length} may be truncated by simulator chat limits.");
-        }
-        Console.WriteLine(
-            $"[dialog-bridge] offered question via channel {LslDialogBridgeRequestChannel}: conversation={conversationKey} question={question.Id} options={question.Options.Count} target={targetAgentId} payloadLength={payload.Length}");
-        return true;
-    }
-
-    private bool TryOfferQuestionTextInputViaLslDialogBridge(GridClient client, string conversationKey, HarnessPendingQuestion question)
-    {
-        if (!_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
-            || targetAgentId == UUID.Zero)
-        {
-            Console.WriteLine($"[dialog-bridge] skip text offer: no target agent mapped for conversation {conversationKey}.");
-            return false;
-        }
-
-        var header = question.Header?.Trim() ?? string.Empty;
-        var prompt = BuildCompactQuestionDialogPrompt(question);
-        var payload = BuildLslDialogBridgeTextRequestPayload(
-            conversationKey,
-            question.Id,
-            targetAgentId,
-            client.Self.AgentID,
-            header,
-            prompt);
-
-        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-        if (payload.Length > LslDialogBridgeMaxPayloadLength)
-        {
-            Console.WriteLine($"[dialog-bridge] warning: text payload length {payload.Length} may be truncated by simulator chat limits.");
-        }
-
-        Console.WriteLine(
-            $"[dialog-bridge] offered question text input via channel {LslDialogBridgeRequestChannel}: conversation={conversationKey} question={question.Id} target={targetAgentId} payloadLength={payload.Length}");
-        return true;
-    }
-
-    private bool TryOfferPermissionViaLslDialogBridge(GridClient client, string conversationKey, HarnessPendingPermission permission)
-    {
-        var permissionId = permission.Id?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(permissionId))
-        {
-            Console.WriteLine("[dialog-bridge] skip offer: permission id is missing.");
-            return false;
-        }
-
-        if (!_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
-            || targetAgentId == UUID.Zero)
-        {
-            Console.WriteLine($"[dialog-bridge] skip offer: no target agent mapped for conversation {conversationKey}.");
-            return false;
-        }
-
-        var header = BuildPermissionDialogHeader(permission);
-        var prompt = BuildCompactPermissionDialogPrompt(permission);
-        // Tag permission request IDs so dialog replies can be routed deterministically.
-        var bridgeRequestId = LslDialogBridgePermissionRequestPrefix + permissionId;
-        var payload = BuildLslDialogBridgeRequestPayloadWithinLimit(
-            conversationKey,
-            bridgeRequestId,
-            targetAgentId,
-            client.Self.AgentID,
-            header,
-            prompt,
-            LslPermissionDialogOptions,
-            out var wasCompacted);
-        if (wasCompacted)
-        {
-            Console.WriteLine($"[dialog-bridge] compacted permission payload for {permissionId}: {payload.Length} chars.");
-        }
-
-        client.Self.Chat(payload, LslDialogBridgeRequestChannel, ChatType.Shout);
-        if (payload.Length > LslDialogBridgeMaxPayloadLength)
-        {
-            Console.WriteLine($"[dialog-bridge] warning: payload length {payload.Length} may be truncated by simulator chat limits.");
-        }
-
-        Console.WriteLine(
-            $"[dialog-bridge] offered permission via channel {LslDialogBridgeRequestChannel}: conversation={conversationKey} permission={permissionId} target={targetAgentId} payloadLength={payload.Length}");
-        return true;
-    }
-
-    private async Task<bool> TryHandleLslDialogBridgeReplyAsync(GridClient client, UUID senderObjectId, string senderName, string text)
-    {
-        if (TryParseLslDialogBridgeAck(text, out var ackConversationKey, out var ackRequestId, out var ackMode))
-        {
-            if (!IsTrustedDialogBridgeSender(client, senderObjectId, senderName, ackConversationKey))
-            {
-                return false;
-            }
-
-            Console.WriteLine($"[dialog-bridge] ui ack: conversation={ackConversationKey} request={ackRequestId} mode={ackMode} sender={senderObjectId}");
-            return true;
-        }
-
-        if (!TryParseLslDialogBridgeReply(text, out var conversationKey, out var requestId, out var answer))
-        {
-            Console.WriteLine("[dialog-bridge] ignored object IM: not a dialog-bridge reply payload.");
-            return false;
-        }
-
-        if (!IsTrustedDialogBridgeSender(client, senderObjectId, senderName, conversationKey))
-        {
-            return false;
-        }
-
-        QueueBridgeAgentsPromptProbe(senderObjectId, senderName);
-
-        if (IsDuplicateDialogBridgeReply(conversationKey, requestId, answer))
-        {
-            Console.WriteLine($"[dialog-bridge] duplicate reply suppressed: conversation={conversationKey} request={requestId} answer={answer}");
-            return true;
-        }
-
-        Console.WriteLine($"[dialog-bridge] received reply payload: conversation={conversationKey} request={requestId} answer={answer}");
-
-        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
-        {
-            Console.WriteLine("[dialog-bridge] dropped reply: opencode chat unavailable or payload missing conversation/request id.");
-            return false;
-        }
-
-        var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
-        if (string.IsNullOrWhiteSpace(sessionId))
-        {
-            Console.WriteLine($"[dialog-bridge] dropped reply: no active opencode session for conversation {conversationKey}.");
-            return false;
-        }
-
-        if (await TryHandleLslDialogBridgePermissionReplyAsync(client, conversationKey, sessionId, requestId, answer).ConfigureAwait(false))
-        {
-            ClearPendingPromptWait(conversationKey);
-            _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-            return true;
-        }
-
-        var resolvedAnswer = await ResolveLslDialogBridgeAnswerAsync(sessionId, requestId, answer).ConfigureAwait(false);
-        var ok = await _harnessClient.ReplyToQuestionAsync(sessionId, requestId, new[] { resolvedAnswer }, CancellationToken.None).ConfigureAwait(false);
-        Console.WriteLine($"[dialog-bridge] forwarded reply to opencode: session={sessionId} question={requestId} success={ok} answer={resolvedAnswer}");
-        _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
-        _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
-        ClearPendingPromptActive(conversationKey, requestId);
-        ClearPendingPromptWait(conversationKey);
-        _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-
-        if (_conversationAgentByKey.TryGetValue(conversationKey, out var agentId)
-            && agentId != UUID.Zero)
-        {
-            var from = _conversationNameByKey.TryGetValue(conversationKey, out var displayName)
-                ? displayName
-                : "handler";
-
-            if (!ok)
-            {
-                SendImText(client, agentId, from,
-                    "I sent your dialog choice, but Opencode did not return an explicit success flag.");
-            }
-        }
-
-        if (ok && _conversationAgentByKey.TryGetValue(conversationKey, out var nextAgentId)
-            && nextAgentId != UUID.Zero)
-        {
-            var nextFrom = _conversationNameByKey.TryGetValue(conversationKey, out var nextDisplayName)
-                ? nextDisplayName
-                : "handler";
-            ScheduleDrainPendingPrompts(client, nextAgentId, nextFrom, conversationKey);
-        }
-
-        return true;
-    }
-
-    private bool IsTrustedDialogBridgeSender(GridClient client, UUID senderObjectId, string senderName, string conversationKey)
-    {
-        if (senderObjectId == UUID.Zero)
-        {
-            Console.WriteLine("[dialog-bridge] dropped reply: sender object UUID missing.");
-            return false;
-        }
-
-        UUID pinnedObjectId;
-        UUID pinnedOwnerId;
-        bool requireTrustedSender;
-        lock (_dialogBridgeTrustLock)
-        {
-            pinnedObjectId = _trustedDialogBridgeObjectId;
-            pinnedOwnerId = _trustedDialogBridgeOwnerId;
-            requireTrustedSender = _lslDialogBridgeRequireTrustedSender;
-        }
-
-        var ownerResolved = TryGetObjectOwnerIdFromCache(client, senderObjectId, out var senderOwnerId);
-        var objectMatchesPin = pinnedObjectId != UUID.Zero && senderObjectId == pinnedObjectId;
-        if (pinnedObjectId != UUID.Zero && senderObjectId != pinnedObjectId)
-        {
-            // Some OpenSim builds report bot-owned object IMs with the bot AgentID as
-            // senderObjectId instead of the attachment object UUID.
-            if (senderObjectId == client.Self.AgentID && pinnedOwnerId == client.Self.AgentID)
-            {
-                Console.WriteLine($"[dialog-bridge] warning: sender UUID resolved as bot agent ({senderObjectId}) instead of pinned object ({pinnedObjectId}); accepting by trusted owner pin.");
-                return true;
-            }
-
-            Console.WriteLine($"[dialog-bridge] dropped reply: untrusted object {senderObjectId} (expected {pinnedObjectId}) sender='{senderName}'.");
-            return false;
-        }
-
-        if (pinnedOwnerId != UUID.Zero)
-        {
-            if (!ownerResolved)
-            {
-                if (objectMatchesPin)
-                {
-                    Console.WriteLine($"[dialog-bridge] warning: owner not resolved for pinned object {senderObjectId}; accepting due to object pin match.");
-                }
-                else
-                {
-                    Console.WriteLine($"[dialog-bridge] dropped reply: owner not resolved for object {senderObjectId} while trusted owner pin is enabled ({pinnedOwnerId}).");
-                    return false;
-                }
-            }
-            else if (senderOwnerId != pinnedOwnerId)
-            {
-                if (objectMatchesPin)
-                {
-                    Console.WriteLine($"[dialog-bridge] warning: owner mismatch for pinned object {senderObjectId}. got={senderOwnerId} expected={pinnedOwnerId}; accepting due to object pin match.");
-                }
-                else
-                {
-                    Console.WriteLine($"[dialog-bridge] dropped reply: owner mismatch for object {senderObjectId}. got={senderOwnerId} expected={pinnedOwnerId}");
-                    return false;
-                }
-            }
-        }
-
-        if (!requireTrustedSender)
-        {
-            return true;
-        }
-
-        if (pinnedObjectId == UUID.Zero)
-        {
-            var shouldPersistTrustState = false;
-            lock (_dialogBridgeTrustLock)
-            {
-                if (_trustedDialogBridgeObjectId == UUID.Zero)
-                {
-                    _trustedDialogBridgeObjectId = senderObjectId;
-                    if (_trustedDialogBridgeOwnerId == UUID.Zero && ownerResolved)
-                    {
-                        _trustedDialogBridgeOwnerId = senderOwnerId;
-                    }
-
-                    Console.WriteLine($"[dialog-bridge] pinned trusted bridge sender from first valid reply: object={_trustedDialogBridgeObjectId} owner={_trustedDialogBridgeOwnerId} conversation={conversationKey}");
-                    shouldPersistTrustState = true;
-                }
-                else if (_trustedDialogBridgeObjectId != senderObjectId)
-                {
-                    Console.WriteLine($"[dialog-bridge] dropped reply: sender object changed during pinning race. got={senderObjectId} pinned={_trustedDialogBridgeObjectId}");
-                    return false;
-                }
-            }
-
-            if (shouldPersistTrustState)
-            {
-                TrySaveDialogBridgeTrustStateToFile();
-            }
-        }
-
-        return true;
-    }
-
-    private static bool TryGetObjectOwnerIdFromCache(GridClient client, UUID objectId, out UUID ownerId)
-    {
-        ownerId = UUID.Zero;
-        var sim = client.Network.CurrentSim;
-        if (sim == null)
-        {
-            return false;
-        }
-
-        foreach (var prim in sim.ObjectsPrimitives.Values)
-        {
-            if (prim.ID != objectId)
-            {
-                continue;
-            }
-
-            if (prim.Properties?.OwnerID is UUID resolvedOwner && resolvedOwner != UUID.Zero)
-            {
-                ownerId = resolvedOwner;
-                return true;
-            }
-
-            return false;
-        }
-
-        return false;
-    }
-
-    private async Task<bool> TryHandleLslDialogBridgePermissionReplyAsync(
-        GridClient client,
-        string conversationKey,
-        string sessionId,
-        string requestId,
-        string answer)
-    {
-        var permissionId = requestId.Trim();
-        var taggedPermissionRequest = false;
-        if (permissionId.StartsWith(LslDialogBridgePermissionRequestPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            taggedPermissionRequest = true;
-            permissionId = permissionId[LslDialogBridgePermissionRequestPrefix.Length..].Trim();
-        }
-
-        var isPermissionId = IsCanonicalPermissionRequestId(permissionId);
-        if (!isPermissionId)
-        {
-            var pending = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-            var match = pending.FirstOrDefault(p => p.Id.Equals(permissionId, StringComparison.OrdinalIgnoreCase));
-            if (match == null)
-            {
-                if (!taggedPermissionRequest)
-                {
-                    return false;
-                }
-
-                match = pending.FirstOrDefault();
-                if (match == null)
-                {
-                    Console.WriteLine($"[dialog-bridge] tagged permission reply could not resolve pending permission for session={sessionId} request={requestId}");
-                    return false;
-                }
-            }
-
-            permissionId = match.Id;
-        }
-
-        if (!TryParseSimplePermissionResponse(answer, out var response, out var remember))
-        {
-            Console.WriteLine($"[dialog-bridge] permission reply not understood for {permissionId}: '{answer}'");
-            if (_conversationAgentByKey.TryGetValue(conversationKey, out var agentId) && agentId != UUID.Zero)
-            {
-                var from = _conversationNameByKey.TryGetValue(conversationKey, out var displayName)
-                    ? displayName
-                    : "handler";
-                SendImText(client, agentId, from,
-                    "I could not understand that approval choice. Reply with: 1) yes, 2) no, 3) yes always, 4) no always.");
-            }
-
-            return true;
-        }
-
-        var ok = await _harnessClient!.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
-        Console.WriteLine($"[dialog-bridge] forwarded permission reply to opencode: session={sessionId} permission={permissionId} success={ok} response={response} remember={remember}");
-        _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
-        _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
-        ClearPendingPromptActive(conversationKey, permissionId);
-        ClearPendingPromptWait(conversationKey);
-        _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-
-        if (_conversationAgentByKey.TryGetValue(conversationKey, out var targetAgentId)
-            && targetAgentId != UUID.Zero)
-        {
-            var from = _conversationNameByKey.TryGetValue(conversationKey, out var displayName)
-                ? displayName
-                : "handler";
-
-            if (!ok)
-            {
-                SendImText(client, targetAgentId, from,
-                    "I could not confirm that approval was accepted. If needed, try again.");
-            }
-        }
-
-        if (ok && _conversationAgentByKey.TryGetValue(conversationKey, out var nextAgentId)
-            && nextAgentId != UUID.Zero)
-        {
-            var nextFrom = _conversationNameByKey.TryGetValue(conversationKey, out var nextDisplayName)
-                ? nextDisplayName
-                : "handler";
-            ScheduleDrainPendingPrompts(client, nextAgentId, nextFrom, conversationKey);
-        }
-
-        return true;
-    }
-
-    private async Task<string> ResolveLslDialogBridgeAnswerAsync(string sessionId, string questionId, string answer)
-    {
-        var trimmedAnswer = answer?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(trimmedAnswer))
-        {
-            return string.Empty;
-        }
-
-        var pending = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-        var question = pending.FirstOrDefault(q => q.Id.Equals(questionId, StringComparison.OrdinalIgnoreCase));
-        if (question == null || question.Options.Count == 0)
-        {
-            return trimmedAnswer;
-        }
-
-        if (TryResolveQuestionAnswer(question, trimmedAnswer, out var resolvedAnswer))
-        {
-            return resolvedAnswer;
-        }
-
-        var onceDecoded = DecodeDialogToken(trimmedAnswer);
-        if (!onceDecoded.Equals(trimmedAnswer, StringComparison.Ordinal)
-            && TryResolveQuestionAnswer(question, onceDecoded, out resolvedAnswer))
-        {
-            return resolvedAnswer;
-        }
-
-        foreach (var option in question.Options)
-        {
-            if (option.StartsWith(trimmedAnswer, StringComparison.OrdinalIgnoreCase))
-            {
-                return option;
-            }
-
-            var encodedOption = EncodeDialogToken(option);
-            if (encodedOption.StartsWith(trimmedAnswer, StringComparison.OrdinalIgnoreCase)
-                || trimmedAnswer.StartsWith(encodedOption, StringComparison.OrdinalIgnoreCase))
-            {
-                return option;
-            }
-        }
-
-        return onceDecoded;
-    }
-
-    private static bool TryParseLslDialogBridgeReply(string text, out string conversationKey, out string requestId, out string answer)
-    {
-        conversationKey = string.Empty;
-        requestId = string.Empty;
-        answer = string.Empty;
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        var parts = text.Split('|');
-        if (parts.Length < 4 || !parts[0].Equals(LslDialogBridgeReplyPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        conversationKey = DecodeDialogToken(parts[1]);
-        requestId = DecodeDialogToken(parts[2]);
-        answer = DecodeDialogToken(parts[3]);
-        return !string.IsNullOrWhiteSpace(conversationKey)
-            && !string.IsNullOrWhiteSpace(requestId)
-            && !string.IsNullOrWhiteSpace(answer);
-    }
-
-    private static bool TryParseLslDialogBridgeAck(string text, out string conversationKey, out string requestId, out string mode)
-    {
-        conversationKey = string.Empty;
-        requestId = string.Empty;
-        mode = string.Empty;
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        var parts = text.Split('|');
-        if (parts.Length < 4 || !parts[0].Equals(LslDialogBridgeAckPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        conversationKey = DecodeDialogToken(parts[1]);
-        requestId = DecodeDialogToken(parts[2]);
-        mode = DecodeDialogToken(parts[3]);
-        return !string.IsNullOrWhiteSpace(conversationKey)
-            && !string.IsNullOrWhiteSpace(requestId)
-            && !string.IsNullOrWhiteSpace(mode);
-    }
-
-    private static string BuildPermissionDialogHeader(HarnessPendingPermission permission)
-    {
-        var title = permission.Title?.Trim() ?? string.Empty;
-        var hasHumanTitle = !string.IsNullOrWhiteSpace(title)
-            && !title.StartsWith("per", StringComparison.OrdinalIgnoreCase)
-            && !title.StartsWith("que", StringComparison.OrdinalIgnoreCase);
-        return hasHumanTitle ? title : "Approval required";
-    }
-
-    private static string BuildPermissionDialogPrompt(HarnessPendingPermission permission)
-    {
-        var primary = GetPermissionPrimaryText(permission, out _);
-        if (!string.IsNullOrWhiteSpace(primary))
-        {
-            return CompactPermissionSummary(primary, maxChars: 180, maxTokens: 18);
-        }
-
-        return "Choose whether to allow this action.";
-    }
-
-    private static string BuildCompactQuestionDialogPrompt(HarnessPendingQuestion question)
-    {
-        var prompt = question.Question?.Trim();
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            return "Choose an option:";
-        }
-
-        var firstLine = prompt.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(firstLine))
-        {
-            firstLine = prompt;
-        }
-
-        const int maxLength = 120;
-        return firstLine!.Length <= maxLength
-            ? firstLine
-            : firstLine[..(maxLength - 3)] + "...";
-    }
-
-    private static string BuildLslDialogBridgeRequestPayloadWithinLimit(
-        string conversationKey,
-        string requestId,
-        UUID targetAgentId,
-        UUID replyTargetAgentId,
-        string header,
-        string prompt,
-        IReadOnlyList<string> options,
-        out bool wasCompacted)
-    {
-        wasCompacted = false;
-        var normalizedHeader = header?.Trim() ?? string.Empty;
-        var normalizedPrompt = prompt?.Trim() ?? string.Empty;
-
-        var payload = BuildLslDialogBridgeRequestPayload(
-            conversationKey,
-            requestId,
-            targetAgentId,
-            replyTargetAgentId,
-            normalizedHeader,
-            normalizedPrompt,
-            options);
-        if (payload.Length <= LslDialogBridgeMaxPayloadLength)
-        {
-            return payload;
-        }
-
-        wasCompacted = true;
-
-        // First shed prompt verbosity while keeping header context.
-        normalizedPrompt = CompactForBridge(normalizedPrompt, 80);
-        payload = BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, replyTargetAgentId, normalizedHeader, normalizedPrompt, options);
-        if (payload.Length <= LslDialogBridgeMaxPayloadLength)
-        {
-            return payload;
-        }
-
-        // If still too large, reduce both header and prompt until payload fits.
-        normalizedHeader = CompactForBridge(normalizedHeader, 36);
-        normalizedPrompt = CompactForBridge(normalizedPrompt, 36);
-        payload = BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, replyTargetAgentId, normalizedHeader, normalizedPrompt, options);
-        if (payload.Length <= LslDialogBridgeMaxPayloadLength)
-        {
-            return payload;
-        }
-
-        // Last-resort minimal body to preserve operability over strict prompt fidelity.
-        return BuildLslDialogBridgeRequestPayload(conversationKey, requestId, targetAgentId, replyTargetAgentId, "Approval required", "Choose an option.", options);
-    }
-
-    private static string CompactForBridge(string text, int maxLength)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return string.Empty;
-        }
-
-        var firstLine = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault();
-        var candidate = string.IsNullOrWhiteSpace(firstLine) ? text.Trim() : firstLine;
-        if (candidate.Length <= maxLength)
-        {
-            return candidate;
-        }
-
-        return candidate[..Math.Max(1, maxLength - 3)] + "...";
+        return null;
     }
 
     private static string BuildCompactPermissionDialogPrompt(HarnessPendingPermission permission)
@@ -890,7 +156,6 @@ internal sealed partial class BotSession
             .FirstOrDefault();
         var candidate = string.IsNullOrWhiteSpace(firstLine) ? rawText.Trim() : firstLine;
 
-        // Collapse whitespace so multi-line shell snippets become a short, readable one-liner.
         candidate = string.Join(" ", candidate.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         if (LooksLikePermissionRequestId(candidate))
         {
@@ -918,66 +183,6 @@ internal sealed partial class BotSession
         => !string.IsNullOrWhiteSpace(value)
             && (value.StartsWith("per_", StringComparison.OrdinalIgnoreCase)
                 || value.StartsWith("que_", StringComparison.OrdinalIgnoreCase));
-
-    private static string BuildLslDialogBridgeRequestPayload(
-        string conversationKey,
-        string requestId,
-        UUID targetAgentId,
-        UUID replyTargetAgentId,
-        string header,
-        string prompt,
-        IReadOnlyList<string> options)
-    {
-        var payloadParts = new List<string>
-        {
-            LslDialogBridgeRequestPrefix,
-            EncodeDialogToken(conversationKey),
-            EncodeDialogToken(requestId),
-            EncodeDialogToken(targetAgentId.ToString()),
-            EncodeDialogToken(replyTargetAgentId.ToString()),
-            EncodeDialogToken(header),
-            EncodeDialogToken(prompt),
-            options.Count.ToString()
-        };
-        payloadParts.AddRange(options.Select(EncodeDialogToken));
-        return string.Join("|", payloadParts);
-    }
-
-    private static string BuildLslDialogBridgeTextRequestPayload(
-        string conversationKey,
-        string requestId,
-        UUID targetAgentId,
-        UUID replyTargetAgentId,
-        string header,
-        string prompt)
-    {
-        return string.Join("|", new[]
-        {
-            LslDialogBridgeTextRequestPrefix,
-            EncodeDialogToken(conversationKey),
-            EncodeDialogToken(requestId),
-            EncodeDialogToken(targetAgentId.ToString()),
-            EncodeDialogToken(replyTargetAgentId.ToString()),
-            EncodeDialogToken(header),
-            EncodeDialogToken(prompt)
-        });
-    }
-
-    private static string EncodeDialogToken(string? value)
-    {
-        if (string.IsNullOrEmpty(value))
-        {
-            return string.Empty;
-        }
-
-        // Keep payload small for simulator chat transport: escape only delimiter-critical chars.
-        return value
-            .Replace("%", "%25", StringComparison.Ordinal)
-            .Replace("|", "%7C", StringComparison.Ordinal);
-    }
-
-    private static string DecodeDialogToken(string value)
-        => Uri.UnescapeDataString(value ?? string.Empty);
 
     private static bool TryResolveQuestionAnswer(HarnessPendingQuestion question, string text, out string answer)
     {

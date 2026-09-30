@@ -132,10 +132,6 @@ docker run --rm \
 - `PROMPT_NOTECARD_REQUIRE_HANDLER` (`true`/`false`, default: `true`)
 - `PROMPT_MAX_CHARS` (default: `16000`, minimum effective clamp: `512`)
 
-### Dialog Bridge
- - `DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER` (`true`/`false`, default: `true`)
- - `DIALOG_BRIDGE_TRUST_STATE_FILE` (default: `/workspace/state/dialog-bridge-trust.json"`)
-
 This repository includes a starter project prompt file at `AGENTS.md`.
 
 Notes:

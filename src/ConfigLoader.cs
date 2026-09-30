@@ -50,9 +50,6 @@ internal static class ConfigLoader
             PiperVoicesPath = Env("PIPER_VOICES_PATH") ?? "/voices",
             PiperRequestTimeoutSeconds = ParseInt(Env("PIPER_TIMEOUT_SECONDS"), 60),
             PiperDefaultVoice = Env("PIPER_DEFAULT_VOICE") ?? "en_US-lessac-medium",
-            BridgeTrustStateFile = FirstDefined("DIALOG_BRIDGE_TRUST_STATE_FILE", "METAVERSE_BRIDGE_TRUST_STATE_FILE") ?? "/workspace/bridges/{bot_uuid}.json",
-            BridgeAutoProvisionOnRegionEnter = ParseBool(Env("DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER"), true),
-            BridgePromptResponseTimeoutSeconds = ParseInt(Env("DIALOG_BRIDGE_PROMPT_RESPONSE_TIMEOUT_SECONDS"), 120),
             PromptHandlingEnabled = ParseBool(Env("PROMPT_HANDLING_ENABLED"), true),
             PromptBuiltInEnabled = ParseBool(Env("PROMPT_BUILTIN_ENABLED"), true),
             OpencodeDefaultPromptPath = Env("OPENCODE_DEFAULT_PROMPT_PATH"),
@@ -141,22 +138,12 @@ internal static class ConfigLoader
             "  --piper-voices-path <path>     Piper voices list path (env: PIPER_VOICES_PATH, default: /voices)",
             "  --piper-timeout-seconds <int>  Piper request timeout in seconds (env: PIPER_TIMEOUT_SECONDS, default: 60)",
             "  --piper-default-voice <name>   Default voice name used by Say when omitted (env: PIPER_DEFAULT_VOICE, default: en_US-lessac-medium)",
-            "  --lsl-dialog-bridge-trust-state-file <path>",
-            "                                Optional JSON file used to persist runtime bridge trust pins",
-            "                                Supports {bot_uuid} in path templates for multi-bot deployments",
-            "                                (env: LSL_DIALOG_BRIDGE_TRUST_STATE_FILE, default: /workspace/state/dialog-bridge-trust.json)",
-            "  --dialog-bridge-auto-provision-on-region-enter <bool>",
-            "                                When true, automatically install a dialog bridge when the bot first enters a new region",
-            "                                (env: DIALOG_BRIDGE_AUTO_PROVISION_ON_REGION_ENTER, default: true)",
             "  --appearance-auto-repair-enabled <bool>",
             "                                When true, check visual-param pollution after region changes and auto-repair (opensim-ai-docker#7)",
             "                                (env: APPEARANCE_AUTO_REPAIR_ENABLED, default: true)",
             "  --appearance-baseline-state-file <path>",
             "                                JSON file storing the healthy visual-param baseline; supports {bot_uuid}",
             "                                (env: APPEARANCE_BASELINE_STATE_FILE, default: /workspace/state/appearance-autorepair-{bot_uuid}.json)",
-            "  --dialog-bridge-prompt-response-timeout-seconds <int>",
-            "                                Wait time before a dialog prompt falls back to text reply mode",
-            "                                (env: DIALOG_BRIDGE_PROMPT_RESPONSE_TIMEOUT_SECONDS, default: 120)",
             string.Empty,
             "Prompt handling:",
             "  --prompt-handling-enabled <bool>",
@@ -324,23 +311,11 @@ internal static class ConfigLoader
                 case "--piper-default-voice":
                     options.PiperDefaultVoice = RequireValue(args, ref i, arg);
                     break;
-                case "--bridge-trust-state-file":
-                    options.BridgeTrustStateFile = RequireValue(args, ref i, arg);
-                    break;
-                case "--dialog-bridge-auto-provision-on-region-enter":
-                    options.BridgeAutoProvisionOnRegionEnter = ParseBool(RequireValue(args, ref i, arg), options.BridgeAutoProvisionOnRegionEnter);
-                    break;
                 case "--appearance-auto-repair-enabled":
                     options.AppearanceAutoRepairEnabled = ParseBool(RequireValue(args, ref i, arg), options.AppearanceAutoRepairEnabled);
                     break;
                 case "--appearance-baseline-state-file":
                     options.AppearanceBaselineStateFile = RequireValue(args, ref i, arg);
-                    break;
-                case "--dialog-bridge-prompt-response-timeout-seconds":
-                    options.BridgePromptResponseTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.BridgePromptResponseTimeoutSeconds);
-                    break;
-                case "--dialog-bridge-trust-state-file":
-                    options.BridgeTrustStateFile = RequireValue(args, ref i, arg);
                     break;
                 case "--prompt-handling-enabled":
                     options.PromptHandlingEnabled = ParseBool(RequireValue(args, ref i, arg), options.PromptHandlingEnabled);

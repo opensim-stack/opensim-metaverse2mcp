@@ -505,7 +505,7 @@ internal sealed class BotMcpTools
         return _bot.SendImAsync(agentId, message, cancellationToken);
     }
 
-    [McpServerTool, Description("Set the cube bot mood/emotion on the bridge-controlled emoter attachment.")]
+    [McpServerTool, Description("Broadcast a bot mood/emotion marker as clear text on local say channel 0.")]
     public Task<BotToolResult> SetBotMood(
         [Description("Emotion name (for example: happy, sad, angry, surprised, neutral).")]
         string emotion,
@@ -514,7 +514,7 @@ internal sealed class BotMcpTools
         return _bot.SetBotMoodAsync(emotion, cancellationToken);
     }
 
-    [McpServerTool, Description("List available cube-bot mood names from textures inside the trusted dialog bridge object.")]
+    [McpServerTool, Description("List supported mood names used by SetBotMood broadcasts.")]
     public Task<DataToolResult> MoodList(
         [Description("When true, include utility textures such as 'base' and 'cross' in moodNames.")]
         bool includeUtilityTextures,
@@ -2895,19 +2895,6 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceAutoRepairAsync(force ?? false, outfitFolderId, cancellationToken);
-    }
-
-    [McpServerTool, Description("Bootstrap-install the dialog bridge by uploading and attaching prim containing scripts.")]
-    public Task<DialogBridgeInstallResult> DialogBridgeInstall(CancellationToken cancellationToken)
-    {
-        return _bot.DialogBridgeInstallAsync(CancellationToken.None);
-    }
-
-    [McpServerTool, Description("Uninstall the dialog bridge: delete pinned bridge prim in-world and clear trust pins.")]
-    public Task<BotToolResult> DialogBridgeUninstall(
-        CancellationToken cancellationToken)
-    {
-        return _bot.DialogBridgeUninstallAsync(true, cancellationToken);
     }
 
     [McpServerTool, Description("Upload a script (path or URL) to an existing agent inventory script item. Compiled result cannot be relied upon with OpenSimulator and YEngine and should be treated as advisory only. Also error messages will not be returned.")]

@@ -81,10 +81,6 @@ internal sealed partial class BotSession
                 case "prompts":
                     await HandlePromptCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
-                case "bridge":
-                case "bridges":
-                    await HandleBridgeCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
-                    return true;
                 case "auth":
                     await HandleAuthCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
@@ -132,7 +128,6 @@ internal sealed partial class BotSession
                 "*cancel - Abort current in-flight AI request for this IM",
                 "*restart - Restart this bot via opensim-spawner",
                 "*prompt - Manage prompt layers (status/show/clear/reload)",
-                "*bridge - Manage dialog-bridge install/trust status",
                 "*dialog - Manage pending script dialogs",
                 "*permission - Manage pending permission requests",
                 "*question - Manage pending question requests",
@@ -177,7 +172,6 @@ internal sealed partial class BotSession
                 BuildStarHelpText("cancel"),
                 BuildStarHelpText("restart"),
                 BuildStarHelpText("prompt"),
-                BuildStarHelpText("bridge"),
                 BuildStarHelpText("dialog"),
                 BuildStarHelpText("permission"),
                 BuildStarHelpText("question"),
@@ -202,12 +196,6 @@ internal sealed partial class BotSession
                 "*prompt show [effective|builtin|project|notecard] - Preview prompt text",
                 "*prompt clear-notecard - Remove active in-world AGENTS.md prompt layer",
                 "*prompt reload-project - Re-read project AGENTS.md from disk"),
-            "bridge" => string.Join(
-                "\n",
-                "*bridge variants:",
-                "*bridge status - Show dialog-bridge trust/install status",
-                "*bridge install - Wear/attach dialog bridge from 'Cube Bot IAR' inventory folder",
-                "*bridge uninstall [keep-scripts] - Delete pinned bridge prim and clear trust pins (default also removes script copies)"),
             "dialog" => string.Join(
                 "\n",
                 "*dialog variants:",
@@ -388,12 +376,6 @@ internal sealed partial class BotSession
                     lines.Add($"notecard installedAtUtc: {_activeAgentsNotecardInstalledAt.Value:O}");
                 }
 
-                if (_bridgeAgentsPromptInstalledAt.HasValue)
-                {
-                    lines.Add($"bridge AGENTS.md object: {_bridgeAgentsPromptObjectId}");
-                    lines.Add($"bridge AGENTS.md itemId: {_bridgeAgentsPromptItemId ?? "(unknown)"}");
-                    lines.Add($"bridge AGENTS.md installedAtUtc: {_bridgeAgentsPromptInstalledAt.Value:O}");
-                }
             }
 
             SendImText(client, agentId, from, string.Join("\n", lines));
@@ -433,16 +415,8 @@ internal sealed partial class BotSession
                     }
 
                     break;
-                case "bridge":
-                    promptName = "dialog bridge object AGENTS.md";
-                    lock (_promptStateLock)
-                    {
-                        promptText = _bridgeAgentsPrompt;
-                    }
-
-                    break;
                 default:
-                    SendImText(client, agentId, from, "Usage: *prompt show [effective|builtin|project|notecard|bridge]");
+                    SendImText(client, agentId, from, "Usage: *prompt show [effective|builtin|project|notecard]");
                     return Task.CompletedTask;
             }
 
@@ -480,73 +454,8 @@ internal sealed partial class BotSession
             return Task.CompletedTask;
         }
 
-        SendImText(client, agentId, from, "Usage: *prompt status | *prompt show [effective|builtin|project|notecard|bridge] | *prompt clear-notecard | *prompt reload-project");
+        SendImText(client, agentId, from, "Usage: *prompt status | *prompt show [effective|builtin|project|notecard] | *prompt clear-notecard | *prompt reload-project");
         return Task.CompletedTask;
-    }
-
-    private async Task HandleBridgeCommandAsync(GridClient client, UUID agentId, string from, string arg)
-    {
-        var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        var sub = parts.Length == 0 ? "status" : parts[0].ToLowerInvariant();
-
-        if (sub is "help" or "-h" or "--help")
-        {
-            SendImText(client, agentId, from, BuildStarHelpText("bridge"));
-            return;
-        }
-
-        if (sub == "status")
-        {
-            UUID pinnedObjectId;
-            UUID pinnedOwnerId;
-            bool requireTrusted;
-            lock (_dialogBridgeTrustLock)
-            {
-                pinnedObjectId = _trustedDialogBridgeObjectId;
-                pinnedOwnerId = _trustedDialogBridgeOwnerId;
-                requireTrusted = _lslDialogBridgeRequireTrustedSender;
-            }
-
-            var lines = new List<string>
-            {
-                "Dialog bridge status:",
-                $"request channel: {LslDialogBridgeRequestChannel}",
-                $"require trusted sender: {requireTrusted}",
-                $"trusted object pin: {(pinnedObjectId == UUID.Zero ? "(none)" : pinnedObjectId.ToString())}",
-                $"trusted owner pin: {(pinnedOwnerId == UUID.Zero ? "(none)" : pinnedOwnerId.ToString())}"
-            };
-            SendImText(client, agentId, from, string.Join("\n", lines));
-            return;
-        }
-
-        if (sub == "install")
-        {
-            if (IsHandlerRestricted() && !IsHandlerAvatar(from))
-            {
-                SendImText(client, agentId, from, "Only the configured handler or parent controller may run *bridge install.");
-                return;
-            }
-
-            var install = await DialogBridgeInstallAsync(CancellationToken.None).ConfigureAwait(false);
-
-            SendImText(client, agentId, from, install.Message);
-            return;
-        }
-
-        if (sub == "uninstall")
-        {
-            if (IsHandlerRestricted() && !IsHandlerAvatar(from))
-            {
-                SendImText(client, agentId, from, "Only the configured handler or parent controller may run *bridge uninstall.");
-                return;
-            }
-
-            var uninstall = await DialogBridgeUninstallAsync(clearTrustPins: true, CancellationToken.None).ConfigureAwait(false);
-            SendImText(client, agentId, from, uninstall.Message);
-            return;
-        }
-
-        SendImText(client, agentId, from, "Usage: *bridge status | *bridge install | *bridge uninstall [keep-scripts]");
     }
 
     private async Task HandleProvidersCommandAsync(GridClient client, UUID agentId, string from, string arg = "")

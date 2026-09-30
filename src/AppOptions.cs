@@ -52,9 +52,6 @@ internal sealed class AppOptions
     public string PiperVoicesPath { get; set; } = "/voices";
     public int PiperRequestTimeoutSeconds { get; set; } = 60;
     public string PiperDefaultVoice { get; set; } = "en_US-lessac-medium";
-    public string? BridgeTrustStateFile { get; set; } = "/workspace/state/dialog-bridge-trust.json";
-    public bool BridgeAutoProvisionOnRegionEnter { get; set; } = true;
-    public int BridgePromptResponseTimeoutSeconds { get; set; } = 120;
     public bool PromptHandlingEnabled { get; set; } = true;
     public bool PromptBuiltInEnabled { get; set; } = true;
 
@@ -182,11 +179,6 @@ internal sealed class AppOptions
             }
         }
 
-        if (BridgePromptResponseTimeoutSeconds < 5)
-        {
-            errors.Add("Dialog bridge prompt response timeout must be at least 5 seconds.");
-        }
-
         if (string.IsNullOrWhiteSpace(HandlerConfig))
         {
             errors.Add("Handler config file path is required (--handler-config or OPENSIM_HANDLER_CONFIG).");
@@ -200,18 +192,6 @@ internal sealed class AppOptions
             catch
             {
                 errors.Add("Handler config file path is invalid.");
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(BridgeTrustStateFile))
-        {
-            try
-            {
-                _ = Path.GetFullPath(BridgeTrustStateFile);
-            }
-            catch
-            {
-                errors.Add("LSL dialog bridge trust state file path is invalid.");
             }
         }
 

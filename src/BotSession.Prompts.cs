@@ -1,5 +1,4 @@
 using LibreMetaverse;
-using LibreMetaverse.Assets;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -68,11 +67,6 @@ internal sealed partial class BotSession
                 sources.Add($"notecard({_activeAgentsNotecardSourceName ?? "unknown"}, {_activeAgentsNotecardItemId ?? "n/a"})");
             }
 
-            if (_options.PromptNotecardEnabled && !string.IsNullOrWhiteSpace(_bridgeAgentsPrompt))
-            {
-                var bridgeObject = _bridgeAgentsPromptObjectId == UUID.Zero ? "(unknown)" : _bridgeAgentsPromptObjectId.ToString();
-                sources.Add($"bridge-object(AGENTS.md, object={bridgeObject}, {_bridgeAgentsPromptItemId ?? "n/a"})");
-            }
         }
 
         return sources.Count == 0 ? "prompt: no active sources" : "prompt sources: " + string.Join(", ", sources);
@@ -104,11 +98,9 @@ internal sealed partial class BotSession
         if (_options.PromptNotecardEnabled)
         {
             string? notecardPrompt;
-            string? bridgePrompt;
             lock (_promptStateLock)
             {
                 notecardPrompt = _activeAgentsNotecardPrompt;
-                bridgePrompt = _bridgeAgentsPrompt;
             }
 
             if (!string.IsNullOrWhiteSpace(notecardPrompt))
@@ -116,10 +108,6 @@ internal sealed partial class BotSession
                 layers.Add("[in-world AGENTS.md notecard]\n" + notecardPrompt);
             }
 
-            if (!string.IsNullOrWhiteSpace(bridgePrompt))
-            {
-                layers.Add("[dialog bridge object AGENTS.md]\n" + bridgePrompt);
-            }
         }
 
         if (!string.IsNullOrWhiteSpace(requesterContextLayer))
@@ -467,163 +455,6 @@ internal sealed partial class BotSession
             _activeAgentsNotecardSourceName = null;
             _activeAgentsNotecardItemId = null;
             _activeAgentsNotecardInstalledAt = null;
-        }
-    }
-
-    private void SetBridgeAgentsPrompt(string promptText, string sourceName, UUID objectId, string itemId)
-    {
-        var normalized = NormalizePromptText(promptText);
-        if (string.IsNullOrWhiteSpace(normalized))
-        {
-            return;
-        }
-
-        lock (_promptStateLock)
-        {
-            _bridgeAgentsPrompt = normalized;
-            _bridgeAgentsPromptSourceName = sourceName;
-            _bridgeAgentsPromptItemId = itemId;
-            _bridgeAgentsPromptObjectId = objectId;
-            _bridgeAgentsPromptInstalledAt = DateTimeOffset.UtcNow;
-        }
-    }
-
-    private void QueueBridgeAgentsPromptProbe(UUID bridgeObjectId, string senderName)
-    {
-        if (!_options.PromptHandlingEnabled || !_options.PromptNotecardEnabled || bridgeObjectId == UUID.Zero)
-        {
-            return;
-        }
-
-        lock (_promptStateLock)
-        {
-            if (_bridgeAgentsProbeInFlight && _bridgeAgentsProbeObjectId == bridgeObjectId)
-            {
-                return;
-            }
-
-            if (!string.IsNullOrWhiteSpace(_bridgeAgentsPrompt) && _bridgeAgentsPromptObjectId == bridgeObjectId)
-            {
-                return;
-            }
-
-            _bridgeAgentsProbeInFlight = true;
-            _bridgeAgentsProbeObjectId = bridgeObjectId;
-        }
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await TryInstallAgentsPromptFromBridgeObjectAsync(bridgeObjectId, senderName).ConfigureAwait(false);
-            }
-            finally
-            {
-                lock (_promptStateLock)
-                {
-                    _bridgeAgentsProbeInFlight = false;
-                }
-            }
-        });
-    }
-
-    private async Task TryInstallAgentsPromptFromBridgeObjectAsync(UUID bridgeObjectId, string senderName)
-    {
-        var attempts = 0;
-        while (attempts < 5)
-        {
-            attempts++;
-            await Task.Delay(TimeSpan.FromMilliseconds(300)).ConfigureAwait(false);
-
-            await _actionGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-            try
-            {
-                var client = _client;
-                var sim = client?.Network.CurrentSim;
-                if (client == null || sim == null)
-                {
-                    return;
-                }
-
-                Primitive? bridgePrim = null;
-                foreach (var prim in sim.ObjectsPrimitives.Values)
-                {
-                    if (prim.ID == bridgeObjectId)
-                    {
-                        bridgePrim = prim;
-                        break;
-                    }
-                }
-
-                if (bridgePrim == null)
-                {
-                    continue;
-                }
-
-                var entries = await client.Inventory
-                    .GetTaskInventoryAsync(bridgeObjectId, bridgePrim.LocalID, sim, CancellationToken.None)
-                    .ConfigureAwait(false);
-
-                var agentsItem = entries
-                    .OfType<InventoryItem>()
-                    .FirstOrDefault(item => string.Equals(item.Name?.Trim(), "AGENTS.md", StringComparison.OrdinalIgnoreCase)
-                        && item.AssetType == AssetType.Notecard);
-                if (agentsItem == null)
-                {
-                    lock (_promptStateLock)
-                    {
-                        if (_bridgeAgentsPromptObjectId == bridgeObjectId)
-                        {
-                            _bridgeAgentsPrompt = null;
-                            _bridgeAgentsPromptSourceName = null;
-                            _bridgeAgentsPromptItemId = null;
-                            _bridgeAgentsPromptInstalledAt = null;
-                        }
-                    }
-
-                    Console.WriteLine($"[prompt] bridge object {bridgeObjectId} has no AGENTS.md task notecard.");
-                    return;
-                }
-
-                var ownerId = bridgePrim.Properties?.OwnerID ?? client.Self.AgentID;
-                var notecardAsset = await client.Assets.RequestInventoryAssetAsync(
-                    agentsItem.AssetUUID,
-                    agentsItem.UUID,
-                    bridgeObjectId,
-                    ownerId,
-                    AssetType.Notecard,
-                    true,
-                    UUID.Random(),
-                    CancellationToken.None).ConfigureAwait(false);
-
-                if (notecardAsset?.AssetData == null || notecardAsset.AssetData.Length == 0)
-                {
-                    Console.WriteLine($"[prompt] failed to download bridge AGENTS.md from object {bridgeObjectId}, item={agentsItem.UUID}.");
-                    return;
-                }
-
-                var notecard = new AssetNotecard(agentsItem.AssetUUID, notecardAsset.AssetData);
-                if (!notecard.Decode() || string.IsNullOrWhiteSpace(notecard.BodyText))
-                {
-                    Console.WriteLine($"[prompt] failed to decode bridge AGENTS.md from object {bridgeObjectId}, item={agentsItem.UUID}.");
-                    return;
-                }
-
-                SetBridgeAgentsPrompt(notecard.BodyText, senderName, bridgeObjectId, agentsItem.UUID.ToString());
-                Console.WriteLine($"[prompt] installed bridge-object AGENTS.md prompt from '{senderName}', object={bridgeObjectId}, item={agentsItem.UUID}.");
-                return;
-            }
-            catch (Exception ex)
-            {
-                if (attempts >= 5)
-                {
-                    Console.WriteLine($"[prompt] failed to probe bridge object AGENTS.md: {ex.Message}");
-                }
-            }
-            finally
-            {
-                _actionGate.Release();
-            }
         }
     }
 
