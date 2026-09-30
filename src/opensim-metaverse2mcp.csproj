@@ -5,13 +5,27 @@
     <RootNamespace>opensim_metaverse2mcp</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Set to 'true' to use local LibreMetaverse fork instead of NuGet packages -->
+    <UseLibreMetaverseFork>false</UseLibreMetaverseFork>
   </PropertyGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(UseLibreMetaverseFork)' != 'true'">
+    <!-- Official NuGet packages -->
     <PackageReference Include="LibreMetaverse" Version="3.1.6" />
     <PackageReference Include="LibreMetaverse.RLV" Version="3.1.6" />
     <PackageReference Include="LibreMetaverse.Imaging.Skia" Version="3.1.6" />
     <PackageReference Include="LibreMetaverse.Voice.WebRTC" Version="3.1.6" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseLibreMetaverseFork)' == 'true'">
+    <!-- Local fork projects -->
+    <ProjectReference Include="../../libremetaverse/LibreMetaverse/LibreMetaverse.csproj" />
+    <ProjectReference Include="../../libremetaverse/LibreMetaverse.RLV/LibreMetaverse.RLV.csproj" />
+    <ProjectReference Include="../../libremetaverse/LibreMetaverse.Imaging.Skia/LibreMetaverse.Imaging.Skia.csproj" />
+    <ProjectReference Include="../../libremetaverse/LibreMetaverse.Voice.WebRTC/LibreMetaverse.Voice.WebRTC.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Diagnostics.Runtime" Version="3.1.512801" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />

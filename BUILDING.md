@@ -25,6 +25,18 @@ docker run --rm \
   opensim-metaverse2mcp:local
 ```
 
+### Using LibreMetaverse Fork
+
+To build using a fork of LibreMetaverse instead of the official NuGet packages, use the `USE_LIBREMETAVERSE_FORK` build argument:
+
+```bash
+docker build --build-arg USE_LIBREMETAVERSE_FORK=true -t opensim-metaverse2mcp:fork .
+```
+
+The fork will be cloned from `https://github.com/opensim-stack/libremetaverse.git` during the build. The official packages remain available and can be used by omitting the build argument or setting it to `false`.
+
+**Note:** When using the fork, ensure the path structure matches the expected project layout, or modify the `.csproj` file paths accordingly.
+
 ## Publish
 
 ### Setup
@@ -45,6 +57,18 @@ docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t bithatch/opensim-metaverse2mcp:latest \
   -t bithatch/opensim-metaverse2mcp:$(date +%Y%m%d) \
+  --push \
+  .
+```
+
+To build with the LibreMetaverse fork:
+
+```bash
+docker buildx build \
+  --build-arg USE_LIBREMETAVERSE_FORK=true \
+  --platform linux/amd64,linux/arm64 \
+  -t bithatch/opensim-metaverse2mcp:fork \
+  -t bithatch/opensim-metaverse2mcp:fork-$(date +%Y%m%d) \
   --push \
   .
 ```
