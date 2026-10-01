@@ -208,6 +208,7 @@ internal sealed partial class BotSession
     {
         if (Interlocked.CompareExchange(ref _startupSetupProvisionAttempted, 1, 0) != 0)
         {
+            Console.WriteLine("[provisioning] startup provisioning already attempted, skipping.");
             return;
         }
 
@@ -244,6 +245,7 @@ internal sealed partial class BotSession
 
             if (setupFolder == null)
             {
+                Console.WriteLine($"[provisioning] no setup folder '{setupFolderName}' found in root inventory, skipping startup provisioning.");
                 return;
             }
 
@@ -254,9 +256,11 @@ internal sealed partial class BotSession
             var provisioningFolder = setupContents.OfType<InventoryFolder>().FirstOrDefault();
             if (provisioningFolder != null)
             {
+                Console.WriteLine($"[provisioning] found setup folder '{setupFolderName}' ({setupFolder.UUID}) with provisioning folder '{provisioningFolder.Name}' ({provisioningFolder.UUID}).");
                 var objectsFolderId = client.Inventory.FindFolderForType(FolderType.Object);
                 if (objectsFolderId != UUID.Zero && provisioningFolder.ParentUUID != objectsFolderId)
                 {
+                    Console.WriteLine($"[provisioning] moving provisioning folder '{provisioningFolder.Name}' ({provisioningFolder.UUID}) to Objects folder ({objectsFolderId}).");
                     await client.Inventory.MoveFolderAsync(provisioningFolder.UUID, objectsFolderId, cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -268,6 +272,7 @@ internal sealed partial class BotSession
 
             if (agentsNotecard != null)
             {
+                Console.WriteLine($"[provisioning] found setup folder '{setupFolderName}' ({setupFolder.UUID}) with companion notecard '{agentsNotecard.Name}' ({agentsNotecard.UUID}).");
                 var notecardsFolderId = client.Inventory.FindFolderForType(FolderType.Notecard);
                 if (notecardsFolderId != UUID.Zero && agentsNotecard.ParentUUID != notecardsFolderId)
                 {
@@ -289,6 +294,7 @@ internal sealed partial class BotSession
 
         if (!prep.Found)
         {
+            Console.WriteLine($"[provisioning] no setup folder '{setupFolderName}' found in root inventory, skipping startup provisioning.");
             return;
         }
 
