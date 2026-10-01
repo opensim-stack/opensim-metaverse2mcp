@@ -132,6 +132,18 @@ The server publishes tools including:
 - `EnvGetLegacy`
 - `EnvSetLegacyRaw`
 - `EnvResetLegacy`
+- `ParcelGetCurrent`
+- `ParcelGetByLocalId`
+- `ParcelSetInfo`
+- `ParcelSetLanding`
+- `ParcelAccessListGet`
+- `ParcelAccessListSet`
+- `ParcelFlagsGet`
+- `ParcelSetFlags`
+- `ParcelEjectUser`
+- `ParcelJoin`
+- `ParcelSubdivide`
+- `ParcelPermissionDiagnostics`
 - `RlvGetStatus`
 - `RlvSetRuntimeEnabled`
 - `RlvProcessCommand`
@@ -247,6 +259,19 @@ Environment notes:
 - `EnvSetRegionRaw`/`EnvSetParcelRaw` accept `payloadFormat` of `auto`, `json`, or `xml`.
 - For EEP raw set, payload can be either a direct `EnvironmentData` map or a wrapper object containing `environment`.
 - `EnvSetLegacyRaw` expects a legacy `EnvironmentSettings` LLSD map payload.
+
+Land notes:
+- `ParcelAccessListGet(localId, listType)` returns `agents` filtered by `listType` (`both`, `access`, or `ban`).
+- `ParcelAccessListSet(localId, listType, action, agentIdsCsv)` supports `action`: `add`, `remove`, `replace`, `clear`.
+- For `ParcelAccessListSet`, `listType` must be `access` or `ban` (not `both`).
+- `ParcelAccessListSet(action="replace")` overwrites the target scope list with exactly the UUID set in `agentIdsCsv`.
+- `ParcelAccessListSet(action="clear")` clears the target scope list and ignores `agentIdsCsv`.
+- `ParcelFlagsGet(localId?, forceRefresh?)` returns `flags` plus `flagsMask` and normalized `flagStates` booleans.
+- `ParcelSetFlags(localId, enableFlagsCsv?, disableFlagsCsv?)` applies `after = (before | enableFlags) & ~disableFlags`; overlapping flags are rejected.
+- Example MCP call forms:
+  - `ParcelAccessListSet(localId=42, listType="access", action="add", agentIdsCsv="uuid-a,uuid-b")`
+  - `ParcelAccessListSet(localId=42, listType="ban", action="clear")`
+  - `ParcelSetFlags(localId=42, enableFlagsCsv="UseAccessList,AllowFly", disableFlagsCsv="UseBanList")`
 
 RLV notes:
 - RLV behavior is startup-gated by `ALLOW_RLV` (default `false`) and runtime-gated by `RlvSetRuntimeEnabled`.

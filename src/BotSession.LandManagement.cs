@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.IO;
 using LibreMetaverse;
+using LibreMetaverse.Packets;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -241,6 +242,227 @@ internal sealed partial class BotSession
 
             return DataToolResult.OkResult(
                 $"Retrieved parcel access list for localId={localId} (scope={requestedScope}, agents={agents.Count}).",
+                JsonSerializer.Serialize(payload, JsonOptions));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ParcelAccessListSetAsync(
+        int localId,
+        string listType,
+        string action,
+        string? agentIdsCsv,
+        CancellationToken cancellationToken)
+    {
+        if (localId <= 0)
+        {
+            return BotToolResult.Fail("localId must be greater than 0.");
+        }
+
+        if (!TryParseAccessListScope(listType, out var requestedScope, out var scopeError))
+        {
+            return BotToolResult.Fail(scopeError);
+        }
+
+        if (requestedScope == AccessList.Both)
+        {
+            return BotToolResult.Fail("listType must be either 'access' or 'ban' for set operations.");
+        }
+
+        if (!TryParseAccessListSetAction(action, out var requestedAction, out var actionError))
+        {
+            return BotToolResult.Fail(actionError);
+        }
+
+        var needsAgentIds = requestedAction != ParcelAccessListSetAction.Clear;
+        if (!TryParseAgentIdCsv(agentIdsCsv, needsAgentIds, out var requestedAgentIds, out var parseError))
+        {
+            return BotToolResult.Fail(parseError);
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            var currentEntries = await RequestParcelAccessEntriesAsync(client, sim, localId, requestedScope, token).ConfigureAwait(false);
+            if (currentEntries == null)
+            {
+                return BotToolResult.Fail($"Timed out waiting for access list reply for parcel {localId}.");
+            }
+
+            var currentByAgent = new Dictionary<UUID, int>();
+            foreach (var entry in currentEntries)
+            {
+                if (IsPlaceholderAccessEntry(entry) || !EntryMatchesScope(entry, requestedScope))
+                {
+                    continue;
+                }
+
+                currentByAgent[entry.AgentID] = ToUnixTimeOrZero(entry.Time);
+            }
+
+            var updatedAgentIds = new HashSet<UUID>(currentByAgent.Keys);
+            switch (requestedAction)
+            {
+                case ParcelAccessListSetAction.Add:
+                    updatedAgentIds.UnionWith(requestedAgentIds);
+                    break;
+                case ParcelAccessListSetAction.Remove:
+                    updatedAgentIds.ExceptWith(requestedAgentIds);
+                    break;
+                case ParcelAccessListSetAction.Replace:
+                    updatedAgentIds.Clear();
+                    updatedAgentIds.UnionWith(requestedAgentIds);
+                    break;
+                case ParcelAccessListSetAction.Clear:
+                    updatedAgentIds.Clear();
+                    break;
+            }
+
+            await SendParcelAccessListUpdateAsync(
+                    client,
+                    sim,
+                    localId,
+                    requestedScope,
+                    updatedAgentIds,
+                    currentByAgent,
+                    token)
+                .ConfigureAwait(false);
+
+            return BotToolResult.OkResult(
+                $"Parcel access list updated for localId={localId} (scope={requestedScope}, action={requestedAction.ToString().ToLowerInvariant()}, before={currentByAgent.Count}, after={updatedAgentIds.Count}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ParcelSetFlagsAsync(
+        int localId,
+        string? enableFlagsCsv,
+        string? disableFlagsCsv,
+        CancellationToken cancellationToken)
+    {
+        if (localId <= 0)
+        {
+            return BotToolResult.Fail("localId must be greater than 0.");
+        }
+
+        if (!TryParseParcelFlagsCsv(enableFlagsCsv, out var enableFlags, out var enableError))
+        {
+            return BotToolResult.Fail(enableError);
+        }
+
+        if (!TryParseParcelFlagsCsv(disableFlagsCsv, out var disableFlags, out var disableError))
+        {
+            return BotToolResult.Fail(disableError);
+        }
+
+        if (enableFlags == ParcelFlags.None && disableFlags == ParcelFlags.None)
+        {
+            return BotToolResult.Fail("At least one flag must be provided via enableFlagsCsv or disableFlagsCsv.");
+        }
+
+        var overlap = enableFlags & disableFlags;
+        if (overlap != ParcelFlags.None)
+        {
+            return BotToolResult.Fail($"The same flag cannot be enabled and disabled in one request: {overlap}.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            var parcel = await GetParcelAsync(client, sim, localId, refreshFromSimulator: true, token).ConfigureAwait(false);
+            if (parcel == null)
+            {
+                return BotToolResult.Fail($"Parcel localId={localId} was not found.");
+            }
+
+            var before = parcel.Flags;
+            var after = (before | enableFlags) & ~disableFlags;
+            if (after == before)
+            {
+                return BotToolResult.OkResult($"Parcel {localId} flags unchanged ({before}).");
+            }
+
+            parcel.Flags = after;
+            parcel.Update(client, sim, wantReply: true);
+            return BotToolResult.OkResult($"Parcel {localId} flags update submitted (before={before}, after={after}).");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<DataToolResult> ParcelFlagsGetAsync(int? localId, bool forceRefresh, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return DataToolResult.FailResult("No current simulator available.");
+            }
+
+            await EnsureParcelMapAsync(client, sim, forceRefresh, token).ConfigureAwait(false);
+
+            int resolvedLocalId;
+            if (localId.HasValue)
+            {
+                if (localId.Value <= 0)
+                {
+                    return DataToolResult.FailResult("localId must be greater than 0 when provided.");
+                }
+
+                resolvedLocalId = localId.Value;
+            }
+            else
+            {
+                resolvedLocalId = client.Parcels.GetParcelLocalID(sim, client.Self.SimPosition);
+                if (resolvedLocalId <= 0)
+                {
+                    return DataToolResult.FailResult("Unable to resolve current parcel local ID from simulator parcel map.");
+                }
+            }
+
+            var parcel = await GetParcelAsync(client, sim, resolvedLocalId, refreshFromSimulator: true, token).ConfigureAwait(false);
+            if (parcel == null)
+            {
+                return DataToolResult.FailResult($"Parcel localId={resolvedLocalId} was not found.");
+            }
+
+            var enabledFlags = new List<string>();
+            var flagStates = new Dictionary<string, bool>(StringComparer.Ordinal);
+            foreach (var flag in Enum.GetValues<ParcelFlags>())
+            {
+                if (flag == ParcelFlags.None)
+                {
+                    continue;
+                }
+
+                var enabled = parcel.Flags.HasFlag(flag);
+                var key = flag.ToString();
+                flagStates[key] = enabled;
+                if (enabled)
+                {
+                    enabledFlags.Add(key);
+                }
+            }
+
+            var payload = new
+            {
+                simulator = sim.Name,
+                localId = parcel.LocalID,
+                flags = parcel.Flags.ToString(),
+                flagsMask = (uint)parcel.Flags,
+                enabledFlags,
+                flagStates
+            };
+
+            return DataToolResult.OkResult(
+                $"Retrieved parcel flags for localId={parcel.LocalID} (enabled={enabledFlags.Count}).",
                 JsonSerializer.Serialize(payload, JsonOptions));
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -1549,6 +1771,86 @@ internal sealed partial class BotSession
         return singleReply == null ? null : DeduplicateAccessEntries(singleReply.AccessList);
     }
 
+    private static async Task SendParcelAccessListUpdateAsync(
+        GridClient client,
+        Simulator sim,
+        int localId,
+        AccessList scope,
+        HashSet<UUID> updatedAgentIds,
+        IReadOnlyDictionary<UUID, int> existingUnixTimes,
+        CancellationToken cancellationToken)
+    {
+        const int maxEntriesPerPacket = 180;
+        var transactionId = UUID.Random();
+
+        if (updatedAgentIds.Count == 0)
+        {
+            var clearPacket = CreateParcelAccessListUpdatePacket(client, localId, scope, transactionId, new[]
+            {
+                new ParcelAccessListUpdatePacket.ListBlock
+                {
+                    ID = UUID.Zero,
+                    Flags = (uint)scope,
+                    Time = 0
+                }
+            });
+            cancellationToken.ThrowIfCancellationRequested();
+            client.Network.SendPacket(clearPacket, sim);
+            return;
+        }
+
+        var orderedAgentIds = updatedAgentIds.ToList();
+        orderedAgentIds.Sort((a, b) => string.CompareOrdinal(a.ToString(), b.ToString()));
+
+        for (var i = 0; i < orderedAgentIds.Count; i += maxEntriesPerPacket)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var count = Math.Min(maxEntriesPerPacket, orderedAgentIds.Count - i);
+            var blocks = new ParcelAccessListUpdatePacket.ListBlock[count];
+            for (var offset = 0; offset < count; offset++)
+            {
+                var agentId = orderedAgentIds[i + offset];
+                var expires = existingUnixTimes.TryGetValue(agentId, out var unixTime) ? unixTime : 0;
+                blocks[offset] = new ParcelAccessListUpdatePacket.ListBlock
+                {
+                    ID = agentId,
+                    Flags = (uint)scope,
+                    Time = expires
+                };
+            }
+
+            var packet = CreateParcelAccessListUpdatePacket(client, localId, scope, transactionId, blocks);
+            client.Network.SendPacket(packet, sim);
+        }
+    }
+
+    private static ParcelAccessListUpdatePacket CreateParcelAccessListUpdatePacket(
+        GridClient client,
+        int localId,
+        AccessList scope,
+        UUID transactionId,
+        ParcelAccessListUpdatePacket.ListBlock[] blocks)
+    {
+        var packet = new ParcelAccessListUpdatePacket
+        {
+            AgentData =
+            {
+                AgentID = client.Self.AgentID,
+                SessionID = client.Self.SessionID
+            },
+            Data =
+            {
+                Flags = (uint)scope,
+                LocalID = localId,
+                TransactionID = transactionId
+            },
+            List = blocks
+        };
+
+        return packet;
+    }
+
     private static List<ParcelManager.ParcelAccessEntry> DeduplicateAccessEntries(List<ParcelManager.ParcelAccessEntry> entries)
     {
         var unique = new List<ParcelManager.ParcelAccessEntry>(entries.Count);
@@ -1593,6 +1895,121 @@ internal sealed partial class BotSession
     {
         // OpenSim can send placeholder records for empty allow/ban lists.
         return entry.AgentID == UUID.Zero;
+    }
+
+    private static bool EntryMatchesScope(ParcelManager.ParcelAccessEntry entry, AccessList scope)
+    {
+        return (entry.Flags & scope) == scope;
+    }
+
+    private static int ToUnixTimeOrZero(DateTime value)
+    {
+        if (value == default || value <= DateTime.UnixEpoch)
+        {
+            return 0;
+        }
+
+        var utc = value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime();
+        var unix = new DateTimeOffset(utc).ToUnixTimeSeconds();
+        if (unix <= 0)
+        {
+            return 0;
+        }
+
+        return unix > int.MaxValue ? int.MaxValue : (int)unix;
+    }
+
+    private enum ParcelAccessListSetAction
+    {
+        Add,
+        Remove,
+        Replace,
+        Clear
+    }
+
+    private static bool TryParseAccessListSetAction(string value, out ParcelAccessListSetAction action, out string error)
+    {
+        action = ParcelAccessListSetAction.Add;
+        error = string.Empty;
+
+        var normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
+        switch (normalized)
+        {
+            case "add":
+                action = ParcelAccessListSetAction.Add;
+                return true;
+            case "remove":
+            case "delete":
+                action = ParcelAccessListSetAction.Remove;
+                return true;
+            case "replace":
+            case "set":
+                action = ParcelAccessListSetAction.Replace;
+                return true;
+            case "clear":
+                action = ParcelAccessListSetAction.Clear;
+                return true;
+            default:
+                error = "action must be one of: add, remove, replace, clear.";
+                return false;
+        }
+    }
+
+    private static bool TryParseAgentIdCsv(string? csv, bool required, out HashSet<UUID> agentIds, out string error)
+    {
+        agentIds = new HashSet<UUID>();
+        error = string.Empty;
+
+        var tokens = (csv ?? string.Empty).Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        foreach (var token in tokens)
+        {
+            if (!UUID.TryParse(token, out var agentId))
+            {
+                error = $"Invalid agent UUID in list: '{token}'.";
+                return false;
+            }
+
+            if (agentId == UUID.Zero)
+            {
+                error = "Agent UUID '00000000-0000-0000-0000-000000000000' is not allowed.";
+                return false;
+            }
+
+            _ = agentIds.Add(agentId);
+        }
+
+        if (required && agentIds.Count == 0)
+        {
+            error = "agentIdsCsv must contain at least one valid UUID for this action.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryParseParcelFlagsCsv(string? csv, out ParcelFlags flags, out string error)
+    {
+        flags = ParcelFlags.None;
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(csv))
+        {
+            return true;
+        }
+
+        var tokens = csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        foreach (var token in tokens)
+        {
+            if (!Enum.TryParse<ParcelFlags>(token, ignoreCase: true, out var parsed))
+            {
+                error = $"Unknown parcel flag: '{token}'.";
+                return false;
+            }
+
+            flags |= parsed;
+        }
+
+        return true;
     }
 
     private static async Task<EstateUpdateInfoReplyEventArgs?> WaitForEstateUpdateInfoReplyAsync(GridClient client, CancellationToken cancellationToken)

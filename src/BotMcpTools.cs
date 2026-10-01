@@ -646,6 +646,36 @@ internal sealed class BotMcpTools
         return _bot.ParcelAccessListGetAsync(localId, listType, cancellationToken);
     }
 
+    [McpServerTool, Description("Mutate parcel allowlist/banlist entries by parcel local ID.")]
+    public Task<BotToolResult> ParcelAccessListSet(
+        [Description("Parcel local ID.")] int localId,
+        [Description("List type: access or ban.")] string listType,
+        [Description("Mutation action: add, remove, replace, clear.")] string action,
+        [Description("Comma-separated avatar UUIDs. Required for add/remove/replace; ignored for clear.")] string? agentIdsCsv = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ParcelAccessListSetAsync(localId, listType, action, agentIdsCsv, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set parcel flags by enabling and/or disabling named flags.")]
+    public Task<BotToolResult> ParcelSetFlags(
+        [Description("Parcel local ID.")] int localId,
+        [Description("Comma-separated flag names to enable (for example: UseAccessList,AllowFly).") ] string? enableFlagsCsv = null,
+        [Description("Comma-separated flag names to disable (for example: UseBanList,AllowDamage).") ] string? disableFlagsCsv = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ParcelSetFlagsAsync(localId, enableFlagsCsv, disableFlagsCsv, cancellationToken);
+    }
+
+    [McpServerTool, Description("Get parcel flags as enum string plus normalized per-flag booleans.")]
+    public Task<DataToolResult> ParcelFlagsGet(
+        [Description("Optional parcel local ID. If omitted, uses parcel under bot position.")] int? localId = null,
+        [Description("Force a fresh simulator parcel-map refresh before resolving parcel.")] bool forceRefresh = false,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ParcelFlagsGetAsync(localId, forceRefresh, cancellationToken);
+    }
+
     [McpServerTool, Description("Eject an avatar from the current parcel, with optional ban.")]
     public Task<BotToolResult> ParcelEjectUser(
         [Description("Target avatar UUID.")] string targetAgentId,
