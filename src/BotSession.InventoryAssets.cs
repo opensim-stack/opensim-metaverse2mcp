@@ -21,6 +21,10 @@ internal sealed partial class BotSession
     private int _nextInventoryOfferEventId;
 
     private const int MaxInventoryOfferHistory = 200;
+    private const int StartupSetupProvisionStateIdle = 0;
+    private const int StartupSetupProvisionStateRunning = 1;
+    private const int StartupSetupProvisionStateCompleted = 2;
+    private const int StartupSetupProvisionArtificialDelayMs = 10_000;
     private static readonly HttpClient SharedHttpClient = new();
 
     public async Task<InventoryOfferPolicyResult> InventoryOfferPolicyRulesSaveAsync(string? filePath, CancellationToken cancellationToken)
@@ -204,106 +208,228 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task RunStartupSetupProvisioningIfNeededAsync(CancellationToken cancellationToken)
+    private void QueueStartupSetupProvisioning(string trigger)
     {
-        if (Interlocked.CompareExchange(ref _startupSetupProvisionAttempted, 1, 0) != 0)
+        if (_lifecycleCts.IsCancellationRequested)
         {
-            Console.WriteLine("[provisioning] startup provisioning already attempted, skipping.");
             return;
         }
-        
-        Console.WriteLine("[provisioning] checking for startup provisioning setup folder in root inventory...");
 
+        if (!_connected)
+        {
+            Console.WriteLine($"[provisioning] startup provisioning trigger '{trigger}' ignored while disconnected.");
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RunStartupSetupProvisioningIfNeededAsync(trigger, _lifecycleCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_lifecycleCts.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[provisioning] startup provisioning task failed ({trigger}): {ex.Message}");
+            }
+        });
+    }
+
+    private async Task RunStartupSetupProvisioningIfNeededAsync(string trigger, CancellationToken cancellationToken)
+    {
+        var priorState = Interlocked.CompareExchange(
+            ref _startupSetupProvisionState,
+            StartupSetupProvisionStateRunning,
+            StartupSetupProvisionStateIdle);
+        if (priorState == StartupSetupProvisionStateRunning)
+        {
+            Console.WriteLine($"[provisioning] startup provisioning already running, skipping trigger '{trigger}'.");
+            return;
+        }
+
+        if (priorState == StartupSetupProvisionStateCompleted)
+        {
+            Console.WriteLine($"[provisioning] startup provisioning already completed for this login, skipping trigger '{trigger}'.");
+            return;
+        }
+
+        var completed = false;
         var setupFolderName = string.IsNullOrWhiteSpace(_options.WearFolderName)
             ? "Setup"
             : _options.WearFolderName.Trim();
 
-        var prep = (Found: false, SetupFolderId: UUID.Zero, SetupFolderName: string.Empty, ProvisioningFolderId: UUID.Zero, ProvisioningFolderName: string.Empty);
+        try
+        {
+            Console.WriteLine($"[provisioning] startup provisioning queued from '{trigger}' for setup folder '{setupFolderName}'.");
+
+            var readinessDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(45);
+            var ready = false;
+            while (DateTime.UtcNow < readinessDeadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var client = _connected ? _client : null;
+                if (client == null
+                    || client.Network.CurrentSim == null
+                    || client.Self.AgentID == UUID.Zero
+                    || client.Inventory?.Store?.RootFolder == null)
+                {
+                    await Task.Delay(1000, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                ready = true;
+                break;
+            }
+
+            if (!ready)
+            {
+                Console.WriteLine($"[provisioning] startup provisioning for '{setupFolderName}' timed out waiting for readiness; waiting for another login/sim event.");
+                return;
+            }
+
+            // Give remote inventory indexing a moment to catch up after login/sim-change.
+            Console.WriteLine($"[provisioning] waiting {StartupSetupProvisionArtificialDelayMs / 1000}s before setup-folder lookup.");
+            await Task.Delay(StartupSetupProvisionArtificialDelayMs, cancellationToken).ConfigureAwait(false);
+
+            var activeClient = _client;
+            if (activeClient == null)
+            {
+                Console.WriteLine("[provisioning] startup provisioning aborted because client became unavailable.");
+                return;
+            }
+
+            var outcome = await TryRunStartupSetupProvisioningCoreAsync(activeClient, setupFolderName, cancellationToken).ConfigureAwait(false);
+            if (outcome.Completed)
+            {
+                completed = true;
+                return;
+            }
+
+            if (outcome.RetryLater)
+            {
+                Console.WriteLine($"[provisioning] startup provisioning for '{setupFolderName}' requested retry; waiting for next sim/login event.");
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            Interlocked.Exchange(
+                ref _startupSetupProvisionState,
+                completed ? StartupSetupProvisionStateCompleted : StartupSetupProvisionStateIdle);
+        }
+    }
+
+    private async Task<(bool Completed, bool RetryLater)> TryRunStartupSetupProvisioningCoreAsync(
+        GridClient client,
+        string setupFolderName,
+        CancellationToken cancellationToken)
+    {
+        var setupFolderId = UUID.Zero;
+        var setupFolderDisplayName = setupFolderName;
+        var provisioningFolderId = UUID.Zero;
+        var provisioningFolderDisplayName = string.Empty;
+        var provisioningFolderMovedToObjects = false;
+        var movedFromParentId = UUID.Zero;
 
         await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var client = EnsureClient();
             var store = client.Inventory.Store;
             var rootFolder = store?.RootFolder;
             if (store == null || rootFolder == null)
             {
-                return;
+                return (false, true);
             }
 
             List<InventoryBase> rootContents;
             try
             {
-                rootContents = store.GetContents(rootFolder.UUID);
+                rootContents = await client.Inventory
+                    .FolderContentsAsync(rootFolder.UUID, client.Self.AgentID, true, true, InventorySortOrder.ByName, cancellationToken)
+                    .ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
-                return;
+                Console.WriteLine($"[provisioning] could not read root inventory while looking for setup folder '{setupFolderName}': {ex.Message}");
+                return (false, true);
             }
 
             var setupFolder = rootContents
                 .OfType<InventoryFolder>()
                 .FirstOrDefault(folder => string.Equals(folder.Name?.Trim(), setupFolderName, StringComparison.OrdinalIgnoreCase));
-
             if (setupFolder == null)
             {
-                Console.WriteLine($"[provisioning] no setup folder '{setupFolderName}' found in root inventory, skipping startup provisioning.");
-                return;
+                Console.WriteLine($"[provisioning] no setup folder '{setupFolderName}' found in root inventory; startup provisioning is complete.");
+                return (true, false);
             }
 
-            var setupContents = await client.Inventory
-                .FolderContentsAsync(setupFolder.UUID, client.Self.AgentID, true, true, InventorySortOrder.ByName, cancellationToken)
-                .ConfigureAwait(false);
+            setupFolderId = setupFolder.UUID;
+            setupFolderDisplayName = string.IsNullOrWhiteSpace(setupFolder.Name) ? setupFolderName : setupFolder.Name!;
 
-            var provisioningFolder = setupContents.OfType<InventoryFolder>().FirstOrDefault();
-            if (provisioningFolder != null)
+            List<InventoryBase> setupContents;
+            try
             {
-                Console.WriteLine($"[provisioning] found setup folder '{setupFolderName}' ({setupFolder.UUID}) with provisioning folder '{provisioningFolder.Name}' ({provisioningFolder.UUID}).");
-                var objectsFolderId = client.Inventory.FindFolderForType(FolderType.Object);
-                if (objectsFolderId != UUID.Zero && provisioningFolder.ParentUUID != objectsFolderId)
-                {
-                    Console.WriteLine($"[provisioning] moving provisioning folder '{provisioningFolder.Name}' ({provisioningFolder.UUID}) to Objects folder ({objectsFolderId}).");
-                    await client.Inventory.MoveFolderAsync(provisioningFolder.UUID, objectsFolderId, cancellationToken).ConfigureAwait(false);
-                }
+                setupContents = await client.Inventory
+                    .FolderContentsAsync(setupFolder.UUID, client.Self.AgentID, true, true, InventorySortOrder.ByName, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[provisioning] could not read setup folder '{setupFolderDisplayName}' ({setupFolderId}): {ex.Message}");
+                return (false, true);
             }
 
             var agentsNotecard = setupContents
                 .OfType<InventoryItem>()
                 .FirstOrDefault(item => IsNotecardInventoryItem(item)
                     && string.Equals(item.Name?.Trim(), "AGENTS.md", StringComparison.OrdinalIgnoreCase));
-
             if (agentsNotecard != null)
             {
-                Console.WriteLine($"[provisioning] found setup folder '{setupFolderName}' ({setupFolder.UUID}) with companion notecard '{agentsNotecard.Name}' ({agentsNotecard.UUID}).");
                 var notecardsFolderId = client.Inventory.FindFolderForType(FolderType.Notecard);
-                if (notecardsFolderId != UUID.Zero && agentsNotecard.ParentUUID != notecardsFolderId)
+                if (notecardsFolderId == UUID.Zero)
                 {
+                    Console.WriteLine($"[provisioning] notecards folder is not ready yet; will retry startup provisioning for '{setupFolderDisplayName}'.");
+                    return (false, true);
+                }
+
+                if (agentsNotecard.ParentUUID != notecardsFolderId)
+                {
+                    Console.WriteLine($"[provisioning] moving companion notecard '{agentsNotecard.Name}' ({agentsNotecard.UUID}) to Notecards ({notecardsFolderId}).");
                     await client.Inventory.MoveItemAsync(agentsNotecard.UUID, notecardsFolderId, cancellationToken).ConfigureAwait(false);
                 }
             }
 
-            prep = (
-                true,
-                setupFolder.UUID,
-                setupFolder.Name ?? setupFolderName,
-                provisioningFolder?.UUID ?? UUID.Zero,
-                provisioningFolder?.Name ?? string.Empty);
+            var provisioningFolder = setupContents.OfType<InventoryFolder>().FirstOrDefault();
+            if (provisioningFolder != null)
+            {
+                provisioningFolderId = provisioningFolder.UUID;
+                provisioningFolderDisplayName = provisioningFolder.Name ?? string.Empty;
+
+                var objectsFolderId = client.Inventory.FindFolderForType(FolderType.Object);
+                if (objectsFolderId == UUID.Zero)
+                {
+                    Console.WriteLine($"[provisioning] objects folder is not ready yet; will retry startup provisioning for '{setupFolderDisplayName}'.");
+                    return (false, true);
+                }
+
+                if (provisioningFolder.ParentUUID != objectsFolderId)
+                {
+                    movedFromParentId = provisioningFolder.ParentUUID;
+                    provisioningFolderMovedToObjects = true;
+                    Console.WriteLine($"[provisioning] moving provisioning folder '{provisioningFolderDisplayName}' ({provisioningFolderId}) to Objects ({objectsFolderId}).");
+                    await client.Inventory.MoveFolderAsync(provisioningFolderId, objectsFolderId, cancellationToken).ConfigureAwait(false);
+                }
+            }
         }
         finally
         {
             _actionGate.Release();
         }
-
-        if (!prep.Found)
-        {
-            Console.WriteLine($"[provisioning] no setup folder '{setupFolderName}' found in root inventory, skipping startup provisioning.");
-            return;
-        }
-
-        var setupFolderId = prep.SetupFolderId;
-        var setupFolderDisplayName = prep.SetupFolderName;
-        var provisioningFolderId = prep.ProvisioningFolderId;
-        var provisioningFolderDisplayName = prep.ProvisioningFolderName;
 
         if (provisioningFolderId != UUID.Zero)
         {
@@ -314,14 +440,31 @@ internal sealed partial class BotSession
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            if (wearResult.Ok)
-            {
-                Console.WriteLine($"[provisioning] applied startup wear-folder '{provisioningFolderDisplayName}' ({provisioningFolderId}) from setup folder '{setupFolderDisplayName}'.");
-            }
-            else
+            if (!wearResult.Ok)
             {
                 Console.WriteLine($"[provisioning] startup wear-folder apply failed for '{provisioningFolderDisplayName}' ({provisioningFolderId}): {wearResult.Message}");
+                if (provisioningFolderMovedToObjects && movedFromParentId != UUID.Zero)
+                {
+                    await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        await client.Inventory.MoveFolderAsync(provisioningFolderId, movedFromParentId, cancellationToken).ConfigureAwait(false);
+                        Console.WriteLine($"[provisioning] restored provisioning folder '{provisioningFolderDisplayName}' ({provisioningFolderId}) to setup folder after failed wear attempt.");
+                    }
+                    catch (Exception rollbackEx)
+                    {
+                        Console.WriteLine($"[provisioning] failed to restore provisioning folder '{provisioningFolderDisplayName}' ({provisioningFolderId}) after wear failure: {rollbackEx.Message}");
+                    }
+                    finally
+                    {
+                        _actionGate.Release();
+                    }
+                }
+
+                return (false, true);
             }
+
+            Console.WriteLine($"[provisioning] applied startup wear-folder '{provisioningFolderDisplayName}' ({provisioningFolderId}) from setup folder '{setupFolderDisplayName}'.");
         }
         else
         {
@@ -331,12 +474,11 @@ internal sealed partial class BotSession
         await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var client = EnsureClient();
             var trashFolderId = client.Inventory.FindFolderForType(FolderType.Trash);
             if (trashFolderId == UUID.Zero)
             {
                 Console.WriteLine($"[provisioning] startup cleanup skipped: could not resolve Trash folder for setup folder '{setupFolderDisplayName}' ({setupFolderId}).");
-                return;
+                return (true, false);
             }
 
             await client.Inventory.MoveFolderAsync(setupFolderId, trashFolderId, cancellationToken).ConfigureAwait(false);
@@ -346,6 +488,8 @@ internal sealed partial class BotSession
         {
             _actionGate.Release();
         }
+
+        return (true, false);
     }
 
     private async Task<(int RemovedWearableCount, int DetachedAttachmentCount)> RemoveCurrentlyWornItemsAsync(

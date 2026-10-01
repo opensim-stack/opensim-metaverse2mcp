@@ -236,7 +236,7 @@ internal sealed partial class BotSession : IDisposable
     private bool _connected;
     private string _lastLoginMessage = string.Empty;
     private int _reconnectLoopActive;
-    private int _startupSetupProvisionAttempted;
+    private int _startupSetupProvisionState;
     private readonly SpawnerClient _followSpawnerClient;
 
     public BotSession(AppOptions options)
@@ -420,8 +420,8 @@ internal sealed partial class BotSession : IDisposable
 
             // client already assigned to _client above; mark connected.
             _connected = true;
-            RunStartupSetupProvisioningIfNeededAsync(cancellationToken);
-            Interlocked.Exchange(ref _startupSetupProvisionAttempted, 0);
+            Interlocked.Exchange(ref _startupSetupProvisionState, 0);
+            QueueStartupSetupProvisioning("login-connected");
             EmitRuntimeEvent(
                 "general",
                 "login.connected",
@@ -434,6 +434,7 @@ internal sealed partial class BotSession : IDisposable
                     ["firstName"] = _options.BotFirstName,
                     ["lastName"] = _options.BotLastName
                 });
+
             await EnsureVoiceBackendOnLoginAsync(client, cancellationToken).ConfigureAwait(false);
 
             TryLoadOpencodeSessionStateFromFile();
@@ -2156,6 +2157,14 @@ internal sealed partial class BotSession : IDisposable
                     return;
                 }
 
+                if (!_connected)
+                {
+                    Console.WriteLine("[sim-change] ignoring pre-login sim-change event.");
+                    return;
+                }
+
+                QueueStartupSetupProvisioning("sim-change");
+
                 Console.WriteLine("[sim-change] OnNetworkSimChanged: processing region transition.");
 
                 // opensim-ai-docker#7: region transitions are the known trigger for
@@ -2187,11 +2196,9 @@ internal sealed partial class BotSession : IDisposable
 
                 if (!ready)
                 {
-                    Console.WriteLine("[sim-change] client not fully initialized yet; postponing follow-up work until next sim change.");
+                    Console.WriteLine("[sim-change] client not fully initialized yet; skipping sim-change follow-up actions.");
                     return;
                 }
-
-                await RunStartupSetupProvisioningIfNeededAsync(_lifecycleCts.Token).ConfigureAwait(false);
                 
                 client.Self.Movement.SetFOVVerticalAngle(Utils.TWO_PI - 0.05f);
             }
@@ -2205,6 +2212,7 @@ internal sealed partial class BotSession : IDisposable
     private void OnDisconnected(object? sender, DisconnectedEventArgs e)
     {
         _connected = false;
+        Interlocked.Exchange(ref _startupSetupProvisionState, 0);
         HandleVoiceDisconnected();
         StopFollowInternal();
         CancelMovementAutoStop();
