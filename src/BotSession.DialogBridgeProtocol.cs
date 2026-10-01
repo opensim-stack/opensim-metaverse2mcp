@@ -19,7 +19,7 @@ internal sealed partial class BotSession
         return await ExecuteLockedAsync((client, _) =>
         {
             var message = $"[mood] {normalizedEmotion}";
-            client.Self.Chat(message, 0, ChatType.Normal);
+            client.Self.Chat(message, 3645376, ChatType.Normal);
             Console.WriteLine($"[mood] broadcast: {normalizedEmotion}");
             return Task.FromResult(BotToolResult.OkResult($"Broadcast mood change on say channel: {message}"));
         }, cancellationToken).ConfigureAwait(false);

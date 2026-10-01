@@ -1293,7 +1293,7 @@ internal sealed partial class BotSession : IDisposable
         {
             try
             {
-                client.Self.Chat("[typing] start", 0, ChatType.Normal);
+                client.Self.Chat("[typing] start", 3645376, ChatType.Normal);
             }
             catch (Exception ex)
             {
@@ -1344,7 +1344,7 @@ internal sealed partial class BotSession : IDisposable
 
         try
         {
-            client.Self.Chat("[typing] stop", 0, ChatType.Normal);
+            client.Self.Chat("[typing] stop", 3645376, ChatType.Normal);
         }
         catch (Exception ex)
         {

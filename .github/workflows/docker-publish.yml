@@ -25,6 +25,7 @@ concurrency:
 
 env:
   IMAGE_NAME: bithatch/opensim-metaverse2mcp
+  USE_LIBREMETAVERSE_GIT: "true"
 
 jobs:
   build-and-push:
@@ -63,6 +64,8 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            USE_LIBREMETAVERSE_GIT=${{ env.USE_LIBREMETAVERSE_GIT }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
