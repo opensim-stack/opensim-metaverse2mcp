@@ -420,6 +420,7 @@ internal sealed partial class BotSession : IDisposable
 
             // client already assigned to _client above; mark connected.
             _connected = true;
+            RunStartupSetupProvisioningIfNeededAsync(cancellationToken);
             Interlocked.Exchange(ref _startupSetupProvisionAttempted, 0);
             EmitRuntimeEvent(
                 "general",

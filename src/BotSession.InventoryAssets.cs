@@ -211,6 +211,8 @@ internal sealed partial class BotSession
             Console.WriteLine("[provisioning] startup provisioning already attempted, skipping.");
             return;
         }
+        
+        Console.WriteLine("[provisioning] checking for startup provisioning setup folder in root inventory...");
 
         var setupFolderName = string.IsNullOrWhiteSpace(_options.WearFolderName)
             ? "Setup"
