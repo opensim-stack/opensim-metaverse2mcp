@@ -7,6 +7,7 @@ namespace Opensim.Metaverse2Mcp;
 internal sealed partial class BotSession
 {
     private const float MinimumTerrainCoverageForMutation = 0.999f;
+    private static readonly TimeSpan ParcelReplyTimeout = TimeSpan.FromSeconds(5);
 
     public async Task<DataToolResult> ParcelGetCurrentAsync(bool includeAccessLists, bool forceRefresh, CancellationToken cancellationToken)
     {
@@ -20,12 +21,15 @@ internal sealed partial class BotSession
 
             await EnsureParcelMapAsync(client, sim, forceRefresh, token).ConfigureAwait(false);
 
+            Console.WriteLine($"[land] Parcel map contains {sim.Parcels.Count} entries for sim {sim.Name}.");
             var localId = client.Parcels.GetParcelLocalID(sim, client.Self.SimPosition);
             if (localId <= 0)
             {
+                Console.WriteLine($"[land] Unable to resolve current parcel local ID from simulator parcel map for sim {sim.Name} at position {client.Self.SimPosition}.");
                 return DataToolResult.FailResult("Unable to resolve current parcel local ID from simulator parcel map.");
             }
 
+            Console.WriteLine($"[land] Resolved current parcel local ID={localId} for sim {sim.Name} at position {client.Self.SimPosition}.");
             return await ParcelGetByLocalIdCoreAsync(client, sim, localId, includeAccessLists, token).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -190,29 +194,40 @@ internal sealed partial class BotSession
                 return DataToolResult.FailResult("No current simulator available.");
             }
 
-            var accessReply = await WaitForParcelAccessListReplyAsync(client, sim, localId, requestedScope, token).ConfigureAwait(false);
-            if (accessReply == null)
+            var accessEntries = await RequestParcelAccessEntriesAsync(client, sim, localId, requestedScope, token).ConfigureAwait(false);
+            if (accessEntries == null)
             {
                 return DataToolResult.FailResult($"Timed out waiting for access list reply for parcel {localId}.");
             }
 
-            var allow = new List<ParcelAccessEntryInfo>();
-            var ban = new List<ParcelAccessEntryInfo>();
-            foreach (var entry in accessReply.AccessList)
+            var agents = new List<ParcelAccessEntryInfo>();
+            foreach (var entry in accessEntries)
             {
+                if (IsPlaceholderAccessEntry(entry))
+                {
+                    continue;
+                }
+
                 var info = new ParcelAccessEntryInfo(
                     entry.AgentID.ToString(),
                     entry.Time.ToUniversalTime().ToString("O"),
                     entry.Flags.ToString());
 
-                if (entry.Flags.HasFlag(AccessList.Access))
+                if (requestedScope == AccessList.Both)
                 {
-                    allow.Add(info);
+                    agents.Add(info);
+                    continue;
                 }
 
-                if (entry.Flags.HasFlag(AccessList.Ban))
+                // For single-scope requests, treat returned entries as belonging to the requested scope.
+                // Some simulators may emit multiple ACL reply packets around one request.
+                if (requestedScope == AccessList.Access)
                 {
-                    ban.Add(info);
+                    agents.Add(info with { EntryType = AccessList.Access.ToString() });
+                }
+                else if (requestedScope == AccessList.Ban)
+                {
+                    agents.Add(info with { EntryType = AccessList.Ban.ToString() });
                 }
             }
 
@@ -221,12 +236,11 @@ internal sealed partial class BotSession
                 simulator = sim.Name,
                 localId,
                 requestedScope = requestedScope.ToString(),
-                allowList = allow,
-                banList = ban
+                agents
             };
 
             return DataToolResult.OkResult(
-                $"Retrieved parcel access list for localId={localId} (allow={allow.Count}, ban={ban.Count}).",
+                $"Retrieved parcel access list for localId={localId} (scope={requestedScope}, agents={agents.Count}).",
                 JsonSerializer.Serialize(payload, JsonOptions));
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -1244,9 +1258,11 @@ internal sealed partial class BotSession
         bool includeAccessLists,
         CancellationToken cancellationToken)
     {
+        Console.WriteLine($"[land] Fetching parcel localId={localId} from sim {sim.Name} (includeAccessLists={includeAccessLists})...");
         var parcel = await GetParcelAsync(client, sim, localId, refreshFromSimulator: true, cancellationToken).ConfigureAwait(false);
         if (parcel == null)
         {
+            Console.WriteLine($"[land] Parcel localId={localId} was not found in sim {sim.Name}.");
             return DataToolResult.FailResult($"Parcel localId={localId} was not found.");
         }
 
@@ -1255,27 +1271,36 @@ internal sealed partial class BotSession
 
         if (includeAccessLists)
         {
-            var accessReply = await WaitForParcelAccessListReplyAsync(client, sim, localId, AccessList.Both, cancellationToken).ConfigureAwait(false);
-            if (accessReply == null)
+            Console.WriteLine($"[land] Requesting access list for parcel localId={localId} from sim {sim.Name}...");
+            var accessEntries = await RequestParcelAccessEntriesAsync(client, sim, localId, AccessList.Both, cancellationToken).ConfigureAwait(false);
+            if (accessEntries == null)
             {
+                Console.WriteLine($"[land] Timed out waiting for access list reply for parcel localId={localId} from sim {sim.Name}.");
                 return DataToolResult.FailResult($"Timed out waiting for access list reply for parcel {localId}.");
             }
 
             var allowList = new List<ParcelAccessEntryInfo>();
             var banList = new List<ParcelAccessEntryInfo>();
-            foreach (var entry in accessReply.AccessList)
+            foreach (var entry in accessEntries)
             {
+                if (IsPlaceholderAccessEntry(entry))
+                {
+                    continue;
+                }
+
                 var info = new ParcelAccessEntryInfo(
                     entry.AgentID.ToString(),
                     entry.Time.ToUniversalTime().ToString("O"),
                     entry.Flags.ToString());
                 if (entry.Flags.HasFlag(AccessList.Access))
                 {
+                    Console.WriteLine($"[land] Adding to allow list: {info.AgentId} (time={info.AddedAtUtc}, flags={info.EntryType})");
                     allowList.Add(info);
                 }
 
                 if (entry.Flags.HasFlag(AccessList.Ban))
                 {
+                    Console.WriteLine($"[land] Adding to ban list: {info.AgentId} (time={info.AddedAtUtc}, flags={info.EntryType})");
                     banList.Add(info);
                 }
             }
@@ -1304,6 +1329,8 @@ internal sealed partial class BotSession
             allowList = allow,
             banList = ban
         };
+        
+        Console.WriteLine($"[land] Fetched parcel localId={localId} from sim {sim.Name} (includeAccessLists={includeAccessLists}).");
 
         return DataToolResult.OkResult(
             includeAccessLists
@@ -1314,11 +1341,13 @@ internal sealed partial class BotSession
 
     private static async Task EnsureParcelMapAsync(GridClient client, Simulator sim, bool forceRefresh, CancellationToken cancellationToken)
     {
+        Console.WriteLine($"[land] Ensuring parcel map for sim {sim.Name} (forceRefresh={forceRefresh})...");
         if (!forceRefresh && sim.Parcels.Count > 0)
         {
             return;
         }
 
+        Console.WriteLine($"[land] Requesting parcel map for sim {sim.Name} (forceRefresh={forceRefresh})...");
         await client.Parcels.RequestAllSimParcelsAsync(sim, refresh: forceRefresh, delay: TimeSpan.FromMilliseconds(80), cancellationToken)
             .ConfigureAwait(false);
     }
@@ -1332,9 +1361,11 @@ internal sealed partial class BotSession
     {
         if (sim.Parcels.TryGetValue(localId, out var cached) && cached != null && !refreshFromSimulator)
         {
+            Console.WriteLine($"[land] Parcel localId={localId} found in cache for sim {sim.Name}, skipping simulator request.");
             return cached;
         }
 
+        Console.WriteLine($"[land] Requesting parcel localId={localId} from sim {sim.Name} (refreshFromSimulator={refreshFromSimulator})...");
         var reply = await WaitForParcelPropertiesReplyAsync(client, sim, localId, cancellationToken).ConfigureAwait(false);
         if (reply?.Parcel != null)
         {
@@ -1343,8 +1374,11 @@ internal sealed partial class BotSession
 
         if (sim.Parcels.TryGetValue(localId, out cached))
         {
+            Console.WriteLine($"[land] Parcel localId={localId} found in cache for sim {sim.Name} after simulator request.");
             return cached;
         }
+        
+        Console.WriteLine($"[land] Parcel localId={localId} was not found in sim {sim.Name} after simulator request.");
 
         return null;
     }
@@ -1360,7 +1394,7 @@ internal sealed partial class BotSession
 
         void Handler(object? _, ParcelPropertiesEventArgs e)
         {
-            if (ReferenceEquals(e.Simulator, sim)
+            if (IsSameSimulator(e.Simulator, sim)
                 && e.Parcel != null
                 && e.Parcel.LocalID == localId
                 && e.SequenceID == sequenceId)
@@ -1372,13 +1406,18 @@ internal sealed partial class BotSession
         client.Parcels.ParcelProperties += Handler;
         try
         {
+            Console.WriteLine($"[land] Requesting parcel properties for localId={localId} from sim {sim.Name} (sequenceId={sequenceId})...");
             client.Parcels.RequestParcelProperties(sim, localId, sequenceId);
-            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(12), cancellationToken);
+            Console.WriteLine($"[land] Waiting for parcel properties reply for localId={localId} from sim {sim.Name} (sequenceId={sequenceId})...");
+            var timeoutTask = Task.Delay(ParcelReplyTimeout, cancellationToken);
             var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
             if (completed != tcs.Task)
             {
+                Console.WriteLine($"[land] Timed out waiting for direct parcel properties reply for localId={localId} from sim {sim.Name} (sequenceId={sequenceId}).");
                 return null;
             }
+            
+            Console.WriteLine($"[land] Received parcel properties reply for localId={localId} from sim {sim.Name} (sequenceId={sequenceId}).");
 
             return await tcs.Task.ConfigureAwait(false);
         }
@@ -1397,25 +1436,88 @@ internal sealed partial class BotSession
     {
         var sequenceId = Random.Shared.Next(1, int.MaxValue);
         var tcs = new TaskCompletionSource<ParcelAccessListReplyEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var requestedScope = flags & AccessList.Both;
+        var mergedEntries = new List<ParcelManager.ParcelAccessEntry>();
+        var sawAccessReply = false;
+        var sawBanReply = false;
+        var isCompleted = false;
+
+        bool WantsAccess() => requestedScope == AccessList.Access || requestedScope == AccessList.Both;
+        bool WantsBan() => requestedScope == AccessList.Ban || requestedScope == AccessList.Both;
+        bool IsComplete() => (!WantsAccess() || sawAccessReply) && (!WantsBan() || sawBanReply);
 
         void Handler(object? _, ParcelAccessListReplyEventArgs e)
         {
-            if (ReferenceEquals(e.Simulator, sim) && e.LocalID == localId && e.SequenceID == sequenceId)
+            if (isCompleted)
             {
-                tcs.TrySetResult(e);
+                return;
+            }
+
+            // OpenSim replies with SequenceID=0 for ParcelAccessListReply, so accept either 0 or our requested id.
+            var sequenceMatches = e.SequenceID == sequenceId || e.SequenceID == 0;
+            if (!IsSameSimulator(e.Simulator, sim) || e.LocalID != localId || !sequenceMatches)
+            {
+                return;
+            }
+
+            var replyScope = ((AccessList)e.Flags) & AccessList.Both;
+            var matchesRequestedScope = requestedScope == AccessList.Both
+                ? (replyScope.HasFlag(AccessList.Access) || replyScope.HasFlag(AccessList.Ban))
+                : replyScope.HasFlag(requestedScope);
+            if (!matchesRequestedScope)
+            {
+                return;
+            }
+
+            if (replyScope.HasFlag(AccessList.Access) && !sawAccessReply)
+            {
+                sawAccessReply = true;
+                foreach (var entry in e.AccessList)
+                {
+                    mergedEntries.Add(new ParcelManager.ParcelAccessEntry
+                    {
+                        AgentID = entry.AgentID,
+                        Time = entry.Time,
+                        Flags = AccessList.Access
+                    });
+                }
+            }
+
+            if (replyScope.HasFlag(AccessList.Ban) && !sawBanReply)
+            {
+                sawBanReply = true;
+                foreach (var entry in e.AccessList)
+                {
+                    mergedEntries.Add(new ParcelManager.ParcelAccessEntry
+                    {
+                        AgentID = entry.AgentID,
+                        Time = entry.Time,
+                        Flags = AccessList.Ban
+                    });
+                }
+            }
+
+            if (IsComplete())
+            {
+                isCompleted = true;
+                tcs.TrySetResult(new ParcelAccessListReplyEventArgs(e.Simulator, e.SequenceID, e.LocalID, (uint)requestedScope, new List<ParcelManager.ParcelAccessEntry>(mergedEntries)));
             }
         }
 
         client.Parcels.ParcelAccessListReply += Handler;
         try
         {
+            Console.WriteLine($"[land] Requesting parcel access list for localId={localId} from sim {sim.Name} (flags={flags}, sequenceId={sequenceId})...");
             client.Parcels.RequestParcelAccessList(sim, localId, flags, sequenceId);
-            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(12), cancellationToken);
+            var timeoutTask = Task.Delay(ParcelReplyTimeout, cancellationToken);
             var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
             if (completed != tcs.Task)
             {
+                Console.WriteLine($"[land] Timed out waiting for parcel access list reply for localId={localId} from sim {sim.Name} (flags={flags}, sequenceId={sequenceId}).");
                 return null;
             }
+            
+            Console.WriteLine($"[land] Received access list reply for localId={localId} from sim {sim.Name} (sequenceId={sequenceId}).");
 
             return await tcs.Task.ConfigureAwait(false);
         }
@@ -1423,6 +1525,74 @@ internal sealed partial class BotSession
         {
             client.Parcels.ParcelAccessListReply -= Handler;
         }
+    }
+
+    private static async Task<List<ParcelManager.ParcelAccessEntry>?> RequestParcelAccessEntriesAsync(
+        GridClient client,
+        Simulator sim,
+        int localId,
+        AccessList requestedScope,
+        CancellationToken cancellationToken)
+    {
+        if (requestedScope == AccessList.Both)
+        {
+            var combinedReply = await WaitForParcelAccessListReplyAsync(client, sim, localId, AccessList.Both, cancellationToken).ConfigureAwait(false);
+            if (combinedReply == null)
+            {
+                return null;
+            }
+
+            return DeduplicateAccessEntries(combinedReply.AccessList);
+        }
+
+        var singleReply = await WaitForParcelAccessListReplyAsync(client, sim, localId, requestedScope, cancellationToken).ConfigureAwait(false);
+        return singleReply == null ? null : DeduplicateAccessEntries(singleReply.AccessList);
+    }
+
+    private static List<ParcelManager.ParcelAccessEntry> DeduplicateAccessEntries(List<ParcelManager.ParcelAccessEntry> entries)
+    {
+        var unique = new List<ParcelManager.ParcelAccessEntry>(entries.Count);
+        var seen = new HashSet<(UUID AgentId, AccessList Scope)>();
+        foreach (var entry in entries)
+        {
+            var normalizedScope = entry.Flags & AccessList.Both;
+            if (!seen.Add((entry.AgentID, normalizedScope)))
+            {
+                continue;
+            }
+
+            unique.Add(entry);
+        }
+
+        return unique;
+    }
+
+    private static bool IsSameSimulator(Simulator actual, Simulator expected)
+    {
+        if (ReferenceEquals(actual, expected))
+        {
+            return true;
+        }
+
+        if (actual.Handle != 0 && expected.Handle != 0 && actual.Handle == expected.Handle)
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(actual.Name)
+            && !string.IsNullOrWhiteSpace(expected.Name)
+            && string.Equals(actual.Name, expected.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsPlaceholderAccessEntry(ParcelManager.ParcelAccessEntry entry)
+    {
+        // OpenSim can send placeholder records for empty allow/ban lists.
+        return entry.AgentID == UUID.Zero;
     }
 
     private static async Task<EstateUpdateInfoReplyEventArgs?> WaitForEstateUpdateInfoReplyAsync(GridClient client, CancellationToken cancellationToken)

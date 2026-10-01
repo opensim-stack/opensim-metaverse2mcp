@@ -580,7 +580,7 @@ internal sealed class BotMcpTools
     public Task<BotToolResult> EnvSetLegacyRaw(
         [Description("Raw LLSD payload text (JSON or XML).") ] string payload,
         [Description("Payload format: auto, json, xml.") ] string payloadFormat,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return _bot.SetLegacyEnvironmentRawAsync(payload, payloadFormat, cancellationToken);
     }
@@ -593,9 +593,9 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("Get parcel details for the parcel under the bot's current position.")]
     public Task<DataToolResult> ParcelGetCurrent(
-        [Description("Include allow/ban list entries when true.")] bool includeAccessLists,
-        [Description("Force a fresh simulator parcel-map refresh before resolving current parcel.")] bool forceRefresh,
-        CancellationToken cancellationToken)
+        [Description("Include allow/ban list entries when true.")] bool includeAccessLists = false,
+        [Description("Force a fresh simulator parcel-map refresh before resolving current parcel.")] bool forceRefresh = true,
+        CancellationToken cancellationToken = default)
     {
         return _bot.ParcelGetCurrentAsync(includeAccessLists, forceRefresh, cancellationToken);
     }
@@ -603,9 +603,9 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Get parcel details by parcel local ID in the current simulator.")]
     public Task<DataToolResult> ParcelGetByLocalId(
         [Description("Parcel local ID.")] int localId,
-        [Description("Include allow/ban list entries when true.")] bool includeAccessLists,
-        [Description("Force a fresh simulator parcel-map refresh before reading parcel data.")] bool forceRefresh,
-        CancellationToken cancellationToken)
+        [Description("Include allow/ban list entries when true.")] bool includeAccessLists = false,
+        [Description("Force a fresh simulator parcel-map refresh before reading parcel data.")] bool forceRefresh = false,
+        CancellationToken cancellationToken = default)
     {
         return _bot.ParcelGetByLocalIdAsync(localId, includeAccessLists, forceRefresh, cancellationToken);
     }
