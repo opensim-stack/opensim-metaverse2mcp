@@ -1320,7 +1320,7 @@ internal sealed class BotMcpTools
         [Description("Optional destination region name. If omitted, current region is used.")] string? regionName = null,
         CancellationToken cancellationToken = default)
     {
-        return _bot.TeleportToAsync(x, y, z, regionName, cancellationToken);
+        return _bot.TeleportToAsync(x, y, z, regionName, CancellationToken.None);
     }
 
     [McpServerTool, Description("Teleport to a region handle and local position.")]
@@ -1329,9 +1329,9 @@ internal sealed class BotMcpTools
         [Description("Local X coordinate (0..256).") ] float x,
         [Description("Local Y coordinate (0..256).") ] float y,
         [Description("Local Z coordinate.")] float z,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
-        return _bot.TeleportToRegionHandleAsync(regionHandle, x, y, z, cancellationToken);
+        return _bot.TeleportToRegionHandleAsync(regionHandle, x, y, z, CancellationToken.None);
     }
 
     [McpServerTool, Description("Stop current movement by canceling autopilot and resetting movement control flags.")]

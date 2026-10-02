@@ -360,16 +360,16 @@ internal sealed class AgentLocator
                     Source = "spawner.offRegion"
                 };
             }
-
-            var mapReply = await TryMapFriendLocationOnceAsync(client, targetId, FriendMapTimeout, cancellationToken).ConfigureAwait(false);
-            if (mapReply != null)
+        }
+        
+        var mapReply = await TryMapFriendLocationOnceAsync(client, targetId, FriendMapTimeout, cancellationToken).ConfigureAwait(false);
+        if (mapReply != null)
+        {
+            return status with
             {
-                return status with
-                {
-                    Online = true,
-                    Source = "friendMap.offRegion"
-                };
-            }
+                Online = true,
+                Source = "friendMap.offRegion"
+            };
         }
 
         if (client == null)

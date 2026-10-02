@@ -129,10 +129,14 @@ internal sealed partial class BotSession
                 // (varregions exceed the legacy 256m bounds).
                 target = ClampLocalPosition(new Vector3(x, y, z), currentSim.SizeX, currentSim.SizeY);
                 destinationLabel = currentSim.Name;
+                
+                Console.WriteLine($"[teleport] Teleporting to {destinationLabel} at {FormatVector(target)} because regionName '{regionName}' was empty or matched current region {currentSim.Name}.");
+                
                 ok = await client.Self.TeleportAsync(currentSim.Name, target, token).ConfigureAwait(false);
             }
             else
             {
+                /*
                 var region = await client.Grid.GetGridRegionAsync(regionName, GridLayerType.Objects, token).ConfigureAwait(false);
                 if (!region.HasValue)
                 {
@@ -146,10 +150,19 @@ internal sealed partial class BotSession
                 target = ClampLocalPosition(new Vector3(x, y, z), MaxRegionExtent, MaxRegionExtent);
                 destinationLabel = $"{region.Value.Name} ({region.Value.RegionHandle})";
                 ok = await client.Self.TeleportAsync(region.Value.RegionHandle, target, token).ConfigureAwait(false);
+                */
+                
+                target = ClampLocalPosition(new Vector3(x, y, z), MaxRegionExtent, MaxRegionExtent);
+                destinationLabel = regionName;
+                
+                Console.WriteLine($"[teleport] Teleporting to {destinationLabel} at {FormatVector(target)}.");
+                
+                ok = await client.Self.TeleportAsync(regionName, target, token).ConfigureAwait(false);
             }
 
             if (!ok)
             {
+                Console.WriteLine($"[teleport] Teleport failed to {destinationLabel} at {FormatVector(target)}.");
                 var message = string.IsNullOrWhiteSpace(client.Self.TeleportMessage)
                     ? "Teleport failed."
                     : client.Self.TeleportMessage;
@@ -165,6 +178,8 @@ internal sealed partial class BotSession
                     });
                 return BotToolResult.Fail(message);
             }
+            
+            Console.WriteLine($"[teleport] Teleport succeeded to {destinationLabel} at {FormatVector(client.Self.SimPosition)}.");
 
             var at = client.Self.SimPosition;
             EmitRuntimeEvent(
@@ -196,9 +211,11 @@ internal sealed partial class BotSession
         var target = ClampLocalPosition(new Vector3(x, y, z));
         return await ExecuteLockedAsync(async (client, token) =>
         {
+            Console.WriteLine($"[teleport] Teleporting to region handle {handle} at {FormatVector(target)}.");
             var ok = await client.Self.TeleportAsync(handle, target, token).ConfigureAwait(false);
             if (!ok)
             {
+                Console.WriteLine($"[teleport] Teleport failed to region handle {handle} at {FormatVector(target)}.");
                 var message = string.IsNullOrWhiteSpace(client.Self.TeleportMessage)
                     ? "Teleport failed."
                     : client.Self.TeleportMessage;
@@ -214,6 +231,8 @@ internal sealed partial class BotSession
                     });
                 return BotToolResult.Fail(message);
             }
+            
+            Console.WriteLine($"[teleport] Teleport succeeded to region handle {handle} at {FormatVector(client.Self.SimPosition)}.");
 
             EmitRuntimeEvent(
                 "teleport",
