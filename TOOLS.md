@@ -111,6 +111,7 @@ The server publishes tools including:
 - `InventoryOfferPolicyRulesSave`
 - `InventoryOfferPolicyRulesLoad`
 - `AppearanceListWorn`
+- `AppearanceGetCurrentOutfit`
 - `AppearanceWearFolder`
 - `AppearanceAttachItem`
 - `AppearanceDetachItem`
@@ -319,7 +320,7 @@ Use these as practical MCP call sequences when building assistants/agents on top
 1. Start an inventory listing for the outfit folder with `InventoryList`.
 2. Retrieve the materialized results with `InventoryListRetrieve` to find the folder UUID.
 3. Apply the outfit with `AppearanceWearFolder(folderId, replaceItems=true)`.
-4. Check current state with `AppearanceListWorn`.
+4. Check current state with `AppearanceListWorn` and optional outfit-link metadata with `AppearanceGetCurrentOutfit`.
 5. Optionally attach/detach specific items with `AppearanceAttachItem` / `AppearanceDetachItem`.
 6. If the grid needs it, request final update with `AppearanceRebake(forceRebake=true)`.
 
@@ -330,7 +331,8 @@ InventoryList(folderIdOrPath="", recursive=true)
 InventoryListRetrieve(taskHandle="<inventory-list-task-handle>", maxResults=500, pageSize=500)
 InventoryListClear(taskHandle="<inventory-list-task-handle>")
 AppearanceWearFolder(folderId="<outfit-folder-uuid>", replaceItems=true)
-AppearanceListWorn()
+AppearanceListWorn(includeAttachmentsAndWearables=true, includeCurrentOutfit=true)
+AppearanceGetCurrentOutfit()
 AppearanceAttachItem(itemId="<attachment-item-uuid>", attachmentPoint="RightHand", replace=true)
 AppearanceDetachItem(itemId="<attachment-item-uuid>")
 AppearanceRebake(forceRebake=true)

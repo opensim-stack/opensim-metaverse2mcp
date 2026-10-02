@@ -2738,9 +2738,20 @@ internal sealed class BotMcpTools
     }
 
     [McpServerTool, Description("List currently worn wearables and attachments.")]
-    public Task<AppearanceStateResult> AppearanceListWorn(CancellationToken cancellationToken)
+    public Task<AppearanceStateResult> AppearanceListWorn(
+        [Description("Include runtime appearance snapshot sources (`GetWearables` / `GetAttachmentsByItemId`).")]
+        bool includeAttachmentsAndWearables = true,
+        [Description("Include Current Outfit Folder (COF) link sources.")]
+        bool includeCurrentOutfit = true,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.AppearanceListWornAsync(cancellationToken);
+        return _bot.AppearanceListWornAsync(includeAttachmentsAndWearables, includeCurrentOutfit, cancellationToken);
+    }
+
+    [McpServerTool, Description("Resolve current outfit name/UUID from Current Outfit Folder (COF) link metadata.")]
+    public Task<DataToolResult> AppearanceGetCurrentOutfit(CancellationToken cancellationToken = default)
+    {
+        return _bot.AppearanceGetCurrentOutfitAsync(cancellationToken);
     }
 
     [McpServerTool, Description("Wear outfit items from an inventory folder UUID, including replace/add category conflict feedback.")]

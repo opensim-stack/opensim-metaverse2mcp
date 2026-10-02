@@ -55,36 +55,126 @@ internal sealed partial class BotSession
             : InventoryOfferPolicyResult.FailResult(load.Message);
     }
 
-    public async Task<AppearanceStateResult> AppearanceListWornAsync(CancellationToken cancellationToken)
+    public async Task<AppearanceStateResult> AppearanceListWornAsync(
+        bool includeAttachmentsAndWearables,
+        bool includeCurrentOutfit,
+        CancellationToken cancellationToken)
     {
+        if (!includeAttachmentsAndWearables && !includeCurrentOutfit)
+        {
+            return AppearanceStateResult.FailResult("At least one source must be enabled: includeAttachmentsAndWearables or includeCurrentOutfit.");
+        }
+
         return await ExecuteLockedAsync(async (client, token) =>
         {
             await client.Appearance.RequestAgentWornAsync(token).ConfigureAwait(false);
 
-            var wearables = await CollectWornWearablesAsync(client, token).ConfigureAwait(false);
+            var wearables = await CollectWornWearablesAsync(
+                    client,
+                    includeAttachmentsAndWearables,
+                    includeCurrentOutfit,
+                    token)
+                .ConfigureAwait(false);
 
-            var attachments = (await CollectAttachmentPointMappingsAsync(client, token).ConfigureAwait(false))
+            var staleAttachmentMappings = 0;
+            var attachments = (await CollectAttachmentPointMappingsAsync(
+                        client,
+                        token,
+                        includeAttachmentsAndWearables,
+                        includeCurrentOutfit)
+                    .ConfigureAwait(false))
                 .Select(a =>
                 {
-                    string? attachedObjectId = null;
-                    uint? attachedObjectLocalId = null;
-                    if (TryFindAttachedObjectForInventoryItem(client, a.Key, out var objectId, out var localId))
+                    if (!TryFindAttachedObjectForInventoryItem(client, a.Key, out var objectId, out var localId))
                     {
-                        attachedObjectId = objectId.ToString();
-                        attachedObjectLocalId = localId;
+                        staleAttachmentMappings++;
+                        return null;
                     }
 
                     return new AttachmentInfo(
                         a.Key.ToString(),
                         a.Value.ToString(),
-                        attachedObjectId,
-                        attachedObjectLocalId);
+                        objectId.ToString(),
+                        localId);
                 })
+                .Where(a => a != null)
+                .Select(a => a!)
                 .OrderBy(a => a.AttachmentPoint, StringComparer.Ordinal)
                 .ThenBy(a => a.ItemId, StringComparer.Ordinal)
                 .ToList();
 
-            return AppearanceStateResult.OkResult(wearables, attachments, "Collected currently worn wearables and attachments.");
+            var mode = includeAttachmentsAndWearables && includeCurrentOutfit
+                ? "merged mode (runtime + COF)"
+                : includeAttachmentsAndWearables
+                    ? "runtime-only mode"
+                    : "COF-only mode";
+            var message = staleAttachmentMappings > 0
+                ? $"Collected currently worn wearables and live attachments in {mode} (ignored {staleAttachmentMappings} stale attachment mapping(s))."
+                : $"Collected currently worn wearables and live attachments in {mode}.";
+            return AppearanceStateResult.OkResult(wearables, attachments, message);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<DataToolResult> AppearanceGetCurrentOutfitAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var cofManager = GetSharedCurrentOutfitFolder(client);
+            var currentLinks = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+            var cofFolder = cofManager.COF;
+
+            InventoryItem? outfitLink = null;
+            foreach (var link in currentLinks)
+            {
+                if (IsCurrentOutfitFolderLink(link))
+                {
+                    outfitLink = link;
+                    break;
+                }
+            }
+
+            var outfitFolderId = UUID.Zero;
+            if (outfitLink != null)
+            {
+                if (outfitLink.AssetUUID != UUID.Zero)
+                {
+                    outfitFolderId = outfitLink.AssetUUID;
+                }
+                else if (outfitLink.ResolvedItemID != UUID.Zero)
+                {
+                    outfitFolderId = outfitLink.ResolvedItemID;
+                }
+            }
+
+            var store = client.Inventory.Store;
+            string? outfitFolderName = null;
+            if (outfitFolderId != UUID.Zero
+                && store != null
+                && store.TryGetValue(outfitFolderId, out var maybeFolder)
+                && maybeFolder is InventoryFolder resolvedFolder)
+            {
+                outfitFolderName = resolvedFolder.Name;
+            }
+
+            var payload = new
+            {
+                cofFolderId = cofFolder?.UUID.ToString(),
+                cofFolderName = cofFolder?.Name,
+                currentOutfitLinkItemId = outfitLink?.UUID.ToString(),
+                currentOutfitLinkItemName = outfitLink?.Name,
+                currentOutfitFolderId = outfitFolderId == UUID.Zero ? null : outfitFolderId.ToString(),
+                currentOutfitFolderName = outfitFolderName,
+                cofLinkCount = currentLinks.Count,
+                hasCurrentOutfitFolderLink = outfitLink != null
+            };
+
+            var message = outfitLink == null
+                ? "Resolved COF links, but no outfit folder-link is currently present."
+                : outfitFolderName == null
+                    ? "Resolved current outfit folder-link, but folder metadata is not in local cache."
+                    : $"Resolved current outfit folder '{outfitFolderName}' ({outfitFolderId}).";
+
+            return DataToolResult.OkResult(message, JsonSerializer.Serialize(payload, JsonOptions));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1283,9 +1373,13 @@ internal sealed partial class BotSession
 
     private async Task<Dictionary<UUID, AttachmentPoint>> CollectAttachmentPointMappingsAsync(
         GridClient client,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool includeAttachmentsAndWearables = true,
+        bool includeCurrentOutfit = true)
     {
-        var merged = new Dictionary<UUID, AttachmentPoint>(client.Appearance.GetAttachmentsByItemId());
+        var merged = includeAttachmentsAndWearables
+            ? new Dictionary<UUID, AttachmentPoint>(client.Appearance.GetAttachmentsByItemId())
+            : new Dictionary<UUID, AttachmentPoint>();
 
         // Simulator object updates are often the most reliable source for what is currently attached.
         var sim = client.Network.CurrentSim;
@@ -1316,21 +1410,24 @@ internal sealed partial class BotSession
             }
         }
 
-        var cof = GetSharedCurrentOutfitFolder(client);
-        var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var link in links)
+        if (includeCurrentOutfit)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var resolved = cof.ResolveInventoryLink(link) ?? ResolveLinkedInventoryItem(client.Inventory.Store, link);
-            switch (resolved)
+            var cof = GetSharedCurrentOutfitFolder(client);
+            var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var link in links)
             {
-                case InventoryAttachment attachment:
-                    merged[attachment.ResolvedItemID] = attachment.AttachmentPoint;
-                    break;
-                case InventoryObject obj:
-                    merged[obj.ResolvedItemID] = obj.AttachPoint;
-                    break;
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var resolved = cof.ResolveInventoryLink(link) ?? ResolveLinkedInventoryItem(client.Inventory.Store, link);
+                switch (resolved)
+                {
+                    case InventoryAttachment attachment:
+                        merged[attachment.ResolvedItemID] = attachment.AttachmentPoint;
+                        break;
+                    case InventoryObject obj:
+                        merged[obj.ResolvedItemID] = obj.AttachPoint;
+                        break;
+                }
             }
         }
 
@@ -4924,6 +5021,8 @@ internal sealed partial class BotSession
 
     private async Task<List<WearableInfo>> CollectWornWearablesAsync(
         GridClient client,
+        bool includeAttachmentsAndWearables,
+        bool includeCurrentOutfit,
         CancellationToken cancellationToken)
     {
         var merged = new Dictionary<string, WearableInfo>(StringComparer.OrdinalIgnoreCase);
@@ -4947,57 +5046,71 @@ internal sealed partial class BotSession
             }
         }
 
-        foreach (var wearable in client.Appearance.GetWearables())
+        if (includeAttachmentsAndWearables)
         {
-            AddWearable(new WearableInfo(
-                wearable.ItemID.ToString(),
-                wearable.AssetID.ToString(),
-                wearable.WearableType.ToString(),
-                wearable.AssetType.ToString()));
-        }
-
-        try
-        {
-            // Merge COF links when available, but do not fail worn-state collection if
-            // FetchInventory2/CAPS is unstable.
-            var cof = GetSharedCurrentOutfitFolder(client);
-            var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var link in links)
+            foreach (var wearable in client.Appearance.GetWearables())
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var resolved = ResolveLinkedInventoryItem(client.Inventory.Store, link);
-                if (resolved is InventoryWearable wearable)
-                {
-                    AddWearable(new WearableInfo(
-                        wearable.UUID.ToString(),
-                        wearable.AssetUUID.ToString(),
-                        wearable.WearableType.ToString(),
-                        wearable.AssetType.ToString()));
-                    continue;
-                }
-
-                if (link.InventoryType != InventoryType.Wearable || link.ResolvedItemID == UUID.Zero)
-                {
-                    continue;
-                }
-
                 AddWearable(new WearableInfo(
-                    link.ResolvedItemID.ToString(),
-                    string.Empty,
-                    "unknown",
-                    "unknown"));
+                    wearable.ItemID.ToString(),
+                    wearable.AssetID.ToString(),
+                    wearable.WearableType.ToString(),
+                    wearable.AssetType.ToString(),
+                    "appearance-snapshot"));
             }
         }
-        catch (Exception ex)
+
+        if (includeCurrentOutfit)
         {
-            Console.WriteLine($"[appearance] COF wearable inspection failed; using appearance snapshot only: {ex.Message}");
+            try
+            {
+                // Merge COF links when available, but do not fail worn-state collection if
+                // FetchInventory2/CAPS is unstable.
+                var cof = GetSharedCurrentOutfitFolder(client);
+                var links = await cof.GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var link in links)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var resolved = ResolveLinkedInventoryItem(client.Inventory.Store, link);
+                    if (resolved is InventoryWearable wearable)
+                    {
+                        AddWearable(new WearableInfo(
+                            wearable.UUID.ToString(),
+                            wearable.AssetUUID.ToString(),
+                            wearable.WearableType.ToString(),
+                            wearable.AssetType.ToString(),
+                            "cof-link-resolved"));
+                        continue;
+                    }
+
+                    if (link.InventoryType != InventoryType.Wearable || link.ResolvedItemID == UUID.Zero)
+                    {
+                        continue;
+                    }
+
+                    AddWearable(new WearableInfo(
+                        link.ResolvedItemID.ToString(),
+                        string.Empty,
+                        "unknown",
+                        "unknown",
+                        "cof-link-unresolved"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[appearance] COF wearable inspection failed; using appearance snapshot only: {ex.Message}");
+            }
         }
 
         return merged.Values
             .OrderBy(w => w.WearableType, StringComparer.Ordinal)
             .ThenBy(w => w.ItemId, StringComparer.Ordinal)
             .ToList();
+    }
+
+    private static bool IsCurrentOutfitFolderLink(InventoryItem item)
+    {
+        return item.IsLink() && (item.AssetType == AssetType.LinkFolder || item.InventoryType == InventoryType.Category);
     }
 
     private static bool IsWearableItemPresent(
@@ -5657,7 +5770,7 @@ internal sealed record InventoryOfferHistoryResult(bool Ok, string Message, IRea
         => new(false, message, Array.Empty<InventoryOfferEventInfo>());
 }
 
-internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType);
+internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType, string Source);
 
 internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint, string? ObjectId, uint? ObjectLocalId);
 
