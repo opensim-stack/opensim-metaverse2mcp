@@ -43,6 +43,7 @@ internal sealed partial class BotSession
             var needParcelResolution = parcelLocalId.HasValue;
             if (needParcelResolution)
             {
+                Console.WriteLine($"Resolving parcel map for simulator {sim.Name} to filter by parcelLocalId {parcelLocalId.Value}...");
                 await EnsureParcelMapAsync(client, sim, forceRefreshParcelMap, token).ConfigureAwait(false);
             }
 

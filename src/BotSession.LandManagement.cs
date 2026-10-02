@@ -12,6 +12,7 @@ internal sealed partial class BotSession
 
     public async Task<DataToolResult> ParcelGetCurrentAsync(bool includeAccessLists, bool forceRefresh, CancellationToken cancellationToken)
     {
+        Console.WriteLine($"[land] ParcelGetCurrentAsync: includeAccessLists={includeAccessLists}, forceRefresh={forceRefresh}");
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var sim = client.Network.CurrentSim;
@@ -41,6 +42,8 @@ internal sealed partial class BotSession
         {
             return DataToolResult.FailResult("localId must be greater than 0.");
         }
+        
+        Console.WriteLine($"[land] ParcelGetByLocalIdAsync: localId={localId}, includeAccessLists={includeAccessLists}, forceRefresh={forceRefresh}");
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
@@ -405,6 +408,8 @@ internal sealed partial class BotSession
             {
                 return DataToolResult.FailResult("No current simulator available.");
             }
+            
+            Console.WriteLine($"[land] ParcelFlagsGetAsync: forceRefresh={forceRefresh}");
 
             await EnsureParcelMapAsync(client, sim, forceRefresh, token).ConfigureAwait(false);
 
@@ -538,6 +543,7 @@ internal sealed partial class BotSession
 
     public async Task<DataToolResult> ParcelPermissionDiagnosticsAsync(int? localId, bool forceRefresh, CancellationToken cancellationToken)
     {
+        Console.WriteLine($"[land] ParcelPermissionDiagnosticsAsync: localId={localId}, forceRefresh={forceRefresh}");
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var sim = client.Network.CurrentSim;
@@ -1628,8 +1634,18 @@ internal sealed partial class BotSession
         client.Parcels.ParcelProperties += Handler;
         try
         {
-            Console.WriteLine($"[land] Requesting parcel properties for localId={localId} from sim {sim.Name} (sequenceId={sequenceId})...");
-            client.Parcels.RequestParcelProperties(sim, localId, sequenceId);
+            if (TryGetParcelRequestBounds(sim, localId, out var west, out var south, out var east, out var north))
+            {
+                Console.WriteLine($"[land] Requesting parcel properties for localId={localId} from sim {sim.Name} using bounds W={west:0.##}, S={south:0.##}, E={east:0.##}, N={north:0.##} (sequenceId={sequenceId})...");
+                client.Parcels.RequestParcelProperties(sim, north, east, south, west, sequenceId, snapSelection: false);
+            }
+            else
+            {
+                // Fallback for grids that support ParcelPropertiesRequestByID.
+                Console.WriteLine($"[land] Requesting parcel properties for localId={localId} from sim {sim.Name} using localId fallback (sequenceId={sequenceId})...");
+                client.Parcels.RequestParcelProperties(sim, localId, sequenceId);
+            }
+
             Console.WriteLine($"[land] Waiting for parcel properties reply for localId={localId} from sim {sim.Name} (sequenceId={sequenceId})...");
             var timeoutTask = Task.Delay(ParcelReplyTimeout, cancellationToken);
             var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
@@ -1647,6 +1663,60 @@ internal sealed partial class BotSession
         {
             client.Parcels.ParcelProperties -= Handler;
         }
+    }
+
+    private static bool TryGetParcelRequestBounds(
+        Simulator sim,
+        int localId,
+        out float west,
+        out float south,
+        out float east,
+        out float north)
+    {
+        // Prefer a known parcel AABB when available.
+        if (sim.Parcels.TryGetValue(localId, out var parcel)
+            && parcel != null
+            && parcel.AABBMax.X > parcel.AABBMin.X
+            && parcel.AABBMax.Y > parcel.AABBMin.Y)
+        {
+            west = parcel.AABBMin.X;
+            south = parcel.AABBMin.Y;
+            east = parcel.AABBMax.X;
+            north = parcel.AABBMax.Y;
+            return true;
+        }
+
+        // Otherwise derive a valid in-parcel sample cell from the simulator parcel map.
+        var rows = sim.ParcelMap.GetLength(0);
+        var cols = sim.ParcelMap.GetLength(1);
+        if (rows <= 0 || cols <= 0)
+        {
+            west = south = east = north = 0f;
+            return false;
+        }
+
+        var cellWidth = 256f / cols;
+        var cellHeight = 256f / rows;
+
+        for (var y = 0; y < rows; y++)
+        {
+            for (var x = 0; x < cols; x++)
+            {
+                if (sim.ParcelMap[y, x] != localId)
+                {
+                    continue;
+                }
+
+                west = x * cellWidth;
+                south = y * cellHeight;
+                east = west + cellWidth;
+                north = south + cellHeight;
+                return true;
+            }
+        }
+
+        west = south = east = north = 0f;
+        return false;
     }
 
     private static async Task<ParcelAccessListReplyEventArgs?> WaitForParcelAccessListReplyAsync(

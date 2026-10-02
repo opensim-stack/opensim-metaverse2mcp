@@ -122,6 +122,8 @@ internal sealed partial class BotSession
         {
             return;
         }
+        
+        Console.WriteLine($"[group-bootstrap] {reason}: checking current parcel ownership for control-group deeding...");
 
         await EnsureParcelMapAsync(client, sim, forceRefresh: false, cancellationToken).ConfigureAwait(false);
 
