@@ -113,6 +113,8 @@ The server publishes tools including:
 - `AppearanceListWorn`
 - `AppearanceGetCurrentOutfit`
 - `AppearanceWearFolder`
+- `ListOutfits`
+- `AppearanceWearOutfit`
 - `AppearanceAttachItem`
 - `AppearanceDetachItem`
 - `AppearanceRebake`
@@ -303,7 +305,9 @@ Event stream notes:
 - `EventStreamStats` reports current buffer occupancy and cumulative trim counters.
 
 Appearance and script notes:
-- `AppearanceWearFolder` expects a folder containing wearable/attachment items (or links to them) and delegates to `Appearance.WearOutfitAsync`.
+- `AppearanceWearFolder` expects a folder containing wearable/attachment items (or links to them) and applies those items via `Appearance.WearOutfitAsync` without managing COF outfit-folder links.
+- `ListOutfits` returns folder names/UUIDs found under the My Outfits root (with fallback to a root folder named `My Outfits`/`Outfits`).
+- `AppearanceWearOutfit` resolves an outfit by name under My Outfits and updates only the COF outfit-folder link (it does not directly wear attachments/wearables).
 - `AppearanceAttachItem` can use an explicit `attachmentPoint`, or falls back to the item's default point when available.
 - `AppearanceVisualParamsList` exposes slider metadata (ranges/default/group/wearable) plus current values.
 - `AppearanceVisualParamSet` edits one group-0 slider parameter and requests a rebake/update.
@@ -336,6 +340,21 @@ AppearanceGetCurrentOutfit()
 AppearanceAttachItem(itemId="<attachment-item-uuid>", attachmentPoint="RightHand", replace=true)
 AppearanceDetachItem(itemId="<attachment-item-uuid>")
 AppearanceRebake(forceRebake=true)
+```
+
+### 1b) Wear by saved outfit name
+
+1. List available outfit folders with `ListOutfits`.
+2. Wear by exact folder name with `AppearanceWearOutfit`.
+3. Verify current state with `AppearanceListWorn` and optional outfit-link metadata with `AppearanceGetCurrentOutfit`.
+
+Suggested tool flow:
+
+```text
+ListOutfits()
+AppearanceWearOutfit(outfitName="Evening Demo Look")
+AppearanceListWorn(includeAttachmentsAndWearables=true, includeCurrentOutfit=true)
+AppearanceGetCurrentOutfit()
 ```
 
 ### 2) Upload script, push to object, and verify running state

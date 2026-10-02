@@ -2757,11 +2757,25 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Wear outfit items from an inventory folder UUID, including replace/add category conflict feedback.")]
     public Task<AppearanceWearFolderResult> AppearanceWearFolder(
         [Description("Folder UUID containing outfit items/links.")] string folderId,
-        [Description("True to replace current outfit, false to add.")] bool replaceItems,
+        [Description("True to replace current outfit, false to add.")] bool replaceItems = true,
         [Description("True to first remove currently worn wearables and detach current attachments before wearing the folder.")] bool removeExistingItems = true,
         CancellationToken cancellationToken = default)
     {
-        return _bot.AppearanceWearFolderAsync(folderId, replaceItems, removeExistingItems, CancellationToken.None);
+        return _bot.AppearanceWearFolderAsync(folderId, replaceItems, removeExistingItems, cancellationToken);
+    }
+
+    [McpServerTool, Description("List outfit folder names available under the inventory My Outfits/Outfits root.")]
+    public Task<DataToolResult> ListOutfits(CancellationToken cancellationToken = default)
+    {
+        return _bot.AppearanceListOutfitsAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Set the Current Outfit Folder (COF) outfit-folder link by name from inventory My Outfits/Outfits root.")]
+    public Task<AppearanceWearFolderResult> AppearanceWearOutfit(
+        [Description("Outfit folder name to resolve under My Outfits/Outfits.")] string outfitName,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.AppearanceWearOutfitAsync(outfitName, cancellationToken);
     }
 
     [McpServerTool, Description("Save the current outfit links into a new inventory folder snapshot.")]

@@ -9,6 +9,7 @@ using System.Xml;
 using System.Diagnostics;
 using LibreMetaverse;
 using LibreMetaverse.Assets;
+using LibreMetaverse.Packets;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -294,7 +295,343 @@ internal sealed partial class BotSession
                 entries.Count,
                 resolvedItems.Count,
                 categoryResolutions,
-                $"Requested {mode} outfit from folder {folderUuid}: sourceEntries={entries.Count}, wearableCandidates={resolvedItems.Count}, overlappingCategories={overlapCount}, removeExistingItems={removeExistingItems}{removeSummary}.");
+                $"Requested {mode} wearables/attachments from folder {folderUuid}: sourceEntries={entries.Count}, wearableCandidates={resolvedItems.Count}, overlappingCategories={overlapCount}, removeExistingItems={removeExistingItems}{removeSummary}, wearPath=appearance-only.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AppearanceWearFolderResult> AppearanceWearOutfitAsync(
+        string outfitName,
+        CancellationToken cancellationToken)
+    {
+        var overallStopwatch = Stopwatch.StartNew();
+        var normalizedOutfitName = (outfitName ?? string.Empty).Trim();
+        Console.WriteLine($"[appearance-wear-outfit] start outfitName='{outfitName ?? ""}' normalized='{normalizedOutfitName}' canceled={cancellationToken.IsCancellationRequested}");
+        if (string.IsNullOrWhiteSpace(normalizedOutfitName))
+        {
+            Console.WriteLine("[appearance-wear-outfit] invalid input: outfitName is empty.");
+            return AppearanceWearFolderResult.FailResult(replaceItems: true, "outfitName is required.");
+        }
+
+        try
+        {
+            var result = await ExecuteLockedAsync(async (client, token) =>
+            {
+                var lockedStopwatch = Stopwatch.StartNew();
+                Console.WriteLine("[appearance-wear-outfit] execute-locked begin");
+
+                var store = client.Inventory.Store;
+                var root = store?.RootFolder;
+                if (store == null || root == null)
+                {
+                    Console.WriteLine("[appearance-wear-outfit] inventory store/root not initialized");
+                    return AppearanceWearFolderResult.FailResult(replaceItems: true, "Inventory store is not initialized.");
+                }
+
+                Console.WriteLine($"[appearance-wear-outfit] inventory root ready rootId={root.UUID} rootName='{root.Name}' elapsedMs={lockedStopwatch.ElapsedMilliseconds}");
+
+                if (!TryResolveOutfitsRootFolder(client, store, out var outfitsRootFolder, out var resolveError))
+                {
+                    Console.WriteLine($"[appearance-wear-outfit] outfits root resolution failed: {resolveError}");
+                    return AppearanceWearFolderResult.FailResult(replaceItems: true, resolveError);
+                }
+
+                Console.WriteLine($"[appearance-wear-outfit] outfits root resolved folderId={outfitsRootFolder.UUID} name='{outfitsRootFolder.Name}' elapsedMs={lockedStopwatch.ElapsedMilliseconds}");
+                Console.WriteLine($"[appearance-wear-outfit] requesting outfit folder contents owner={client.Self.AgentID} recursive=false");
+                var folderContentsStopwatch = Stopwatch.StartNew();
+                var entries = await client.Inventory
+                    .FolderContentsAsync(outfitsRootFolder.UUID, client.Self.AgentID, true, false, InventorySortOrder.ByName, token)
+                    .ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] outfit folder contents retrieved entries={entries.Count} elapsedMs={folderContentsStopwatch.ElapsedMilliseconds}");
+
+                var folders = entries.OfType<InventoryFolder>().ToList();
+                var knownOutfitNames = new HashSet<string>(
+                    folders
+                        .Select(folder => folder.Name?.Trim())
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Cast<string>(),
+                    StringComparer.OrdinalIgnoreCase);
+                Console.WriteLine($"[appearance-wear-outfit] folder candidates under outfits root count={folders.Count}");
+
+                var matches = folders
+                    .Where(folder => string.Equals(folder.Name?.Trim(), normalizedOutfitName, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                Console.WriteLine($"[appearance-wear-outfit] name match search normalized='{normalizedOutfitName}' matches={matches.Count}");
+
+                if (matches.Count == 0)
+                {
+                    var knownNames = folders
+                        .Select(folder => folder.Name?.Trim())
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                        .Take(25)
+                        .ToList();
+                    var knownList = knownNames.Count == 0 ? "none" : string.Join(", ", knownNames);
+                    Console.WriteLine($"[appearance-wear-outfit] no outfit name match found. sampleKnown={knownList}");
+                    return AppearanceWearFolderResult.FailResult(
+                        replaceItems: true,
+                        $"Outfit '{normalizedOutfitName}' was not found under '{outfitsRootFolder.Name}'. Known outfit folders: {knownList}.");
+                }
+
+                if (matches.Count > 1)
+                {
+                    var candidates = string.Join(", ", matches.Select(folder => $"{folder.UUID}").OrderBy(id => id, StringComparer.Ordinal));
+                    Console.WriteLine($"[appearance-wear-outfit] ambiguous outfit name matches={matches.Count} candidates={candidates}");
+                    return AppearanceWearFolderResult.FailResult(
+                        replaceItems: true,
+                        $"Outfit '{normalizedOutfitName}' is ambiguous under '{outfitsRootFolder.Name}' ({matches.Count} matches). Candidate folder UUIDs: {candidates}.");
+                }
+
+                var match = matches[0];
+                Console.WriteLine($"[appearance-wear-outfit] selected outfit folderId={match.UUID} name='{match.Name}' elapsedMs={lockedStopwatch.ElapsedMilliseconds}");
+
+                var cofManager = GetSharedCurrentOutfitFolder(client);
+                var cofFolder = cofManager.COF;
+                Console.WriteLine($"[appearance-wear-outfit] COF manager ready cofFolderId={cofFolder?.UUID.ToString() ?? "<null>"} cofFolderName='{cofFolder?.Name ?? "<null>"}'");
+
+                if (cofFolder == null)
+                {
+                    Console.WriteLine("[appearance-wear-outfit] COF is null; forcing COF initialization via GetCurrentOutfitLinksAsync...");
+                    var initStopwatch = Stopwatch.StartNew();
+                    var bootstrapLinks = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+                    cofFolder = cofManager.COF;
+                    Console.WriteLine($"[appearance-wear-outfit] COF bootstrap complete links={bootstrapLinks.Count} cofFolderId={cofFolder?.UUID.ToString() ?? "<null>"} elapsedMs={initStopwatch.ElapsedMilliseconds}");
+                }
+
+                if (cofFolder == null)
+                {
+                    Console.WriteLine("[appearance-wear-outfit] COF initialization failed; aborting replace path.");
+                    return AppearanceWearFolderResult.FailResult(
+                        replaceItems: true,
+                        "Current Outfit Folder (COF) is not initialized; cannot replace outfit right now.");
+                }
+
+                Console.WriteLine($"[appearance-wear-outfit] collecting wearable/object targets from outfit folderId={match.UUID}");
+                var outfitEntries = await client.Inventory
+                    .FolderContentsAsync(match.UUID, client.Self.AgentID, true, true, InventorySortOrder.ByName, token)
+                    .ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] outfit contents loaded entries={outfitEntries.Count}");
+
+                var storeForResolve = client.Inventory.Store;
+                var targetItems = new List<InventoryItem>();
+                var seenTargetItemIds = new HashSet<UUID>();
+                foreach (var entry in outfitEntries)
+                {
+                    token.ThrowIfCancellationRequested();
+
+                    if (entry is not InventoryItem item)
+                    {
+                        continue;
+                    }
+
+                    var resolved = ResolveLinkedInventoryItem(storeForResolve, item);
+                    if (resolved is not InventoryWearable && resolved is not InventoryObject && resolved.AssetType != AssetType.Gesture)
+                    {
+                        continue;
+                    }
+
+                    if (seenTargetItemIds.Add(resolved.UUID))
+                    {
+                        targetItems.Add(resolved);
+                    }
+                }
+
+                if (targetItems.Count == 0)
+                {
+                    Console.WriteLine("[appearance-wear-outfit] no wearable/object targets found in outfit folder.");
+                    return AppearanceWearFolderResult.FailResult(
+                        replaceItems: true,
+                        $"Outfit '{match.Name}' ({match.UUID}) contains no wearable/object/gesture items to wear.");
+                }
+
+                Console.WriteLine($"[appearance-wear-outfit] replacing current COF outfit with item-link set targets={targetItems.Count}");
+                var clearStopwatch = Stopwatch.StartNew();
+                var clear = await RemoveCurrentlyWornItemsAsync(client, token).ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] cleared current wearables removedWearables={clear.RemovedWearableCount} detachedAttachments={clear.DetachedAttachmentCount} elapsedMs={clearStopwatch.ElapsedMilliseconds}");
+
+                var addStopwatch = Stopwatch.StartNew();
+                await cofManager.AddToOutfitAsync(targetItems, replace: true, cancellationToken: token).ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] AddToOutfitAsync completed targetCount={targetItems.Count} elapsedMs={addStopwatch.ElapsedMilliseconds}");
+
+                var pruneStopwatch = Stopwatch.StartNew();
+                var linksBeforePrune = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+                var folderLinks = linksBeforePrune.Where(IsCurrentOutfitFolderLink).ToList();
+                var folderLinksToRemove = folderLinks
+                    .Where(link =>
+                    {
+                        var linkedFolderId = GetCurrentOutfitFolderLinkTargetId(link);
+                        return linkedFolderId == UUID.Zero || linkedFolderId != match.UUID;
+                    })
+                    .ToList();
+
+                if (folderLinksToRemove.Count > 0)
+                {
+                    await cofManager.RemoveFromOutfitAsync(folderLinksToRemove, token).ConfigureAwait(false);
+                }
+
+                var directCofFolders = await GetCurrentOutfitChildFoldersAsync(client, cofFolder.UUID, token).ConfigureAwait(false);
+                var directOutfitFolders = directCofFolders
+                    .Where(folder => IsLikelyOutfitFolderLink(folder, knownOutfitNames))
+                    .ToList();
+                var directMatchingFolders = directOutfitFolders
+                    .Where(folder => IsFolderNameMatch(folder.Name, match.Name))
+                    .OrderBy(folder => folder.UUID.ToString(), StringComparer.Ordinal)
+                    .ToList();
+
+                var directFoldersToKeep = directMatchingFolders.Take(1).Select(folder => folder.UUID).ToHashSet();
+                var directFoldersToRemove = directOutfitFolders
+                    .Where(folder => !directFoldersToKeep.Contains(folder.UUID))
+                    .ToList();
+
+                foreach (var folder in directFoldersToRemove)
+                {
+                    await client.Inventory.RemoveFolderAsync(folder.UUID, token).ConfigureAwait(false);
+                }
+
+                Console.WriteLine($"[appearance-wear-outfit] COF folder-link prune complete itemLinksBefore={folderLinks.Count} itemLinksRemoved={folderLinksToRemove.Count} directFoldersBefore={directOutfitFolders.Count} directFoldersRemoved={directFoldersToRemove.Count} elapsedMs={pruneStopwatch.ElapsedMilliseconds}");
+
+                var ensureFolderLinkStopwatch = Stopwatch.StartNew();
+                var linksAfterPrune = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+                var matchingFolderLinks = linksAfterPrune
+                    .Where(IsCurrentOutfitFolderLink)
+                    .Where(link => GetCurrentOutfitFolderLinkTargetId(link) == match.UUID)
+                    .ToList();
+                var directMatchingFoldersAfterPrune = (await GetCurrentOutfitChildFoldersAsync(client, cofFolder.UUID, token).ConfigureAwait(false))
+                    .Where(folder => IsLikelyOutfitFolderLink(folder, knownOutfitNames))
+                    .Where(folder => IsFolderNameMatch(folder.Name, match.Name))
+                    .OrderBy(folder => folder.UUID.ToString(), StringComparer.Ordinal)
+                    .ToList();
+
+                var linkCreateAttempts = 0;
+                var folderLinkConfirmed = matchingFolderLinks.Count > 0 || directMatchingFoldersAfterPrune.Count > 0;
+                if (!folderLinkConfirmed)
+                {
+                    Console.WriteLine($"[appearance-wear-outfit] no COF folder-link for outfitId={match.UUID}; creating one now");
+
+                    linkCreateAttempts++;
+                    SendCurrentOutfitFolderLinkCreatePacket(client, cofFolder.UUID, match.UUID, match.Name, InventoryType.Category);
+                    folderLinkConfirmed = await WaitForCurrentOutfitFolderLinkPresenceAsync(client, cofFolder.UUID, match.UUID, match.Name, knownOutfitNames, token).ConfigureAwait(false);
+
+                    // One extra direct refresh check helps with delayed inventory propagation.
+                    if (!folderLinkConfirmed)
+                    {
+                        await Task.Delay(250, token).ConfigureAwait(false);
+                        folderLinkConfirmed = await WaitForCurrentOutfitFolderLinkPresenceAsync(client, cofFolder.UUID, match.UUID, match.Name, knownOutfitNames, token).ConfigureAwait(false);
+                    }
+                }
+
+                var finalEnsureLinks = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+                matchingFolderLinks = finalEnsureLinks
+                    .Where(IsCurrentOutfitFolderLink)
+                    .Where(link => GetCurrentOutfitFolderLinkTargetId(link) == match.UUID)
+                    .ToList();
+                var finalDirectMatchingFolders = (await GetCurrentOutfitChildFoldersAsync(client, cofFolder.UUID, token).ConfigureAwait(false))
+                    .Where(folder => IsLikelyOutfitFolderLink(folder, knownOutfitNames))
+                    .Where(folder => IsFolderNameMatch(folder.Name, match.Name))
+                    .OrderBy(folder => folder.UUID.ToString(), StringComparer.Ordinal)
+                    .ToList();
+                folderLinkConfirmed = matchingFolderLinks.Count > 0 || finalDirectMatchingFolders.Count > 0;
+
+                if (!folderLinkConfirmed)
+                {
+                    Console.WriteLine($"[appearance-wear-outfit] COF folder-link not observed yet for outfitId={match.UUID} after attempts={linkCreateAttempts}; continuing (server may apply asynchronously)");
+                }
+
+                if (matchingFolderLinks.Count > 1)
+                {
+                    var keep = matchingFolderLinks
+                        .OrderByDescending(link => link.CreationDate)
+                        .ThenBy(link => link.UUID.ToString(), StringComparer.Ordinal)
+                        .First();
+                    var duplicates = matchingFolderLinks
+                        .Where(link => link.UUID != keep.UUID)
+                        .ToList();
+                    await cofManager.RemoveFromOutfitAsync(duplicates, token).ConfigureAwait(false);
+                    matchingFolderLinks = new List<InventoryItem> { keep };
+                    Console.WriteLine($"[appearance-wear-outfit] removed duplicate COF folder-links duplicates={duplicates.Count} keptLinkItemId={keep.UUID}");
+                }
+
+                if (finalDirectMatchingFolders.Count > 1)
+                {
+                    var duplicateDirectFolders = finalDirectMatchingFolders.Skip(1).ToList();
+                    foreach (var duplicateFolder in duplicateDirectFolders)
+                    {
+                        await client.Inventory.RemoveFolderAsync(duplicateFolder.UUID, token).ConfigureAwait(false);
+                    }
+                    finalDirectMatchingFolders = finalDirectMatchingFolders.Take(1).ToList();
+                    Console.WriteLine($"[appearance-wear-outfit] removed duplicate direct COF outfit folders duplicates={duplicateDirectFolders.Count} keptFolderId={finalDirectMatchingFolders[0].UUID}");
+                }
+
+                Console.WriteLine($"[appearance-wear-outfit] COF folder-link ensure complete confirmed={folderLinkConfirmed} itemLinksKept={matchingFolderLinks.Count} directFoldersKept={finalDirectMatchingFolders.Count} attempts={linkCreateAttempts} elapsedMs={ensureFolderLinkStopwatch.ElapsedMilliseconds}");
+
+                var refreshStopwatch = Stopwatch.StartNew();
+                var updatedLinks = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] post-wear COF links total={updatedLinks.Count} folderLinks={updatedLinks.Count(IsCurrentOutfitFolderLink)} elapsedMs={refreshStopwatch.ElapsedMilliseconds}");
+
+                Console.WriteLine($"[appearance-wear-outfit] execute-locked success elapsedMs={lockedStopwatch.ElapsedMilliseconds}");
+                return AppearanceWearFolderResult.OkResult(
+                    replaceItems: true,
+                    sourceEntryCount: entries.Count,
+                    wearableCandidateCount: targetItems.Count,
+                    categoryResolutions: Array.Empty<OutfitCategoryResolutionInfo>(),
+                    message: folderLinkConfirmed
+                        ? $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount})."
+                        : $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}). COF outfit folder-link create was requested but not confirmed yet." );
+            }, cancellationToken).ConfigureAwait(false);
+
+            Console.WriteLine($"[appearance-wear-outfit] end ok={result.Ok} elapsedMs={overallStopwatch.ElapsedMilliseconds} message='{result.Message}'");
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"[appearance-wear-outfit] canceled elapsedMs={overallStopwatch.ElapsedMilliseconds}");
+            throw;
+        }
+    }
+
+    public async Task<DataToolResult> AppearanceListOutfitsAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var store = client.Inventory.Store;
+            var root = store?.RootFolder;
+            if (store == null || root == null)
+            {
+                return DataToolResult.FailResult("Inventory store is not initialized.");
+            }
+
+            if (!TryResolveOutfitsRootFolder(client, store, out var outfitsRootFolder, out var resolveError))
+            {
+                return DataToolResult.FailResult(resolveError);
+            }
+
+            var entries = await client.Inventory
+                .FolderContentsAsync(outfitsRootFolder.UUID, client.Self.AgentID, true, false, InventorySortOrder.ByName, token)
+                .ConfigureAwait(false);
+
+            var outfits = entries
+                .OfType<InventoryFolder>()
+                .Select(folder => new
+                {
+                    name = folder.Name,
+                    folderId = folder.UUID.ToString()
+                })
+                .OrderBy(folder => folder.name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(folder => folder.folderId, StringComparer.Ordinal)
+                .ToList();
+
+            var payload = new
+            {
+                outfitsFolderId = outfitsRootFolder.UUID.ToString(),
+                outfitsFolderName = outfitsRootFolder.Name,
+                outfitCount = outfits.Count,
+                outfits
+            };
+
+            var message = outfits.Count == 0
+                ? $"No outfit folders were found under '{outfitsRootFolder.Name}'."
+                : $"Found {outfits.Count} outfit folder(s) under '{outfitsRootFolder.Name}'.";
+            return DataToolResult.OkResult(message, JsonSerializer.Serialize(payload, JsonOptions));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -4808,6 +5145,65 @@ internal sealed partial class BotSession
         return false;
     }
 
+    private static bool TryResolveOutfitsRootFolder(
+        GridClient client,
+        Inventory store,
+        out InventoryFolder outfitsRootFolder,
+        out string error)
+    {
+        outfitsRootFolder = default!;
+        error = string.Empty;
+
+        var typedFolderId = client.Inventory.FindFolderForType(FolderType.MyOutfits);
+        if (typedFolderId != UUID.Zero && TryGetInventoryFolderFromStore(store, typedFolderId, out outfitsRootFolder))
+        {
+            return true;
+        }
+
+        var root = store.RootFolder;
+        if (root == null)
+        {
+            error = "Inventory root folder is not initialized.";
+            return false;
+        }
+
+        List<InventoryBase> rootContents;
+        try
+        {
+            rootContents = store.GetContents(root.UUID);
+        }
+        catch (Exception ex)
+        {
+            error = $"Failed reading inventory root folder from local store: {ex.Message}";
+            return false;
+        }
+
+        var candidates = rootContents
+            .OfType<InventoryFolder>()
+            .Where(folder =>
+                folder.PreferredType == FolderType.MyOutfits
+                || string.Equals(folder.Name?.Trim(), "My Outfits", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(folder.Name?.Trim(), "Outfits", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(folder => folder.UUID)
+            .Select(group => group.First())
+            .ToList();
+
+        if (candidates.Count == 1)
+        {
+            outfitsRootFolder = candidates[0];
+            return true;
+        }
+
+        if (candidates.Count == 0)
+        {
+            error = "Could not locate the outfits root folder (expected folder type MyOutfits or root folder named 'My Outfits'/'Outfits').";
+            return false;
+        }
+
+        error = $"Outfits root folder is ambiguous ({candidates.Count} matches). Candidate UUIDs: {string.Join(", ", candidates.Select(folder => folder.UUID.ToString()))}.";
+        return false;
+    }
+
     private static bool IsFolderDescendant(Inventory store, UUID ancestorFolderId, UUID possibleDescendantFolderId)
     {
         var visited = new HashSet<UUID>();
@@ -5110,7 +5506,113 @@ internal sealed partial class BotSession
 
     private static bool IsCurrentOutfitFolderLink(InventoryItem item)
     {
-        return item.IsLink() && (item.AssetType == AssetType.LinkFolder || item.InventoryType == InventoryType.Category);
+        return item.IsLink()
+            && (item.AssetType == AssetType.LinkFolder
+                || item.InventoryType == InventoryType.Category
+                || item.InventoryType == InventoryType.Folder);
+    }
+
+    private static UUID GetCurrentOutfitFolderLinkTargetId(InventoryItem item)
+    {
+        return item.AssetUUID != UUID.Zero ? item.AssetUUID : item.ResolvedItemID;
+    }
+
+    private static void SendCurrentOutfitFolderLinkCreatePacket(
+        GridClient client,
+        UUID cofFolderId,
+        UUID outfitFolderId,
+        string? outfitName,
+        InventoryType inventoryType)
+    {
+        var packet = new LinkInventoryItemPacket
+        {
+            AgentData =
+            {
+                AgentID = client.Self.AgentID,
+                SessionID = client.Self.SessionID
+            },
+            InventoryBlock =
+            {
+                CallbackID = 0,
+                FolderID = cofFolderId,
+                TransactionID = UUID.Random(),
+                OldItemID = outfitFolderId,
+                Type = (sbyte)AssetType.LinkFolder,
+                InvType = (sbyte)inventoryType,
+                Name = Utils.StringToBytes(outfitName ?? string.Empty),
+                Description = Utils.StringToBytes(string.Empty)
+            }
+        };
+
+        client.Network.SendPacket(packet);
+        Console.WriteLine($"[appearance-wear-outfit] sent LinkInventoryItemPacket cofId={cofFolderId} outfitId={outfitFolderId} invType={inventoryType}");
+    }
+
+    private async Task<List<InventoryFolder>> GetCurrentOutfitChildFoldersAsync(
+        GridClient client,
+        UUID cofFolderId,
+        CancellationToken cancellationToken)
+    {
+        var entries = await client.Inventory
+            .FolderContentsAsync(cofFolderId, client.Self.AgentID, true, true, InventorySortOrder.ByName, cancellationToken)
+            .ConfigureAwait(false);
+
+        return entries
+            .OfType<InventoryFolder>()
+            .Where(folder => folder.ParentUUID == cofFolderId)
+            .ToList();
+    }
+
+    private static bool IsLikelyOutfitFolderLink(InventoryFolder folder, IReadOnlySet<string> knownOutfitNames)
+    {
+        return knownOutfitNames.Contains((folder.Name ?? string.Empty).Trim());
+    }
+
+    private static bool IsFolderNameMatch(string? left, string? right)
+    {
+        return string.Equals((left ?? string.Empty).Trim(), (right ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<bool> WaitForCurrentOutfitFolderLinkPresenceAsync(
+        GridClient client,
+        UUID cofFolderId,
+        UUID outfitFolderId,
+        string outfitName,
+        IReadOnlySet<string> knownOutfitNames,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            _ = await client.Inventory
+                .FolderContentsAsync(cofFolderId, client.Self.AgentID, true, false, InventorySortOrder.ByName, cancellationToken)
+                .ConfigureAwait(false);
+
+            var links = await GetSharedCurrentOutfitFolder(client).GetCurrentOutfitLinksAsync(cancellationToken).ConfigureAwait(false);
+            var matches = links
+                .Where(IsCurrentOutfitFolderLink)
+                .Where(link => GetCurrentOutfitFolderLinkTargetId(link) == outfitFolderId)
+                .ToList();
+            if (matches.Count > 0)
+            {
+                return true;
+            }
+
+            var directFolders = await GetCurrentOutfitChildFoldersAsync(client, cofFolderId, cancellationToken).ConfigureAwait(false);
+            var hasMatchingDirectFolder = directFolders
+                .Where(folder => IsLikelyOutfitFolderLink(folder, knownOutfitNames))
+                .Any(folder => IsFolderNameMatch(folder.Name, outfitName));
+            if (hasMatchingDirectFolder)
+            {
+                return true;
+            }
+
+            await Task.Delay(200, cancellationToken).ConfigureAwait(false);
+        }
+
+        return false;
     }
 
     private static bool IsWearableItemPresent(
