@@ -41,9 +41,10 @@ internal sealed partial class BotSession
             }
 
             var needParcelResolution = parcelLocalId.HasValue;
+            var requestedParcelLocalId = parcelLocalId.GetValueOrDefault();
             if (needParcelResolution)
             {
-                Console.WriteLine($"Resolving parcel map for simulator {sim.Name} to filter by parcelLocalId {parcelLocalId.Value}...");
+                Console.WriteLine($"Resolving parcel map for simulator {sim.Name} to filter by parcelLocalId {requestedParcelLocalId}...");
                 await EnsureParcelMapAsync(client, sim, forceRefreshParcelMap, token).ConfigureAwait(false);
             }
 
@@ -82,7 +83,7 @@ internal sealed partial class BotSession
                         resolvedParcelLocalId = byPosition;
                     }
 
-                    if (!resolvedParcelLocalId.HasValue || resolvedParcelLocalId.Value != parcelLocalId!.Value)
+                    if (!resolvedParcelLocalId.HasValue || resolvedParcelLocalId.Value != requestedParcelLocalId)
                     {
                         continue;
                     }
