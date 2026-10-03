@@ -43,6 +43,7 @@ internal sealed class AgentLocator
     private readonly BotSession _bot;
     private readonly SpawnerClient _spawnerClient;
     private readonly bool _allowExternalFallback;
+    private SpawnerLocatedAgent? _cachedExternalFallbackResult;
     private readonly ConcurrentDictionary<string, AgentMonitorSnapshot> _latestStatusByHandle = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastExternalProbeAtUtc = DateTime.MinValue;
 
@@ -137,7 +138,7 @@ internal sealed class AgentLocator
 
         _latestStatusByHandle[task.Handle] = ToSnapshot(targetId, initialStatus);
         EmitStatusChangedEvent(task.Handle, targetId, initialStatus, "Agent monitor initialized.");
-        Console.WriteLine($"[agent-monitor] started handle={task.Handle} target={targetId} callerCancelled={cancellationToken.IsCancellationRequested} initialSource={initialStatus.Source ?? "unknown"} initialOnline={(initialStatus.Online.HasValue ? (initialStatus.Online.Value ? "true" : "false") : "null")}");
+        Console.WriteLine($"[agent-monitor] started handle={task.Handle} target={targetId} callerCancelled={cancellationToken.IsCancellationRequested} initialOnline={(initialStatus.Online.HasValue ? (initialStatus.Online.Value ? "true" : "false") : "null")}");
 
         cancellationToken.Register(() =>
         {
@@ -195,11 +196,7 @@ internal sealed class AgentLocator
             status.IsFlying,
             status.Velocity,
             status.HeadingDegrees,
-            status.Source,
-            status.LocalId,
-            status.AvatarUpdateSeen,
-            status.AvatarUpdateSim,
-            status.CacheVsAvatarUpdate);
+            status.LocalId);
     }
 
     private async Task<AgentMonitorStatus> CaptureStatusAsync(
@@ -218,18 +215,22 @@ internal sealed class AgentLocator
 
             var currentSim = connectedClient.Network.CurrentSim;
             var latestUpdate = avatarUpdates.TryGetLatest(out var sampledUpdate) ? sampledUpdate : null;
-            var preferredLocalId = previous?.LocalId;
+            var expectedLocalId = previous?.LocalId;
+            Console.WriteLine(
+                $"[agent-monitor] localid target={targetId} expectedLocalId={(expectedLocalId?.ToString(CultureInfo.InvariantCulture) ?? "none")} currentSimHandle={(currentSim?.Handle.ToString(CultureInfo.InvariantCulture) ?? "none")}");
             var resolvedOffRegion = ResolveOffRegionLocation(
                 connectedClient,
                 currentSim,
                 targetId,
-                preferredLocalId,
+                expectedLocalId,
                 latestUpdate);
 
             // AvatarUpdate is authoritative for region transitions. If it says the
             // target is in a different region right now, ignore stale in-sim cache data.
             if (currentSim != null && IsFreshOffRegionAvatarUpdate(latestUpdate, currentSim))
             {
+                // Branch: fresh avatar update confirms target crossed out of current sim.
+                LogCaptureBranch(targetId, "avatarUpdate.offRegion", resolvedOffRegion.RegionHandle, currentSim);
                 return new AgentMonitorStatus(
                     Online: true,
                     RegionName: resolvedOffRegion.RegionName,
@@ -238,11 +239,7 @@ internal sealed class AgentLocator
                     IsFlying: null,
                     Velocity: null,
                     HeadingDegrees: null,
-                    Source: "avatarUpdate.offRegion",
-                    LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId,
-                    AvatarUpdateSeen: true,
-                    AvatarUpdateSim: latestUpdate.SimulatorName,
-                    CacheVsAvatarUpdate: "cache:stale|avatarUpdate:otherRegion");
+                    LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId);
             }
 
             // Keep off-region AvatarUpdate authoritative even after freshness expiry
@@ -250,6 +247,8 @@ internal sealed class AgentLocator
             // This avoids stale sim-cache ghosts pinning follow at the border.
             if (currentSim != null && IsOffRegionAvatarUpdate(latestUpdate, currentSim, requireFresh: false))
             {
+                // Branch: sticky off-region mode keeps us from snapping back too early.
+                LogCaptureBranch(targetId, "avatarUpdate.offRegion.sticky", resolvedOffRegion.RegionHandle, currentSim);
                 return new AgentMonitorStatus(
                     Online: true,
                     RegionName: resolvedOffRegion.RegionName,
@@ -258,11 +257,7 @@ internal sealed class AgentLocator
                     IsFlying: null,
                     Velocity: null,
                     HeadingDegrees: null,
-                    Source: "avatarUpdate.offRegion.sticky",
-                    LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId,
-                    AvatarUpdateSeen: true,
-                    AvatarUpdateSim: latestUpdate.SimulatorName,
-                    CacheVsAvatarUpdate: "cache:blocked|avatarUpdate:otherRegion");
+                    LocalId: latestUpdate!.LocalId == 0 ? null : latestUpdate.LocalId);
             }
 
             if (TryBuildStatusFromAvatarUpdate(currentSim, sampledUpdate, out var fromAvatarUpdate))
@@ -270,18 +265,22 @@ internal sealed class AgentLocator
                 if (ShouldTrustAvatarUpdateCurrentRegion(
                     currentSim,
                     targetId,
-                    preferredLocalId,
+                    expectedLocalId,
                     previous,
                     latestUpdate,
                     fromAvatarUpdate))
                 {
+                    // Branch: current-region avatar update accepted after trust checks.
+                    LogCaptureBranch(targetId, "avatarUpdate.currentRegion", fromAvatarUpdate.RegionHandle, currentSim);
                     return fromAvatarUpdate;
                 }
             }
             
-            if (currentSim != null && TryFindAvatarByIdInSim(currentSim, targetId, preferredLocalId, out var foundAvatar))
+            if (currentSim != null && TryFindAvatarByIdInSim(currentSim, targetId, expectedLocalId, out var foundAvatar))
             {
+                // Branch: current-sim cache hit when direct avatar updates are unavailable/untrusted.
                 var knownPosition = foundAvatar?.Position;
+                LogCaptureBranch(targetId, "simCache.currentRegion", foundAvatar?.RegionHandle, currentSim);
                 return new AgentMonitorStatus(
                     Online: true,
                     RegionName: RegionNameFromHandle(client, foundAvatar?.RegionHandle ?? 0),
@@ -290,15 +289,13 @@ internal sealed class AgentLocator
                     IsFlying: foundAvatar == null ? null : ReadFlyingSignal(foundAvatar),
                     Velocity: foundAvatar?.Velocity,
                     HeadingDegrees: null,
-                    Source: "simCache.currentRegion",
-                    LocalId: foundAvatar?.LocalID,
-                    AvatarUpdateSeen: latestUpdate != null,
-                    AvatarUpdateSim: latestUpdate?.SimulatorName,
-                    CacheVsAvatarUpdate: DescribeCacheVsAvatarUpdate(currentSim, knownPosition, latestUpdate));
+                    LocalId: foundAvatar?.LocalID);
             }
 
-            if (TryFindAvatarByIdAcrossSims(connectedClient, targetId, preferredLocalId, out _, out var offRegionAvatar))
+            if (TryFindAvatarByIdAcrossSims(connectedClient, targetId, expectedLocalId, out _, out var offRegionAvatar))
             {
+                // Branch: non-current simulator cache hit indicates off-region presence.
+                LogCaptureBranch(targetId, "simCache.offRegion", offRegionAvatar?.RegionHandle, currentSim);
                 return new AgentMonitorStatus(
                     Online: true,
                     RegionName: RegionNameFromHandle(client, offRegionAvatar?.RegionHandle ?? 0),
@@ -307,15 +304,13 @@ internal sealed class AgentLocator
                     IsFlying: null,
                     Velocity: null,
                     HeadingDegrees: null,
-                    Source: "simCache.offRegion",
-                    LocalId: offRegionAvatar?.LocalID,
-                    AvatarUpdateSeen: latestUpdate != null,
-                    AvatarUpdateSim: latestUpdate?.SimulatorName,
-                    CacheVsAvatarUpdate: "cache:offRegion");
+                    LocalId: offRegionAvatar?.LocalID);
             }
 
             if (latestUpdate != null)
             {
+                // Branch: fallback to latest avatar update when cache lookup misses.
+                LogCaptureBranch(targetId, "avatarUpdate.offRegion.fallback", resolvedOffRegion.RegionHandle, currentSim);
                 return new AgentMonitorStatus(
                     Online: true,
                     RegionName: resolvedOffRegion.RegionName,
@@ -324,68 +319,91 @@ internal sealed class AgentLocator
                     IsFlying: null,
                     Velocity: null,
                     HeadingDegrees: null,
-                    Source: "avatarUpdate.offRegion",
-                    LocalId: null,
-                    AvatarUpdateSeen: true,
-                    AvatarUpdateSim: latestUpdate.SimulatorName,
-                    CacheVsAvatarUpdate: "cache:lost|avatarUpdate:offRegion");
+                    LocalId: null);
             }
         }
         else
         {
+            // Branch: no connected grid client, detach listeners and continue to fallbacks.
             avatarUpdates.Attach(null);
         }
-
-        if (_allowExternalFallback
-            && client != null
-            && DateTime.UtcNow - _lastExternalProbeAtUtc >= ExternalFallbackProbeInterval)
+        
+        // Branch: friend-map fallback for non-visible avatars.
+        var mapReply = client == null
+            ? null
+            : await TryMapFriendLocationOnceAsync(client, targetId, FriendMapTimeout, cancellationToken).ConfigureAwait(false);
+        if (mapReply != null)
         {
-            _lastExternalProbeAtUtc = DateTime.UtcNow;
-
-            var spawnerResult = await TryLocateAgentViaSpawnerAsync(client, targetId, cancellationToken).ConfigureAwait(false);
-            if (spawnerResult != null)
+            LogCaptureBranch(targetId, "friendMap.offRegion", null, client?.Network.CurrentSim);
+            return status with
             {
-                if (!spawnerResult.Found)
+                Online = true
+            };
+        }
+
+        // Branch: external fallback with throttled probing + cached result reuse.
+        if (_allowExternalFallback
+            && client != null)
+        {
+            if (DateTime.UtcNow - _lastExternalProbeAtUtc >= ExternalFallbackProbeInterval)
+            {
+                _lastExternalProbeAtUtc = DateTime.UtcNow;
+                var spawnerResult = await TryLocateAgentViaSpawnerAsync(client, targetId, cancellationToken).ConfigureAwait(false);
+                if (spawnerResult != null)
                 {
+                    _cachedExternalFallbackResult = spawnerResult;
+                }
+            }
+
+            if (_cachedExternalFallbackResult != null)
+            {
+                if (!_cachedExternalFallbackResult.Found)
+                {
+                    LogCaptureBranch(targetId, "spawner.notFound.cached", null, client.Network.CurrentSim);
                     return status with
                     {
-                        Online = false,
-                        Source = "spawner"
+                        Online = false
                     };
                 }
 
+                var cached = _cachedExternalFallbackResult;
+                var cachedHandle = cached.RegionHandle == 0 ? null : (ulong?)cached.RegionHandle;
+                var cachedRegionName = ResolveRegionName(cached.RegionName, cached.Simulator, cached.RegionHandle);
+                LogCaptureBranch(targetId, "spawner.offRegion.cached", cachedHandle, client.Network.CurrentSim);
                 return status with
                 {
                     Online = true,
-                    Source = "spawner.offRegion"
+                    RegionName = cachedRegionName,
+                    RegionHandle = cachedHandle,
+                    Position = cached.Position,
+                    IsFlying = null,
+                    Velocity = null,
+                    HeadingDegrees = null,
+                    LocalId = null
                 };
             }
-        }
-        
-        var mapReply = await TryMapFriendLocationOnceAsync(client, targetId, FriendMapTimeout, cancellationToken).ConfigureAwait(false);
-        if (mapReply != null)
-        {
-            return status with
-            {
-                Online = true,
-                Source = "friendMap.offRegion"
-            };
         }
 
         if (client == null)
         {
-            return status with { Source = "disconnected" };
+            // Branch: fully disconnected and no fallback hit.
+            LogCaptureBranch(targetId, "disconnected", null, null);
+            return status;
         }
 
-        var hadAvatarUpdate = avatarUpdates.TryGetLatest(out var lastUpdate);
+        // Branch: connected but target not found anywhere this cycle.
+        LogCaptureBranch(targetId, "simCache.lost", null, client.Network.CurrentSim);
         return status with
         {
-            Source = "simCache.lost",
-            LocalId = null,
-            AvatarUpdateSeen = hadAvatarUpdate,
-            AvatarUpdateSim = hadAvatarUpdate ? lastUpdate?.SimulatorName : null,
-            CacheVsAvatarUpdate = hadAvatarUpdate ? "cache:lost|avatarUpdate:stale" : "cache:lost"
+            LocalId = null
         };
+    }
+
+    private static void LogCaptureBranch(UUID targetId, string branch, ulong? regionHandle, Simulator? currentSim)
+    {
+        var resolvedHandle = regionHandle?.ToString(CultureInfo.InvariantCulture) ?? "none";
+        var currentHandle = currentSim?.Handle.ToString(CultureInfo.InvariantCulture) ?? "none";
+        Console.WriteLine($"[agent-monitor] capture target={targetId} branch={branch} regionHandle={resolvedHandle} currentSimHandle={currentHandle}");
     }
 
     private static bool TryBuildStatusFromAvatarUpdate(
@@ -417,18 +435,14 @@ internal sealed class AgentLocator
             IsFlying: latestUpdate.IsFlying,
             Velocity: latestUpdate.Velocity,
             HeadingDegrees: null,
-            Source: "avatarUpdate.currentRegion",
-            LocalId: latestUpdate.LocalId == 0 ? null : latestUpdate.LocalId,
-            AvatarUpdateSeen: true,
-            AvatarUpdateSim: latestUpdate.SimulatorName,
-            CacheVsAvatarUpdate: "cache:miss|avatarUpdate:currentRegion");
+            LocalId: latestUpdate.LocalId == 0 ? null : latestUpdate.LocalId);
         return true;
     }
 
     private static bool ShouldTrustAvatarUpdateCurrentRegion(
         Simulator? currentSim,
         UUID targetId,
-        uint? preferredLocalId,
+        uint? expectedLocalId,
         AgentMonitorStatus? previous,
         AvatarUpdateSample? latestUpdate,
         AgentMonitorStatus candidate)
@@ -438,7 +452,9 @@ internal sealed class AgentLocator
             return false;
         }
 
-        var wasOffRegion = previous?.Source?.Contains("offRegion", StringComparison.OrdinalIgnoreCase) == true;
+        var wasOffRegion = previous?.RegionHandle.HasValue == true
+            && previous.RegionHandle.Value != 0
+            && previous.RegionHandle.Value != currentSim.Handle;
         if (!wasOffRegion)
         {
             return true;
@@ -447,7 +463,7 @@ internal sealed class AgentLocator
         // During region handoff, stale current-sim AvatarUpdate samples can briefly
         // look valid. Require corroboration from the sim cache before declaring the
         // target back in current region.
-        if (TryFindAvatarByIdInSim(currentSim, targetId, preferredLocalId, out _))
+        if (TryFindAvatarByIdInSim(currentSim, targetId, expectedLocalId, out _))
         {
             return true;
         }
@@ -495,30 +511,6 @@ internal sealed class AgentLocator
         }
 
         return !latestUpdate.SimulatorName.Equals(currentSim.Name, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? DescribeCacheVsAvatarUpdate(
-        Simulator currentSim,
-        Vector3? cachePosition,
-        AvatarUpdateSample? latestUpdate)
-    {
-        if (latestUpdate == null)
-        {
-            return "cache:hit|avatarUpdate:none";
-        }
-
-        if (latestUpdate.SimulatorHandle != currentSim.Handle)
-        {
-            return "cache:hit|avatarUpdate:otherRegion";
-        }
-
-        if (cachePosition == null)
-        {
-            return "cache:hit|avatarUpdate:currentRegion";
-        }
-
-        var delta = (cachePosition.Value - latestUpdate.Position).Length();
-        return $"cache:hit|avatarUpdate:currentRegion|deltaMeters={delta:0.###}";
     }
 
     private static bool? ReadFlyingSignal(Avatar avatar)
@@ -576,7 +568,7 @@ internal sealed class AgentLocator
     private static bool TryFindAvatarByIdInSim(
         Simulator simulator,
         UUID avatarId,
-        uint? preferredLocalId,
+        uint? expectedLocalId,
         out Avatar? foundAvatar)
     {
         foundAvatar = null;
@@ -588,8 +580,12 @@ internal sealed class AgentLocator
         var matches = simulator.ObjectsAvatars.Values
             .Where(avatar => avatar != null && avatar.ID == avatarId)
             .ToList();
+        var allLocalIds = string.Join(",", matches.Select(avatar => avatar.LocalID.ToString(CultureInfo.InvariantCulture)));
+
         if (matches.Count == 0)
         {
+            Console.WriteLine(
+                $"[agent-monitor] localid.search simHandle={simulator.Handle.ToString(CultureInfo.InvariantCulture)} avatar={avatarId} expectedLocalId={(expectedLocalId?.ToString(CultureInfo.InvariantCulture) ?? "none")} foundLocalIds=[] scope=none picked=none pickedReason=not-found");
             return false;
         }
 
@@ -598,7 +594,20 @@ internal sealed class AgentLocator
             .ToList();
         if (currentRegionMatches.Count > 0)
         {
-            foundAvatar = SelectDeterministicAvatar(currentRegionMatches, preferredLocalId);
+            foundAvatar = SelectDeterministicAvatar(currentRegionMatches, expectedLocalId, out var matchedExpected);
+
+            // If we expected a concrete LocalId in this sim and it is missing,
+            // do not silently fallback here; allow off-region resolution to run.
+            if (expectedLocalId.HasValue && !matchedExpected)
+            {
+                Console.WriteLine(
+                    $"[agent-monitor] localid.search simHandle={simulator.Handle.ToString(CultureInfo.InvariantCulture)} avatar={avatarId} expectedLocalId={(expectedLocalId?.ToString(CultureInfo.InvariantCulture) ?? "none")} foundLocalIds=[{allLocalIds}] scope=currentRegion picked=none pickedReason=expected-missing");
+                foundAvatar = null;
+                return false;
+            }
+
+            Console.WriteLine(
+                $"[agent-monitor] localid.search simHandle={simulator.Handle.ToString(CultureInfo.InvariantCulture)} avatar={avatarId} expectedLocalId={(expectedLocalId?.ToString(CultureInfo.InvariantCulture) ?? "none")} foundLocalIds=[{allLocalIds}] scope=currentRegion picked={(foundAvatar?.LocalID.ToString(CultureInfo.InvariantCulture) ?? "none")} pickedReason={(matchedExpected ? "expected-exists" : "fallback-lowest")}");
             return foundAvatar != null;
         }
 
@@ -608,26 +617,32 @@ internal sealed class AgentLocator
         var hasConflictingKnownRegion = matches.Any(avatar => avatar.RegionHandle != 0 && avatar.RegionHandle != simulator.Handle);
         if (unknownRegionMatches.Count > 0 && !hasConflictingKnownRegion)
         {
-            foundAvatar = SelectDeterministicAvatar(unknownRegionMatches, preferredLocalId);
+            foundAvatar = SelectDeterministicAvatar(unknownRegionMatches, expectedLocalId, out var matchedExpected);
+            Console.WriteLine(
+                $"[agent-monitor] localid.search simHandle={simulator.Handle.ToString(CultureInfo.InvariantCulture)} avatar={avatarId} expectedLocalId={(expectedLocalId?.ToString(CultureInfo.InvariantCulture) ?? "none")} foundLocalIds=[{allLocalIds}] scope=unknownRegion picked={(foundAvatar?.LocalID.ToString(CultureInfo.InvariantCulture) ?? "none")} pickedReason={(matchedExpected ? "expected-exists" : "fallback-lowest")}");
             return foundAvatar != null;
         }
 
-        return foundAvatar != null;
+        Console.WriteLine(
+            $"[agent-monitor] localid.search simHandle={simulator.Handle.ToString(CultureInfo.InvariantCulture)} avatar={avatarId} expectedLocalId={(expectedLocalId?.ToString(CultureInfo.InvariantCulture) ?? "none")} foundLocalIds=[{allLocalIds}] scope=conflict picked=none pickedReason=conflicting-regions");
+        return false;
     }
 
-    private static Avatar? SelectDeterministicAvatar(IReadOnlyList<Avatar> matches, uint? preferredLocalId)
+    private static Avatar? SelectDeterministicAvatar(IReadOnlyList<Avatar> matches, uint? expectedLocalId, out bool matchedExpected)
     {
+        matchedExpected = false;
         if (matches.Count == 0)
         {
             return null;
         }
 
-        if (preferredLocalId.HasValue)
+        if (expectedLocalId.HasValue)
         {
-            var preferred = matches.FirstOrDefault(avatar => avatar.LocalID == preferredLocalId.Value);
-            if (preferred != null)
+            var expected = matches.FirstOrDefault(avatar => avatar.LocalID == expectedLocalId.Value);
+            if (expected != null)
             {
-                return preferred;
+                matchedExpected = true;
+                return expected;
             }
         }
 
@@ -714,7 +729,6 @@ internal sealed class AgentLocator
         return (null, latestUpdate?.Position, latestUpdate?.SimulatorName);
     }
 
-
     private static string? RegionNameFromHandle(GridClient client, ulong regionHandle)
     {
         
@@ -769,11 +783,7 @@ internal sealed class AgentLocator
             ["velocityY"] = status.Velocity?.Y.ToString("0.###", CultureInfo.InvariantCulture),
             ["velocityZ"] = status.Velocity?.Z.ToString("0.###", CultureInfo.InvariantCulture),
             ["headingDegrees"] = status.HeadingDegrees?.ToString("0.###", CultureInfo.InvariantCulture),
-            ["source"] = status.Source,
-            ["localId"] = status.LocalId?.ToString(CultureInfo.InvariantCulture),
-            ["avatarUpdateSeen"] = status.AvatarUpdateSeen.HasValue ? (status.AvatarUpdateSeen.Value ? "true" : "false") : null,
-            ["avatarUpdateSim"] = status.AvatarUpdateSim,
-            ["cacheVsAvatarUpdate"] = status.CacheVsAvatarUpdate
+            ["localId"] = status.LocalId?.ToString(CultureInfo.InvariantCulture)
         };
 
         _bot.EmitAgentMonitorRuntimeEvent(
@@ -791,11 +801,7 @@ internal sealed class AgentLocator
             && previous.IsFlying == current.IsFlying
             && NullableVectorEquals(previous.Velocity, current.Velocity)
             && NullableFloatEquals(previous.HeadingDegrees, current.HeadingDegrees)
-            && string.Equals(previous.Source, current.Source, StringComparison.OrdinalIgnoreCase)
-            && previous.LocalId == current.LocalId
-            && previous.AvatarUpdateSeen == current.AvatarUpdateSeen
-            && string.Equals(previous.AvatarUpdateSim, current.AvatarUpdateSim, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(previous.CacheVsAvatarUpdate, current.CacheVsAvatarUpdate, StringComparison.OrdinalIgnoreCase);
+            && previous.LocalId == current.LocalId;
     }
 
     private static bool NullableVectorEquals(Vector3? left, Vector3? right)
@@ -1047,7 +1053,7 @@ internal sealed class AgentLocator
     private static bool TryFindAvatarByIdAcrossSims(
         GridClient client,
         UUID avatarId,
-        uint? preferredLocalId,
+        uint? expectedLocalId,
         out Simulator? foundSim,
         out Avatar? foundAvatar)
     {
@@ -1059,14 +1065,12 @@ internal sealed class AgentLocator
         }
 
         var orderedSims = new List<Simulator>();
-        if (client.Network.CurrentSim != null)
-        {
-            orderedSims.Add(client.Network.CurrentSim);
-        }
+        var currentSim = client.Network.CurrentSim;
 
+        // Search non-current simulators first to avoid stale current-sim ghost wins during crossings.
         foreach (var sim in client.Network.Simulators)
         {
-            if (client.Network.CurrentSim != null && sim.Handle == client.Network.CurrentSim.Handle)
+            if (currentSim != null && sim.Handle == currentSim.Handle)
             {
                 continue;
             }
@@ -1074,15 +1078,26 @@ internal sealed class AgentLocator
             orderedSims.Add(sim);
         }
 
+        if (currentSim != null)
+        {
+            orderedSims.Add(currentSim);
+        }
+
+        var scanOrder = string.Join(",", orderedSims.Select(sim => sim.Handle.ToString(CultureInfo.InvariantCulture)));
+        Console.WriteLine(
+            $"[agent-monitor] localid.crossSimOrder avatar={avatarId} expectedLocalId={(expectedLocalId?.ToString(CultureInfo.InvariantCulture) ?? "none")} currentSimHandle={(currentSim?.Handle.ToString(CultureInfo.InvariantCulture) ?? "none")} scanHandles=[{scanOrder}]");
+
         foreach (var candidate in orderedSims)
         {
-            if (!TryFindAvatarByIdInSim(candidate, avatarId, preferredLocalId, out var match))
+            if (!TryFindAvatarByIdInSim(candidate, avatarId, expectedLocalId, out var match))
             {
                 continue;
             }
 
             if (match != null)
             {
+                Console.WriteLine(
+                    $"[agent-monitor] localid.crossSimPick simHandle={candidate.Handle.ToString(CultureInfo.InvariantCulture)} avatar={avatarId} pickedLocalId={match.LocalID.ToString(CultureInfo.InvariantCulture)}");
                 foundSim = candidate;
                 foundAvatar = match;
                 return true;
@@ -1110,13 +1125,9 @@ internal sealed class AgentLocator
         bool? IsFlying,
         Vector3? Velocity,
         float? HeadingDegrees,
-        string? Source,
-        uint? LocalId,
-        bool? AvatarUpdateSeen,
-        string? AvatarUpdateSim,
-        string? CacheVsAvatarUpdate)
+        uint? LocalId)
     {
-        public static AgentMonitorStatus Unknown { get; } = new(null, null, null, null, null, null, null, null, null, null, null, null);
+        public static AgentMonitorStatus Unknown { get; } = new(null, null, null, null, null, null, null, null);
     }
 
     private sealed class AvatarUpdateTracker : IDisposable
@@ -1253,8 +1264,4 @@ internal sealed record AgentMonitorSnapshot(
     bool? IsFlying,
     Vector3? Velocity,
     float? HeadingDegrees,
-    string? Source,
-    uint? LocalId,
-    bool? AvatarUpdateSeen,
-    string? AvatarUpdateSim,
-    string? CacheVsAvatarUpdate);
+    uint? LocalId);

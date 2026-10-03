@@ -830,7 +830,7 @@ internal sealed partial class BotSession
                         if (IsFollowDiagnosticsEnabled())
                         {
                             Console.WriteLine(
-                                $"[follow][diag] off-region target={label} source={monitorStatus.Source ?? "unknown"} online={(monitorStatus.Online.HasValue ? (monitorStatus.Online.Value ? "true" : "false") : "null")} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
+                                $"[follow][diag] off-region target={label} online={(monitorStatus.Online.HasValue ? (monitorStatus.Online.Value ? "true" : "false") : "null")} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
                         }
 
                         if (!avatarLost)
@@ -850,7 +850,7 @@ internal sealed partial class BotSession
                             if(IsFollowDiagnosticsEnabled())
                             {
                                 Console.WriteLine(
-                                    $"[follow][diag] off-region no-handle target={label} source={monitorStatus.Source ?? "unknown"} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
+                                    $"[follow][diag] off-region no-handle target={label} regionHandle={(monitorStatus.RegionHandle?.ToString() ?? "null")} cachedLocal={FormatPosition(lastKnownCrossRegionLocal)}");
                             }
                             EnsureFollowMovementStopped();
                             continue;

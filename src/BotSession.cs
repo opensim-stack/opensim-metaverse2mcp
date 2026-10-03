@@ -2145,6 +2145,7 @@ internal sealed partial class BotSession : IDisposable
 
     private void OnNetworkSimChanged(object? sender, LibreMetaverse.SimChangedEventArgs e)
     {
+        Console.WriteLine($"[sim-change] sim changed");
         // Fire-and-forget: run the health-check on a background task so we don't block
         // the network event loop.
         _ = Task.Run(async () =>
