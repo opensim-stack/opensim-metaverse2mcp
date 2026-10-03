@@ -74,6 +74,7 @@ docker run --rm \
 
 ### Bot login (optional)
 
+- `OPENSIM_BOT_GROUP`
 - `OPENSIM_LOGIN_URI` (default: `http://opensim:9000`)
 - `OPENSIM_LOGIN_START` (default: `last`)
 - `OPENSIM_LOGIN_TIMEOUT_SECONDS` (default: `30`)

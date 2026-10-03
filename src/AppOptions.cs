@@ -21,6 +21,7 @@ internal sealed class AppOptions
     public string? BotPassword { get; set; }
     public string? BotSpawnerParent { get; set; }
     public string? BotSpawnerLevel { get; set; }
+    public string? BotGroup { get; set; }
     public string SpawnerHost { get; set; } = "opensim-spawner";
     public int SpawnerPort { get; set; } = 8993;
     public string? SpawnerToken { get; set; }

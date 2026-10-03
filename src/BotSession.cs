@@ -247,7 +247,7 @@ internal sealed partial class BotSession : IDisposable
         _followSpawnerClient = new SpawnerClient(options);
         _agentLocator = new AgentLocator(this, _followSpawnerClient);
         _receiveChatAllowedTypes = ParseLocalChatAllowedTypes(_options.ReceiveChatAllowedTypes, out var invalidLocalChatTypeNames);
-        _controlGroupName = BuildControlGroupName();
+        _controlGroupName = options.BotGroup?.Trim();
         InitializeVoiceSupport();
         _handlerConfigPath = string.IsNullOrWhiteSpace(_options.HandlerConfig)
             ? "/config/handlers.json"

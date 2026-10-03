@@ -14,13 +14,6 @@ internal sealed partial class BotSession
     private readonly Dictionary<string, UUID> _handlerAgentIdByName = new(StringComparer.OrdinalIgnoreCase);
     private int _controlGroupInviteLoopStarted;
 
-    private string BuildControlGroupName()
-    {
-        var first = (_options.BotFirstName ?? string.Empty).Trim();
-        var last = (_options.BotLastName ?? string.Empty).Trim();
-        return $"{first} {last} C&C".Trim();
-    }
-
     private void StartControlGroupBootstrap(GridClient client)
     {
         if (!string.IsNullOrWhiteSpace(_parentFullName))

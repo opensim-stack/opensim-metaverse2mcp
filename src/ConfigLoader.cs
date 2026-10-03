@@ -18,6 +18,7 @@ internal static class ConfigLoader
             BotFirstName = FirstDefined("OPENSIM_BOT_FIRST", "BOT_FIRSTNAME"),
             BotLastName = FirstDefined("OPENSIM_BOT_LAST", "BOT_LASTNAME"),
             BotPassword = FirstDefined("OPENSIM_BOT_PASSWORD", "BOT_PASSWORD"),
+            BotGroup  = FirstDefined("OPENSIM_BOT_GROUP"),
             BotSpawnerParent = Env("OPENSIM_SPAWNER_PARENT"),
             BotSpawnerLevel = Env("OPENSIM_SPAWNER_LEVEL"),
             SpawnerHost = Env("SPAWNER_HOST") ?? "opensim-ai-spawner",
@@ -105,6 +106,7 @@ internal static class ConfigLoader
             "  --spawner-host <host>          Spawner API host (env: SPAWNER_HOST, default: opensim-ai-spawner)",
             "  --spawner-port <port>          Spawner API port (env: SPAWNER_PORT, default: 8993)",
             "  --spawner-token <token>        Optional Spawner API bearer token (env: SPAWNER_TOKEN)",
+            "  --group <group>                Optional Command & Control group for bot (env: OPENSIM_BOT_GROUP)",
             string.Empty,
             "Opencode chat bridge:",
             "  --opencode-enabled <bool>      Enable built-in opencode brain (env: OPENCODE_ENABLED, default: true)",
@@ -217,6 +219,9 @@ internal static class ConfigLoader
                     break;
                 case "--login-uri":
                     options.BotLoginUri = RequireValue(args, ref i, arg);
+                    break;
+                case "--group":
+                    options.BotGroup = RequireValue(args, ref i, arg);
                     break;
                 case "--start-location":
                     options.BotStartLocation = RequireValue(args, ref i, arg);
