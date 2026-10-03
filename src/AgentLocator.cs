@@ -168,6 +168,160 @@ internal sealed class AgentLocator
         return _latestStatusByHandle.TryGetValue(monitorHandle.Trim(), out snapshot!);
     }
 
+    public async Task<(bool Ok, UUID AgentId, string? ErrorMessage)> ResolveAgentIdByNameAsync(
+        string first,
+        string last,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+        {
+            return (false, UUID.Zero, "first and last are required.");
+        }
+
+        var normalizedFirst = first.Trim();
+        var normalizedLast = last.Trim();
+        var query = $"{normalizedFirst} {normalizedLast}";
+        var queryStart = 0;
+        var visitedQueryStarts = new HashSet<int>();
+
+        for (var page = 0; page < 10; page++)
+        {
+            if (!visitedQueryStarts.Add(queryStart))
+            {
+                break;
+            }
+
+            var search = await _bot.DirectorySearchPeopleAsync(query, queryStart, cancellationToken).ConfigureAwait(false);
+            if (!search.Ok)
+            {
+                return (false, UUID.Zero, $"People directory search failed: {search.Message}");
+            }
+
+            if (string.IsNullOrWhiteSpace(search.PayloadJson))
+            {
+                return (false, UUID.Zero, "People directory search returned no payload.");
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(search.PayloadJson);
+                var root = document.RootElement;
+
+                if (root.TryGetProperty("results", out var resultsElement)
+                    && resultsElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var result in resultsElement.EnumerateArray())
+                    {
+                        var candidateFirst = result.TryGetProperty("firstName", out var firstElement) && firstElement.ValueKind == JsonValueKind.String
+                            ? firstElement.GetString()
+                            : null;
+                        var candidateLast = result.TryGetProperty("lastName", out var lastElement) && lastElement.ValueKind == JsonValueKind.String
+                            ? lastElement.GetString()
+                            : null;
+                        var candidateFull = result.TryGetProperty("fullName", out var fullElement) && fullElement.ValueKind == JsonValueKind.String
+                            ? fullElement.GetString()
+                            : null;
+
+                        var isExactNameMatch = string.Equals(candidateFirst, normalizedFirst, StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(candidateLast, normalizedLast, StringComparison.OrdinalIgnoreCase);
+                        var isExactFullNameMatch = string.Equals(candidateFull, query, StringComparison.OrdinalIgnoreCase);
+                        if (!isExactNameMatch && !isExactFullNameMatch)
+                        {
+                            continue;
+                        }
+
+                        if (!result.TryGetProperty("agentId", out var agentIdElement)
+                            || agentIdElement.ValueKind != JsonValueKind.String)
+                        {
+                            continue;
+                        }
+
+                        var agentIdText = agentIdElement.GetString();
+                        if (!string.IsNullOrWhiteSpace(agentIdText)
+                            && UUID.TryParse(agentIdText, out var agentId)
+                            && agentId != UUID.Zero)
+                        {
+                            return (true, agentId, null);
+                        }
+                    }
+                }
+
+                var hasMore = false;
+                var nextQueryStart = queryStart + 1;
+                if (root.TryGetProperty("pagination", out var pagination)
+                    && pagination.ValueKind == JsonValueKind.Object)
+                {
+                    if (pagination.TryGetProperty("hasMore", out var hasMoreElement)
+                        && (hasMoreElement.ValueKind == JsonValueKind.True || hasMoreElement.ValueKind == JsonValueKind.False))
+                    {
+                        hasMore = hasMoreElement.GetBoolean();
+                    }
+
+                    if (pagination.TryGetProperty("nextQueryStart", out var nextElement)
+                        && nextElement.ValueKind == JsonValueKind.Number
+                        && nextElement.TryGetInt32(out var nextFromPayload)
+                        && nextFromPayload >= 0)
+                    {
+                        nextQueryStart = nextFromPayload;
+                    }
+                }
+
+                if (!hasMore)
+                {
+                    break;
+                }
+
+                queryStart = nextQueryStart;
+            }
+            catch (JsonException ex)
+            {
+                return (false, UUID.Zero, $"Failed to parse people directory payload: {ex.Message}");
+            }
+        }
+
+        return (false, UUID.Zero, $"Agent '{normalizedFirst} {normalizedLast}' could not be found.");
+    }
+
+    public async Task<(bool Ok, AgentMonitorSnapshot? Snapshot, string? ErrorMessage)> ReadSingleMonitorSnapshotAsync(
+        UUID targetId,
+        CancellationToken cancellationToken)
+    {
+        if (targetId == UUID.Zero)
+        {
+            return (false, null, "targetId must be a valid non-zero UUID.");
+        }
+
+        BotTaskHandle? monitorTask = null;
+        try
+        {
+            monitorTask = await MonitorAgent(targetId.ToString(), cancellationToken).ConfigureAwait(false);
+            if (monitorTask == null || string.IsNullOrWhiteSpace(monitorTask.Handle))
+            {
+                return (false, null, "Failed to create agent monitor task.");
+            }
+
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (TryGetLatestStatus(monitorTask.Handle, out var snapshot))
+                {
+                    return (true, snapshot, null);
+                }
+
+                await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+            }
+
+            return (false, null, "Timed out waiting for first agent monitor reading.");
+        }
+        finally
+        {
+            if (monitorTask != null && !string.IsNullOrWhiteSpace(monitorTask.Handle))
+            {
+                _bot.CancelBotTask(monitorTask.Handle);
+            }
+        }
+    }
+
     private async Task<AgentMonitorStatus> CaptureInitialStatusBestEffortAsync(UUID targetId, CancellationToken cancellationToken)
     {
         using var avatarUpdates = new AvatarUpdateTracker(targetId);

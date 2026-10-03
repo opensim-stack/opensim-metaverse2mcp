@@ -1156,7 +1156,7 @@ internal sealed partial class BotSession
                     }
 
                     // Stage 3h: Normal movement command emission.
-                    // Re-issue autopilot at most once per second to avoid packet spam.
+                    // Re-issue movement at most once per second to avoid packet spam.
                     if (!holdPositionForTeleportAssist
                         && (DateTime.UtcNow - lastPilotAt) >= TimeSpan.FromSeconds(1))
                     {
@@ -1172,10 +1172,15 @@ internal sealed partial class BotSession
                         }
                         else
                         {
-                            client.Self.AutoPilotLocal(
-                                (int)MathF.Round(targetPos.X),
-                                (int)MathF.Round(targetPos.Y),
-                                targetPos.Z);
+                            // Same-region follow is control-flag driven so fast/run flags
+                            // are emitted together with directional movement.
+                            if (!ApplyFollowDirectionalControls(client, targetPos, movementModeToApply))
+                            {
+                                client.Self.AutoPilotLocal(
+                                    (int)MathF.Round(targetPos.X),
+                                    (int)MathF.Round(targetPos.Y),
+                                    targetPos.Z);
+                            }
                         }
                         if (IsFollowDiagnosticsEnabled())
                         {
@@ -1330,6 +1335,44 @@ internal sealed partial class BotSession
         var localX = (uint)Math.Clamp((int)MathF.Round(localPosition.X), 0, 255);
         var localY = (uint)Math.Clamp((int)MathF.Round(localPosition.Y), 0, 255);
         client.Self.AutoPilot((ulong)regionX + localX, (ulong)regionY + localY, localPosition.Z);
+    }
+
+    private static bool ApplyFollowDirectionalControls(GridClient client, Vector3 targetPos, FollowMode locomotionMode)
+    {
+        var movement = client.Self.Movement;
+        if (!client.Settings.Agent.SendUpdates)
+        {
+            return false;
+        }
+
+        var delta = targetPos - client.Self.SimPosition;
+        var distance2D = MathF.Sqrt((delta.X * delta.X) + (delta.Y * delta.Y));
+
+        // Face the target before driving AtPos so forward movement stays aligned.
+        movement.TurnToward(targetPos, sendUpdate: false);
+
+        movement.AtPos = distance2D > 0.35f;
+        movement.AtNeg = false;
+        movement.LeftPos = false;
+        movement.LeftNeg = false;
+
+        var flying = locomotionMode is FollowMode.Flying or FollowMode.FlyingToBorder;
+        var verticalDelta = delta.Z;
+        if (flying)
+        {
+            movement.UpPos = verticalDelta > 0.75f;
+            movement.UpNeg = verticalDelta < -0.75f;
+            movement.FastUp = MathF.Abs(verticalDelta) > 3.5f;
+        }
+        else
+        {
+            movement.UpPos = false;
+            movement.UpNeg = false;
+            movement.FastUp = false;
+        }
+
+        movement.SendUpdate(true);
+        return true;
     }
 
     private static bool TryFindAvatarByIdAcrossSims(GridClient client, UUID avatarId, out Simulator? foundSim, out Avatar? foundAvatar)

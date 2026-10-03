@@ -929,21 +929,99 @@ internal sealed class BotMcpTools
         return _bot.FriendMapLocateAsync(friendAgentId, waitForReplySeconds, cancellationToken);
     }
 
-    [McpServerTool, Description("Locate an agent (avatar, player, user, bot) by first/last name via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
-    public Task<DataToolResult> AgentFind(
+    [McpServerTool, Description("Locate an agent (avatar, player, user, NPC, bot) by first/last name. Resolves UUID via people directory search, captures a single short-lived monitor snapshot, then disposes the monitor task. Returns not found when the target is offline/unresolved; returns an error if monitor bootstrap/read fails.")]
+    public async Task<DataToolResult> AgentFind(
         [Description("Agent first name.")] string first,
         [Description("Agent last name.")] string last,
         CancellationToken cancellationToken)
     {
-        return _spawnerClient.FindAgentAsync(first, last, cancellationToken);
+        if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+        {
+            return DataToolResult.FailResult("first and last are required.");
+        }
+
+        var normalizedFirst = first.Trim();
+        var normalizedLast = last.Trim();
+        var resolved = await _agentLocator.ResolveAgentIdByNameAsync(normalizedFirst, normalizedLast, cancellationToken).ConfigureAwait(false);
+        if (!resolved.Ok)
+        {
+            return DataToolResult.FailResult(resolved.ErrorMessage!);
+        }
+
+        return await LocateAgentByUuidAsync(
+            resolved.AgentId,
+            normalizedFirst,
+            normalizedLast,
+            cancellationToken).ConfigureAwait(false);
     }
 
-    [McpServerTool, Description("Locate an agent (avatar, player, user, bot) by UUID via opensim-spawner. This is the most reliable locator for agents on the local grid, but it cannot locate agents outside this local grid.")]
+    [McpServerTool, Description("Locate an agent (avatar, player, user, NPC, bot) by UUID using a single short-lived monitor snapshot, then dispose the monitor task. Returns not found when the target is offline/unresolved; returns an error if monitor bootstrap/read fails.")]
     public Task<DataToolResult> AgentFindByUuid(
         [Description("Agent UUID.")] string uuid,
         CancellationToken cancellationToken)
     {
-        return _spawnerClient.FindAgentByUuidAsync(uuid, cancellationToken);
+        if (string.IsNullOrWhiteSpace(uuid))
+        {
+            return Task.FromResult(DataToolResult.FailResult("uuid is required."));
+        }
+
+        if (!UUID.TryParse(uuid.Trim(), out var targetId) || targetId == UUID.Zero)
+        {
+            return Task.FromResult(DataToolResult.FailResult("uuid must be a valid non-zero UUID."));
+        }
+
+        return LocateAgentByUuidAsync(targetId, null, null, cancellationToken);
+    }
+
+    private async Task<DataToolResult> LocateAgentByUuidAsync(
+        UUID targetId,
+        string? firstName,
+        string? lastName,
+        CancellationToken cancellationToken)
+    {
+        var monitorRead = await _agentLocator.ReadSingleMonitorSnapshotAsync(targetId, cancellationToken).ConfigureAwait(false);
+        if (!monitorRead.Ok)
+        {
+            return DataToolResult.FailResult(monitorRead.ErrorMessage!);
+        }
+
+        var snapshot = monitorRead.Snapshot!;
+        if (snapshot.Online != true)
+        {
+            return DataToolResult.FailResult($"Agent '{targetId}' could not be found.");
+        }
+
+        var payload = new
+        {
+            found = true,
+            source = "agentMonitor",
+            agentId = targetId.ToString(),
+            firstName,
+            lastName,
+            fullName = string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName)
+                ? null
+                : $"{firstName} {lastName}",
+            online = snapshot.Online,
+            regionName = snapshot.RegionName,
+            regionHandle = snapshot.RegionHandle,
+            posX = snapshot.Position?.X,
+            posY = snapshot.Position?.Y,
+            posZ = snapshot.Position?.Z,
+            isFlying = snapshot.IsFlying,
+            velX = snapshot.Velocity?.X,
+            velY = snapshot.Velocity?.Y,
+            velZ = snapshot.Velocity?.Z,
+            headingDegrees = snapshot.HeadingDegrees,
+            localId = snapshot.LocalId
+        };
+
+        var displayName = string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName)
+            ? targetId.ToString()
+            : $"{firstName} {lastName}";
+
+        return DataToolResult.OkResult(
+            $"Located agent {displayName} via agent monitor.",
+            JsonSerializer.Serialize(payload));
     }
 
     [McpServerTool, Description("Send a teleport offer (lure) to an avatar UUID.")]
