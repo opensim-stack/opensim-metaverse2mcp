@@ -929,6 +929,28 @@ internal sealed class BotMcpTools
         return _bot.FriendMapLocateAsync(friendAgentId, waitForReplySeconds, cancellationToken);
     }
 
+    [McpServerTool, Description("Convert global map coordinates to region handle using PositionHelper.RegionHandleFromGlobal.")]
+    public Task<DataToolResult> RegionUuid(
+        [Description("Global X map coordinate.")] uint globalX,
+        [Description("Global Y map coordinate.")] uint globalY,
+        CancellationToken cancellationToken)
+    {
+        return _bot.RegionUuidFromGlobalAsync(globalX, globalY, cancellationToken);
+    }
+
+    [McpServerTool, Description("Query map items for a region. regionHandle=0 uses the current simulator region. itemType defaults to AgentLocations and layerType defaults to Objects.")]
+    public Task<DataToolResult> Map(
+        [Description("Region handle as unsigned 64-bit integer string. Use 0 to target current simulator region.")]
+        string regionHandle = "0",
+        [Description("Grid item type enum name (for example: AgentLocations, Telehub, LandForSale, PgEvent, MatureEvent, AdultEvent).")]
+        string itemType = "AgentLocations",
+        [Description("Grid layer type enum name (Objects, Terrain, LandForSale).")]
+        string layerType = "Objects",
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.MapItemsAsync(regionHandle, itemType, layerType, cancellationToken);
+    }
+
     [McpServerTool, Description("Locate an agent (avatar, player, user, NPC, bot) by first/last name. Resolves UUID via people directory search, captures a single short-lived monitor snapshot, then disposes the monitor task. Returns not found when the target is offline/unresolved; returns an error if monitor bootstrap/read fails.")]
     public async Task<DataToolResult> AgentFind(
         [Description("Agent first name.")] string first,

@@ -35,6 +35,8 @@ The server publishes tools including:
 - `FlyTo`
 - `TeleportTo`
 - `TeleportToRegionHandle`
+- `RegionUuid`
+- `Map`
 - `StopMovement`
 - `StartMovement`
 - `LookAt`
@@ -248,6 +250,9 @@ UV preset notes:
 Movement notes:
 - `WalkTo`/`FlyTo` use stepped autopilot waypoints for improved reliability over larger distances.
 - `TeleportTo` resolves named regions to handles before teleporting for stricter targeting.
+- `RegionUuid(globalX, globalY)` converts global map coordinates to a region handle using `PositionHelper.RegionHandleFromGlobal`, and returns region origin plus derived local coordinates.
+- `Map(regionHandle="0", itemType="AgentLocations", layerType="Objects")` queries map items via `Grid.MapItemsAsync`; when `regionHandle=0` the current simulator region is used.
+- `Map` returns per-item typed JSON payload rows (for example `MapAgentLocation`, `MapLandForSale`, `MapPGEvent`) including shared coordinates and each subclass-specific fields.
 - `MonitorAgent` starts a long-running BotTask that tracks one avatar UUID and emits `agentMonitor` events when observed status changes.
 - `MonitorAgent` only reports region/position/velocity/fly from current-region simulator cache; when the target is off-region those fields become unknown (`null`).
 - Optional external presence fallback is disabled by default; set `AGENT_MONITOR_EXTERNAL_FALLBACK=true` to probe spawner/friend-map (throttled) only when the target is otherwise lost.
