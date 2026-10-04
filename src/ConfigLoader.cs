@@ -18,7 +18,7 @@ internal static class ConfigLoader
             BotFirstName = FirstDefined("OPENSIM_BOT_FIRST", "BOT_FIRSTNAME"),
             BotLastName = FirstDefined("OPENSIM_BOT_LAST", "BOT_LASTNAME"),
             BotPassword = FirstDefined("OPENSIM_BOT_PASSWORD", "BOT_PASSWORD"),
-            BotGroup  = FirstDefined("OPENSIM_BOT_GROUP"),
+            BotGroup  = Env("OPENSIM_BOT_GROUP") ?? "",
             BotSpawnerParent = Env("OPENSIM_SPAWNER_PARENT"),
             BotSpawnerLevel = Env("OPENSIM_SPAWNER_LEVEL"),
             SpawnerHost = Env("SPAWNER_HOST") ?? "opensim-ai-spawner",

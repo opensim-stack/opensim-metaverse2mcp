@@ -429,6 +429,21 @@ internal sealed class AgentLocator
                     return fromAvatarUpdate;
                 }
             }
+
+            if (TryFindAvatarByIdAcrossSims(connectedClient, targetId, expectedLocalId, out _, out var offRegionAvatar))
+            {
+                // Branch: non-current simulator cache hit indicates off-region presence.
+                LogCaptureBranch(targetId, "simCache.offRegion", offRegionAvatar?.RegionHandle, currentSim);
+                return new AgentMonitorStatus(
+                    Online: true,
+                    RegionName: RegionNameFromHandle(client, offRegionAvatar?.RegionHandle ?? 0),
+                    RegionHandle: offRegionAvatar?.RegionHandle,
+                    Position: null,
+                    IsFlying: null,
+                    Velocity: null,
+                    HeadingDegrees: null,
+                    LocalId: offRegionAvatar?.LocalID);
+            }
             
             if (currentSim != null && TryFindAvatarByIdInSim(currentSim, targetId, expectedLocalId, out var foundAvatar))
             {
@@ -444,21 +459,6 @@ internal sealed class AgentLocator
                     Velocity: foundAvatar?.Velocity,
                     HeadingDegrees: null,
                     LocalId: foundAvatar?.LocalID);
-            }
-
-            if (TryFindAvatarByIdAcrossSims(connectedClient, targetId, expectedLocalId, out _, out var offRegionAvatar))
-            {
-                // Branch: non-current simulator cache hit indicates off-region presence.
-                LogCaptureBranch(targetId, "simCache.offRegion", offRegionAvatar?.RegionHandle, currentSim);
-                return new AgentMonitorStatus(
-                    Online: true,
-                    RegionName: RegionNameFromHandle(client, offRegionAvatar?.RegionHandle ?? 0),
-                    RegionHandle: offRegionAvatar?.RegionHandle,
-                    Position: null,
-                    IsFlying: null,
-                    Velocity: null,
-                    HeadingDegrees: null,
-                    LocalId: offRegionAvatar?.LocalID);
             }
 
             if (latestUpdate != null)

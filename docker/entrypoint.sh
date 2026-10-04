@@ -22,6 +22,7 @@ set -- \
   --mcp-http-endpoint "${MCP_HTTP_ENDPOINT:-/mcp}" \
   --first-name "${OPENSIM_BOT_FIRST:-Bot}" \
   --last-name "${OPENSIM_BOT_LAST:-User}" \
+  --group "${OPENSIM_BOT_GROUP:-}" \
   --password "${OPENSIM_BOT_PASSWORD:-}" \
   --spawner-parent "${OPENSIM_SPAWNER_PARENT:-}" \
   --spawner-level "${OPENSIM_SPAWNER_LEVEL:-}" \
