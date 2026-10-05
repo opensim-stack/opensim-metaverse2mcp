@@ -2789,7 +2789,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         if (normalizedResponse is "reject" or "deny" or "no" or "n")
         {
-            Add(remember ? "always" : "reject");
+            Add("reject");
             return payloads;
         }
 

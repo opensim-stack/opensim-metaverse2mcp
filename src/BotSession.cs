@@ -11,12 +11,6 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession : IDisposable
 {
-    private enum PendingPromptKind
-    {
-        Permission,
-        Question
-    }
-
     private enum ConversationChannel
     {
         Im,
@@ -99,47 +93,50 @@ internal sealed partial class BotSession : IDisposable
         return null;
     }
 
+    private async Task<(string ConversationKey, UUID AgentId, string From)?> ResolveUserResponseConversationForSessionAsync(string sessionId)
+    {
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return null;
+        }
+
+        var conversationKey = FindConversationKeyForSessionId(sessionId);
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            var sessionFamily = await GetSessionFamilyIdsAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            foreach (var pair in _conversationAgentByKey)
+            {
+                var mappedSessionId = _harnessClient.GetConversationSessionId(pair.Key);
+                if (!string.IsNullOrWhiteSpace(mappedSessionId)
+                    && sessionFamily.Contains(mappedSessionId, StringComparer.OrdinalIgnoreCase))
+                {
+                    conversationKey = pair.Key;
+                    break;
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(conversationKey)
+            || !_conversationAgentByKey.TryGetValue(conversationKey, out var agentId)
+            || agentId == UUID.Zero)
+        {
+            return null;
+        }
+
+        if (!_conversationNameByKey.TryGetValue(conversationKey, out var from) || string.IsNullOrWhiteSpace(from))
+        {
+            from = "handler";
+        }
+
+        return (conversationKey, agentId, from);
+    }
+
     private void LogRetryStatusEvent(string sessionId, string? statusMessage)
     {
         var message = string.IsNullOrWhiteSpace(statusMessage)
             ? $"[harness] session {sessionId} is retrying"
             : $"[harness] session {sessionId} is retrying: {statusMessage}";
         Console.WriteLine(message);
-    }
-
-    private sealed record PendingDialogPromptWait(
-        PendingPromptKind Kind,
-        string SessionId,
-        string RequestId,
-        UUID AgentId,
-        string From,
-        HarnessPendingPermission? Permission,
-        HarnessPendingQuestion? Question,
-        CancellationTokenSource TimeoutCts);
-
-    private sealed record PendingTextPromptReply(
-        PendingPromptKind Kind,
-        string SessionId,
-        string RequestId,
-        UUID AgentId,
-        string From,
-        HarnessPendingPermission? Permission,
-        HarnessPendingQuestion? Question,
-        DateTimeOffset ActivatedAt);
-
-    private sealed record PendingPromptQueueEntry(
-        PendingPromptKind Kind,
-        string SessionId,
-        string RequestId,
-        HarnessPendingPermission? Permission,
-        HarnessPendingQuestion? Question);
-
-    private sealed class PendingPromptQueueState
-    {
-        public readonly object SyncRoot = new();
-        public readonly Queue<PendingPromptQueueEntry> Queue = new();
-        public readonly HashSet<string> EnqueuedRequestIds = new(StringComparer.OrdinalIgnoreCase);
-        public string? ActiveRequestId;
     }
 
     private readonly record struct RequesterImLocationHint(
@@ -158,17 +155,9 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, ConversationRoute> _conversationRouteByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<UUID, string> _conversationKeyBySpeakerAgent = new();
     private readonly ConcurrentDictionary<string, HarnessUsageSummary> _latestUsageByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, string> _latestPendingPermissionByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, string> _announcedPendingPermissionByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, string> _announcedPendingQuestionByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, PendingDialogPromptWait> _pendingDialogPromptWaitByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, PendingTextPromptReply> _pendingTextPromptReplyByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _pendingPromptLocks = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, PendingPromptQueueState> _pendingPromptQueuesByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RequesterImLocationHint> _requesterImLocationHintByConversation = new(StringComparer.Ordinal);
     private readonly AsyncLocal<string?> _ambientConversationKey = new();
     private readonly string _handlerConfigPath;
@@ -188,6 +177,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly int _inventoryListResultCacheLimit;
     private readonly AgentLocator _agentLocator;
     private readonly HashSet<ChatType> _receiveChatAllowedTypes;
+    private readonly IUserResponseHandler _userResponseHandler;
 
     private string? _projectAgentsPromptCache;
     private DateTime _projectAgentsPromptCacheLastWriteUtc;
@@ -245,7 +235,14 @@ internal sealed partial class BotSession : IDisposable
         _harnessClient = new OpencodeChatClient(_options);
         _harnessClient.SessionStatusChanged += OnHarnessSessionStatusChanged;
         _harnessClient.MessagePartUpdated += OnHarnessMessagePartUpdated;
-        _harnessClient.PendingPromptStateChanged += OnHarnessPendingPromptStateChanged;
+        _userResponseHandler = new TextChatUserResponse(
+            harnessClient: _harnessClient,
+            tryHandleStarCommandAsync: TryHandleStarCommandAsync,
+            sendImText: SendImText,
+            getActiveClient: () => _connected ? _client : null,
+            resolveConversationForSessionAsync: ResolveUserResponseConversationForSessionAsync,
+            getPendingPermissionsAsync: GetPendingPermissionsEventFirstAsync,
+            getPendingQuestionsAsync: GetPendingQuestionsEventFirstAsync);
         var startupModel = GetStartupDefaultModelId();
         if (!string.IsNullOrWhiteSpace(startupModel))
         {
@@ -590,8 +587,8 @@ internal sealed partial class BotSession : IDisposable
         {
             _harnessClient.SessionStatusChanged -= OnHarnessSessionStatusChanged;
             _harnessClient.MessagePartUpdated -= OnHarnessMessagePartUpdated;
-            _harnessClient.PendingPromptStateChanged -= OnHarnessPendingPromptStateChanged;
         }
+        _userResponseHandler.Dispose();
         StopTypingIndicatorIfActive();
         foreach (var cts in _inFlightRequestCtsByConversation.Values)
         {
@@ -610,24 +607,6 @@ internal sealed partial class BotSession : IDisposable
         }
 
         _inFlightRequestCtsByConversation.Clear();
-        foreach (var wait in _pendingDialogPromptWaitByConversation.Values)
-        {
-            try
-            {
-                wait.TimeoutCts.Cancel();
-            }
-            catch
-            {
-                // No-op during shutdown.
-            }
-            finally
-            {
-                wait.TimeoutCts.Dispose();
-            }
-        }
-
-        _pendingDialogPromptWaitByConversation.Clear();
-        _pendingTextPromptReplyByConversation.Clear();
         __busyHarnessSessions.Clear();
         ClearBusyHoverText();
         DisposeVoiceSupport();
@@ -964,294 +943,6 @@ internal sealed partial class BotSession : IDisposable
         PulseTypingIndicator(partEvent.SessionId);
     }
 
-    private void OnHarnessPendingPromptStateChanged(HarnessPendingPromptStateEvent promptStateEvent)
-    {
-        if (promptStateEvent == null || string.IsNullOrWhiteSpace(promptStateEvent.SessionId))
-        {
-            return;
-        }
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await HandlePendingPromptStateChangedAsync(promptStateEvent).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[opencode:event] pending prompt callback error: {ex.Message}");
-            }
-        });
-    }
-
-    private bool HasActivePromptForConversation(string conversationKey)
-        => _pendingDialogPromptWaitByConversation.ContainsKey(conversationKey)
-            || _pendingTextPromptReplyByConversation.ContainsKey(conversationKey);
-
-    private PendingPromptQueueState GetPendingPromptQueueState(string conversationKey)
-        => _pendingPromptQueuesByConversation.GetOrAdd(conversationKey, _ => new PendingPromptQueueState());
-
-    private void EnqueuePendingPromptEntries(string conversationKey, IEnumerable<PendingPromptQueueEntry> entries)
-    {
-        if (string.IsNullOrWhiteSpace(conversationKey))
-        {
-            return;
-        }
-
-        var state = GetPendingPromptQueueState(conversationKey);
-        lock (state.SyncRoot)
-        {
-            foreach (var entry in entries)
-            {
-                if (string.IsNullOrWhiteSpace(entry.RequestId)
-                    || (!string.IsNullOrWhiteSpace(state.ActiveRequestId)
-                        && entry.RequestId.Equals(state.ActiveRequestId, StringComparison.OrdinalIgnoreCase))
-                    || state.EnqueuedRequestIds.Contains(entry.RequestId))
-                {
-                    continue;
-                }
-
-                state.Queue.Enqueue(entry);
-                state.EnqueuedRequestIds.Add(entry.RequestId);
-            }
-        }
-    }
-
-    private bool TryDequeueNextPendingPromptEntry(string conversationKey, out PendingPromptQueueEntry? entry)
-    {
-        entry = null;
-        if (string.IsNullOrWhiteSpace(conversationKey))
-        {
-            return false;
-        }
-
-        var state = GetPendingPromptQueueState(conversationKey);
-        lock (state.SyncRoot)
-        {
-            while (state.Queue.Count > 0)
-            {
-                var candidate = state.Queue.Dequeue();
-                state.EnqueuedRequestIds.Remove(candidate.RequestId);
-                if (!string.IsNullOrWhiteSpace(state.ActiveRequestId)
-                    && candidate.RequestId.Equals(state.ActiveRequestId, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                state.ActiveRequestId = candidate.RequestId;
-                entry = candidate;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private void MarkPendingPromptActive(string conversationKey, string requestId)
-    {
-        if (string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
-        {
-            return;
-        }
-
-        var state = GetPendingPromptQueueState(conversationKey);
-        lock (state.SyncRoot)
-        {
-            state.ActiveRequestId = requestId.Trim();
-            state.EnqueuedRequestIds.Remove(state.ActiveRequestId);
-        }
-    }
-
-    private void ClearPendingPromptActive(string conversationKey, string requestId)
-    {
-        if (string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(requestId))
-        {
-            return;
-        }
-
-        var state = GetPendingPromptQueueState(conversationKey);
-        lock (state.SyncRoot)
-        {
-            if (!string.IsNullOrWhiteSpace(state.ActiveRequestId)
-                && state.ActiveRequestId.Equals(requestId.Trim(), StringComparison.OrdinalIgnoreCase))
-            {
-                state.ActiveRequestId = null;
-            }
-        }
-    }
-
-    private async Task SeedPendingPromptQueueFromSnapshotAsync(string conversationKey, string sessionId)
-    {
-        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || string.IsNullOrWhiteSpace(sessionId))
-        {
-            return;
-        }
-
-        var state = GetPendingPromptQueueState(conversationKey);
-        lock (state.SyncRoot)
-        {
-            if (state.Queue.Count > 0 || !string.IsNullOrWhiteSpace(state.ActiveRequestId))
-            {
-                return;
-            }
-        }
-
-        var permissions = await GetPendingPermissionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-        var questions = await GetPendingQuestionsEventFirstAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-        if (permissions.Count == 0 && questions.Count == 0)
-        {
-            return;
-        }
-
-        var entries = new List<PendingPromptQueueEntry>(permissions.Count + questions.Count);
-        foreach (var permission in permissions)
-        {
-            if (!string.IsNullOrWhiteSpace(permission.Id))
-            {
-                entries.Add(new PendingPromptQueueEntry(PendingPromptKind.Permission, string.IsNullOrWhiteSpace(permission.SessionId) ? sessionId : permission.SessionId, permission.Id, permission, null));
-            }
-        }
-
-        foreach (var question in questions)
-        {
-            if (!string.IsNullOrWhiteSpace(question.Id))
-            {
-                entries.Add(new PendingPromptQueueEntry(PendingPromptKind.Question, string.IsNullOrWhiteSpace(question.SessionId) ? sessionId : question.SessionId, question.Id, null, question));
-            }
-        }
-
-        if (entries.Count > 0)
-        {
-            EnqueuePendingPromptEntries(conversationKey, entries);
-        }
-    }
-
-    private void ScheduleDrainPendingPrompts(GridClient client, UUID agentId, string from, string conversationKey)
-    {
-        if (string.IsNullOrWhiteSpace(conversationKey))
-        {
-            return;
-        }
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await DrainPendingPromptsAsync(client, agentId, from, conversationKey).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[opencode:event] pending prompt drain error: {ex.Message}");
-            }
-        });
-    }
-
-    private async Task DrainPendingPromptsAsync(GridClient client, UUID agentId, string from, string conversationKey)
-    {
-        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || HasActivePromptForConversation(conversationKey))
-        {
-            return;
-        }
-
-        var promptGate = _pendingPromptLocks.GetOrAdd(conversationKey, _ => new SemaphoreSlim(1, 1));
-        await promptGate.WaitAsync().ConfigureAwait(false);
-
-        try
-        {
-            if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey) || HasActivePromptForConversation(conversationKey))
-            {
-                return;
-            }
-
-            var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
-            if (!string.IsNullOrWhiteSpace(sessionId))
-            {
-                await SeedPendingPromptQueueFromSnapshotAsync(conversationKey, sessionId).ConfigureAwait(false);
-            }
-
-            if (TryDequeueNextPendingPromptEntry(conversationKey, out var nextEntry)
-                && nextEntry != null)
-            {
-                sessionId ??= nextEntry.SessionId;
-                if (nextEntry.Kind == PendingPromptKind.Permission)
-                {
-                    if (nextEntry.Permission != null)
-                    {
-                        await OfferPermissionPromptWithFallbackAsync(client, agentId, from, conversationKey, string.IsNullOrWhiteSpace(nextEntry.Permission.SessionId) ? sessionId : nextEntry.Permission.SessionId, nextEntry.Permission).ConfigureAwait(false);
-                    }
-                }
-                else if (nextEntry.Question != null)
-                {
-                    await OfferQuestionPromptWithFallbackAsync(client, agentId, from, conversationKey, string.IsNullOrWhiteSpace(nextEntry.Question.SessionId) ? sessionId : nextEntry.Question.SessionId, nextEntry.Question).ConfigureAwait(false);
-                }
-            }
-        }
-        finally
-        {
-            promptGate.Release();
-        }
-    }
-
-    private async Task HandlePendingPromptStateChangedAsync(HarnessPendingPromptStateEvent promptStateEvent)
-    {
-        var client = _client;
-        if (_harnessClient == null || client == null || !_connected || string.IsNullOrWhiteSpace(promptStateEvent.SessionId))
-        {
-            return;
-        }
-
-        var conversationKey = FindConversationKeyForSessionId(promptStateEvent.SessionId);
-        if (string.IsNullOrWhiteSpace(conversationKey))
-        {
-            var sessionFamily = await GetSessionFamilyIdsAsync(promptStateEvent.SessionId, CancellationToken.None).ConfigureAwait(false);
-            foreach (var pair in _conversationAgentByKey)
-            {
-                var mappedSessionId = _harnessClient.GetConversationSessionId(pair.Key);
-                if (!string.IsNullOrWhiteSpace(mappedSessionId)
-                    && sessionFamily.Contains(mappedSessionId, StringComparer.OrdinalIgnoreCase))
-                {
-                    conversationKey = pair.Key;
-                    break;
-                }
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(conversationKey)
-            || !_conversationAgentByKey.TryGetValue(conversationKey, out var agentId)
-            || agentId == UUID.Zero)
-        {
-            return;
-        }
-
-        var queueEntries = new List<PendingPromptQueueEntry>();
-        foreach (var permission in promptStateEvent.PendingPermissions)
-        {
-            if (!string.IsNullOrWhiteSpace(permission?.Id))
-            {
-                queueEntries.Add(new PendingPromptQueueEntry(PendingPromptKind.Permission, string.IsNullOrWhiteSpace(permission.SessionId) ? promptStateEvent.SessionId : permission.SessionId, permission.Id, permission, null));
-            }
-        }
-
-        foreach (var question in promptStateEvent.PendingQuestions)
-        {
-            if (!string.IsNullOrWhiteSpace(question?.Id))
-            {
-                queueEntries.Add(new PendingPromptQueueEntry(PendingPromptKind.Question, string.IsNullOrWhiteSpace(question.SessionId) ? promptStateEvent.SessionId : question.SessionId, question.Id, null, question));
-            }
-        }
-
-        if (queueEntries.Count > 0)
-        {
-            EnqueuePendingPromptEntries(conversationKey, queueEntries);
-        }
-
-        if (!_conversationNameByKey.TryGetValue(conversationKey, out var from) || string.IsNullOrWhiteSpace(from))
-        {
-            from = "handler";
-        }
-
-        await DrainPendingPromptsAsync(client, agentId, from, conversationKey).ConfigureAwait(false);
-    }
 
     private void PulseTypingIndicator(string? sessionIdHint = null)
     {
@@ -1574,398 +1265,6 @@ internal sealed partial class BotSession : IDisposable
         return visited.ToList();
     }
 
-    private Task OfferPermissionPromptWithFallbackAsync(
-        GridClient client,
-        UUID agentId,
-        string from,
-        string conversationKey,
-        string sessionId,
-        HarnessPendingPermission permission)
-    {
-        if (string.IsNullOrWhiteSpace(permission.Id))
-        {
-            return Task.CompletedTask;
-        }
-
-        if (HasActivePromptForConversation(conversationKey))
-        {
-            return Task.CompletedTask;
-        }
-
-        MarkPendingPromptActive(conversationKey, permission.Id);
-        _latestPendingPermissionByConversation[conversationKey] = permission.Id;
-        ActivateTextPromptFallback(client, conversationKey, agentId, from, PendingPromptKind.Permission, sessionId, permission.Id, permission: permission);
-        return Task.CompletedTask;
-    }
-
-    private Task OfferQuestionPromptWithFallbackAsync(
-        GridClient client,
-        UUID agentId,
-        string from,
-        string conversationKey,
-        string sessionId,
-        HarnessPendingQuestion question)
-    {
-        if (string.IsNullOrWhiteSpace(question.Id))
-        {
-            return Task.CompletedTask;
-        }
-
-        if (HasActivePromptForConversation(conversationKey))
-        {
-            return Task.CompletedTask;
-        }
-
-        MarkPendingPromptActive(conversationKey, question.Id);
-        _latestPendingQuestionByConversation[conversationKey] = question.Id;
-        ActivateTextPromptFallback(client, conversationKey, agentId, from, PendingPromptKind.Question, sessionId, question.Id, question: question);
-        return Task.CompletedTask;
-    }
-
-    private void ClearPendingPromptWait(string conversationKey)
-    {
-        if (!_pendingDialogPromptWaitByConversation.TryRemove(conversationKey, out var wait))
-        {
-            return;
-        }
-
-        try
-        {
-            wait.TimeoutCts.Cancel();
-        }
-        catch
-        {
-            // Best effort.
-        }
-        finally
-        {
-            wait.TimeoutCts.Dispose();
-        }
-    }
-
-    private void ActivateTextPromptFallback(
-        GridClient client,
-        string conversationKey,
-        UUID agentId,
-        string from,
-        PendingPromptKind kind,
-        string sessionId,
-        string requestId,
-        HarnessPendingPermission? permission = null,
-        HarnessPendingQuestion? question = null)
-    {
-        ClearPendingPromptWait(conversationKey);
-        MarkPendingPromptActive(conversationKey, requestId);
-        _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
-        _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
-        if (kind == PendingPromptKind.Permission)
-        {
-            _announcedPendingPermissionByConversation[conversationKey] = requestId;
-        }
-        else
-        {
-            _announcedPendingQuestionByConversation[conversationKey] = requestId;
-        }
-
-        var state = new PendingTextPromptReply(
-            kind,
-            sessionId,
-            requestId,
-            agentId,
-            from,
-            permission,
-            question,
-            DateTimeOffset.UtcNow);
-
-        _pendingTextPromptReplyByConversation[conversationKey] = state;
-
-        var promptText = kind == PendingPromptKind.Permission
-            ? BuildTextFallbackPermissionPrompt(permission ?? new HarnessPendingPermission(requestId, sessionId, string.Empty, null))
-            : BuildTextFallbackQuestionPrompt(question ?? new HarnessPendingQuestion(requestId, sessionId, "Question", "Please answer.", Array.Empty<string>(), null, true));
-        SendImText(client, agentId, from, promptText);
-    }
-
-    private async Task<bool> TryHandlePendingTextPromptReplyBeforeRoutingAsync(
-        GridClient client,
-        UUID agentId,
-        string from,
-        string conversationKey,
-        string text)
-    {
-        if (string.IsNullOrWhiteSpace(text) || text.StartsWith('*'))
-        {
-            return false;
-        }
-
-        if (_harnessClient == null
-            || !_pendingTextPromptReplyByConversation.TryGetValue(conversationKey, out var state))
-        {
-            return false;
-        }
-
-        if (state.Kind == PendingPromptKind.Permission)
-        {
-            if (!TryParseSimplePermissionResponse(text, out var response, out var remember))
-            {
-                SendImText(client, agentId, from,
-                    "I could not understand that approval choice. Reply with: yes, no, yes always, or no always.");
-                return true;
-            }
-
-            if (!await TrySubmitPendingTextPromptReplyAsync(
-                    client,
-                    agentId,
-                    from,
-                    conversationKey,
-                    promptKindName: "permission",
-                    submitFailureMessage: "I could not submit that approval yet. Please reply again in a moment.",
-                    notAcceptedMessage: "That approval was not accepted yet. Please reply again in a moment.",
-                    submitAsync: () => _harnessClient.RespondToPermissionAsync(state.SessionId, state.RequestId, response, remember, CancellationToken.None)).ConfigureAwait(false))
-            {
-                return true;
-            }
-
-            FinalizeSuccessfulPendingTextPromptReply(client, agentId, from, conversationKey, state);
-            return true;
-        }
-
-        var resolved = text.Trim();
-        if (state.Question != null)
-        {
-            if (!TryResolveQuestionAnswer(state.Question, text, out resolved))
-            {
-                SendImText(client, agentId, from,
-                    "I could not map that answer to the question options. Reply with option number or exact option text.");
-                return true;
-            }
-        }
-
-        if (!await TrySubmitPendingTextPromptReplyAsync(
-                client,
-                agentId,
-                from,
-                conversationKey,
-                promptKindName: "question",
-                submitFailureMessage: "I could not submit that answer yet. Please reply again in a moment.",
-                notAcceptedMessage: "That answer was not accepted yet. Please reply again in a moment.",
-                submitAsync: () => _harnessClient.ReplyToQuestionAsync(state.SessionId, state.RequestId, new[] { resolved }, CancellationToken.None)).ConfigureAwait(false))
-        {
-            return true;
-        }
-
-        FinalizeSuccessfulPendingTextPromptReply(client, agentId, from, conversationKey, state);
-        return true;
-    }
-
-    private async Task<bool> TrySubmitPendingTextPromptReplyAsync(
-        GridClient client,
-        UUID agentId,
-        string from,
-        string conversationKey,
-        string promptKindName,
-        string submitFailureMessage,
-        string notAcceptedMessage,
-        Func<Task<bool>> submitAsync)
-    {
-        bool accepted;
-        try
-        {
-            accepted = await submitAsync().ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[prompt] failed to submit {promptKindName} reply for {conversationKey}: {ex.Message}");
-            SendImText(client, agentId, from, submitFailureMessage);
-            return false;
-        }
-
-        if (accepted)
-        {
-            return true;
-        }
-
-        SendImText(client, agentId, from, notAcceptedMessage);
-        return false;
-    }
-
-    private void FinalizeSuccessfulPendingTextPromptReply(
-        GridClient client,
-        UUID agentId,
-        string from,
-        string conversationKey,
-        PendingTextPromptReply state)
-    {
-        _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-        if (state.Kind == PendingPromptKind.Permission)
-        {
-            _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
-            _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
-        }
-        else
-        {
-            _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
-            _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
-        }
-
-        ClearPendingPromptActive(conversationKey, state.RequestId);
-        ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
-    }
-
-    private async Task<bool> IsPromptStillPendingAsync(PendingTextPromptReply state, string conversationKey)
-    {
-        return await IsPromptStillPendingAsync(
-            state.Kind,
-            state.SessionId,
-            state.RequestId,
-            state.Permission,
-            state.Question,
-            conversationKey).ConfigureAwait(false);
-    }
-
-    private async Task<bool> IsPromptStillPendingAsync(PendingDialogPromptWait state, string conversationKey)
-    {
-        return await IsPromptStillPendingAsync(
-            state.Kind,
-            state.SessionId,
-            state.RequestId,
-            state.Permission,
-            state.Question,
-            conversationKey).ConfigureAwait(false);
-    }
-
-    private async Task<bool> IsPromptStillPendingAsync(
-        PendingPromptKind kind,
-        string sessionId,
-        string requestId,
-        HarnessPendingPermission? permission,
-        HarnessPendingQuestion? question,
-        string conversationKey)
-    {
-        if (_harnessClient == null || string.IsNullOrWhiteSpace(requestId))
-        {
-            return false;
-        }
-
-        var effectiveSessionId = sessionId;
-        if (string.IsNullOrWhiteSpace(effectiveSessionId))
-        {
-            effectiveSessionId = _harnessClient.GetConversationSessionId(conversationKey) ?? string.Empty;
-        }
-
-        if (string.IsNullOrWhiteSpace(effectiveSessionId))
-        {
-            return false;
-        }
-
-        if (kind == PendingPromptKind.Permission)
-        {
-            var pendingPermissions = await GetPendingPermissionsEventFirstAsync(effectiveSessionId, CancellationToken.None).ConfigureAwait(false);
-            var match = pendingPermissions.Any(p => p.Id.Equals(requestId, StringComparison.OrdinalIgnoreCase));
-            if (!match)
-            {
-                return false;
-            }
-
-            if (permission != null)
-            {
-                _latestPendingPermissionByConversation[conversationKey] = permission.Id;
-            }
-
-            return true;
-        }
-
-        var pendingQuestions = await GetPendingQuestionsEventFirstAsync(effectiveSessionId, CancellationToken.None).ConfigureAwait(false);
-        var questionMatch = pendingQuestions.FirstOrDefault(q => q.Id.Equals(requestId, StringComparison.OrdinalIgnoreCase));
-        if (questionMatch == null)
-        {
-            return false;
-        }
-
-        _latestPendingQuestionByConversation[conversationKey] = questionMatch.Id;
-        return true;
-    }
-
-    private static string BuildTextFallbackPermissionPrompt(HarnessPendingPermission permission)
-    {
-        var summary = BuildCompactPermissionDialogPrompt(permission);
-        if (string.IsNullOrWhiteSpace(summary))
-        {
-            summary = GetPermissionPrimaryText(permission, out _);
-        }
-
-        var lines = new List<string>();
-        if (!string.IsNullOrWhiteSpace(summary))
-        {
-            lines.Add(summary);
-        }
-
-        lines.Add("Reply now with: yes, no, yes always, or no always.");
-        return string.Join("\n", lines);
-    }
-
-    private static string BuildTextFallbackQuestionPrompt(HarnessPendingQuestion question)
-    {
-        var lines = new List<string>
-        {
-            $"{question.Header}: {question.Question}"
-        };
-
-        if (question.Options.Count > 0)
-        {
-            for (var i = 0; i < question.Options.Count; i++)
-            {
-                lines.Add($"{i + 1}) {question.Options[i]}");
-            }
-        }
-
-        lines.Add("Your next message will be used as the answer.");
-        return string.Join("\n", lines);
-    }
-
-    private static bool TryParseSimplePermissionResponse(string text, out string response, out bool remember)
-    {
-        response = string.Empty;
-        remember = false;
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        var normalized = text.Trim().ToLowerInvariant();
-        var compact = normalized
-            .Replace("(", string.Empty, StringComparison.Ordinal)
-            .Replace(")", string.Empty, StringComparison.Ordinal)
-            .Replace(",", " ", StringComparison.Ordinal);
-        compact = string.Join(" ", compact.Split(' ', StringSplitOptions.RemoveEmptyEntries));
-
-        if (compact is "1" or "yes" or "y" or "allow")
-        {
-            response = "allow";
-            return true;
-        }
-
-        if (compact is "3" or "yes always" or "always yes" or "yes remember" or "y always" or "allow always")
-        {
-            response = "allow";
-            remember = true;
-            return true;
-        }
-
-        if (compact is "2" or "no" or "n" or "reject" or "deny")
-        {
-            response = "reject";
-            return true;
-        }
-
-        if (compact is "4" or "no always" or "always no" or "no remember" or "n always" or "reject always" or "deny always")
-        {
-            response = "reject";
-            remember = true;
-            return true;
-        }
-
-        return false;
-    }
 
     private static string SanitizeImLogText(string text)
     {

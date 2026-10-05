@@ -202,26 +202,15 @@ internal sealed partial class BotSession
         {
             try
             {
-                if (routedText.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
-                    || routedText.StartsWith("*usage", StringComparison.OrdinalIgnoreCase)
-                    || routedText.StartsWith("*help", StringComparison.OrdinalIgnoreCase)
-                    || routedText.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
-                    || routedText.StartsWith("*question", StringComparison.OrdinalIgnoreCase))
-                {
-                    var handledBusyCommand = await TryHandleStarCommandAsync(client, senderAgentId, from, conversationKey, routedText).ConfigureAwait(false);
-                    if (handledBusyCommand)
-                    {
-                        return;
-                    }
-                }
-
-                var handledBusyPromptReply = await TryHandlePendingTextPromptReplyBeforeRoutingAsync(
+                var handledBusyUserResponse = await _userResponseHandler.TryHandleIncomingMessageAsync(
                     client,
                     senderAgentId,
                     from,
                     conversationKey,
-                    routedText).ConfigureAwait(false);
-                if (handledBusyPromptReply)
+                    routedText,
+                    whileRequestInFlight: true,
+                    CancellationToken.None).ConfigureAwait(false);
+                if (handledBusyUserResponse)
                 {
                     return;
                 }
@@ -259,22 +248,15 @@ internal sealed partial class BotSession
                 return;
             }
 
-            if (routedText.StartsWith('*'))
-            {
-                var handled = await TryHandleStarCommandAsync(client, senderAgentId, from, conversationKey, routedText).ConfigureAwait(false);
-                if (handled)
-                {
-                    return;
-                }
-            }
-
-            var handledPromptReply = await TryHandlePendingTextPromptReplyBeforeRoutingAsync(
+            var handledUserResponse = await _userResponseHandler.TryHandleIncomingMessageAsync(
                 client,
                 senderAgentId,
                 from,
                 conversationKey,
-                routedText).ConfigureAwait(false);
-            if (handledPromptReply)
+                routedText,
+                whileRequestInFlight: false,
+                CancellationToken.None).ConfigureAwait(false);
+            if (handledUserResponse)
             {
                 return;
             }

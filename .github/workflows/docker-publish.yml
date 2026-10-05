@@ -25,7 +25,7 @@ concurrency:
 
 env:
   IMAGE_NAME: bithatch/opensim-metaverse2mcp
-  USE_LIBREMETAVERSE_GIT: "true"
+  USE_LIBREMETAVERSE_GIT: "false"
 
 jobs:
   build-and-push:

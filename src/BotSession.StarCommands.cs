@@ -657,7 +657,6 @@ internal sealed partial class BotSession
             }
 
             lines.Add("Use *permission allow <permission-id> [remember] or *permission deny <permission-id> [remember].");
-            _latestPendingPermissionByConversation[conversationKey] = pending[0].Id;
             SendImText(client, agentId, from, string.Join("\n", lines));
             return;
         }
@@ -689,12 +688,7 @@ internal sealed partial class BotSession
 
         var response = action == "allow" ? "allow" : "reject";
         var ok = await _harnessClient.RespondToPermissionAsync(sessionId, permissionId, response, remember, CancellationToken.None).ConfigureAwait(false);
-        _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
-        ClearPendingPromptActive(conversationKey, permissionId);
-        ClearPendingPromptWait(conversationKey);
-        _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-        _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
-        ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
+        _userResponseHandler.NotifyPermissionPromptResolved(client, agentId, from, conversationKey, permissionId);
         SendImText(client, agentId, from, ok
             ? $"Permission response sent: {response} ({permissionId}){(remember ? " [remembered]" : string.Empty)}"
             : $"Permission response request was sent for {permissionId}, but Opencode did not return an explicit success flag.");
@@ -738,7 +732,6 @@ internal sealed partial class BotSession
             }
 
             lines.Add("Use *question answer <question-id> <text> or *question reject <question-id>.");
-            _latestPendingQuestionByConversation[conversationKey] = pending[0].Id;
             SendImText(client, agentId, from, string.Join("\n", lines));
             return;
         }
@@ -754,12 +747,7 @@ internal sealed partial class BotSession
 
             var questionId = NormalizeLooseQuery(parts[1]);
             var ok = await _harnessClient.RejectQuestionAsync(sessionId, questionId, CancellationToken.None).ConfigureAwait(false);
-            _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
-            ClearPendingPromptActive(conversationKey, questionId);
-            ClearPendingPromptWait(conversationKey);
-            _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-            _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
-            ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
+            _userResponseHandler.NotifyQuestionPromptResolved(client, agentId, from, conversationKey, questionId);
             SendImText(client, agentId, from, ok
                 ? $"Question rejected: {questionId}"
                 : $"Question reject request was sent for {questionId}, but Opencode did not return an explicit success flag.");
@@ -791,12 +779,7 @@ internal sealed partial class BotSession
             selectedQuestionId,
             new[] { answerText },
             CancellationToken.None).ConfigureAwait(false);
-        _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
-        ClearPendingPromptActive(conversationKey, selectedQuestionId);
-        ClearPendingPromptWait(conversationKey);
-        _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-        _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
-        ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
+        _userResponseHandler.NotifyQuestionPromptResolved(client, agentId, from, conversationKey, selectedQuestionId);
         SendImText(client, agentId, from, answered
             ? $"Question answered: {selectedQuestionId}"
             : $"Question answer request was sent for {selectedQuestionId}, but Opencode did not return an explicit success flag.");

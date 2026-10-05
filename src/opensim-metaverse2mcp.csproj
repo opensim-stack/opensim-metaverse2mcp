@@ -11,10 +11,10 @@
 
   <ItemGroup Condition="'$(UseLibreMetaverseGit)' != 'true'">
     <!-- Official NuGet packages -->
-    <PackageReference Include="LibreMetaverse" Version="3.1.6" />
-    <PackageReference Include="LibreMetaverse.RLV" Version="3.1.6" />
-    <PackageReference Include="LibreMetaverse.Imaging.Skia" Version="3.1.6" />
-    <PackageReference Include="LibreMetaverse.Voice.WebRTC" Version="3.1.6" />
+    <PackageReference Include="LibreMetaverse" Version="3.1.7" />
+    <PackageReference Include="LibreMetaverse.RLV" Version="3.1.7" />
+    <PackageReference Include="LibreMetaverse.Imaging.Skia" Version="3.1.7" />
+    <PackageReference Include="LibreMetaverse.Voice.WebRTC" Version="3.1.7" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseLibreMetaverseGit)' == 'true'">
