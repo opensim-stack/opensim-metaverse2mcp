@@ -121,7 +121,7 @@ internal sealed class AgentLocator
                             {
                                 throw;
                             }
-                            catch (Exception ex)
+                            catch (Exception)
                             {
                                 // Keep monitor alive across transient cache/network races.
                             }

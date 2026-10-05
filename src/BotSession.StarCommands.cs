@@ -63,10 +63,6 @@ internal sealed partial class BotSession
                 case "permissions":
                     await HandlePermissionCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
-                case "dialog":
-                case "dialogs":
-                    HandleDialogCommand(client, agentId, from, conversationKey, arg);
-                    return true;
                 case "question":
                 case "questions":
                     await HandleQuestionCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
@@ -88,10 +84,6 @@ internal sealed partial class BotSession
                 case "sessions":
                     await HandleSessionCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
-                case "project":
-                case "projects":
-                    await HandleProjectCommandAsync(client, agentId, from, arg).ConfigureAwait(false);
-                    return true;
                 case "voice":
                     await HandleVoiceCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
@@ -102,7 +94,22 @@ internal sealed partial class BotSession
                     await HandleSayCommandAsync(client, agentId, from, conversationKey, arg).ConfigureAwait(false);
                     return true;
                 default:
-                    SendImText(client, agentId, from, $"Unknown command '*{command}'. Try *help.");
+                    if (_harnessClient == null)
+                    {
+                        SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
+                    }
+                    else
+                    {
+                        string stres = _harnessClient.HandleStarCommand(this, client, agentId, from, conversationKey, split);
+                        if(stres == "") 
+                        {
+                            SendImText(client, agentId, from, $"Unknown command '*{command}'. Try *help.");
+                        }
+                        else
+                        {
+                            SendImText(client, agentId, from, stres);
+                        }
+                    }
                     return true;
             }
         }
@@ -113,12 +120,11 @@ internal sealed partial class BotSession
         }
     }
 
-    private static string BuildStarHelpText(string topicArg)
+    private string BuildStarHelpText(string topicArg)
     {
         if (string.IsNullOrWhiteSpace(topicArg))
         {
-            return string.Join(
-                "\n",
+            var baseText = string.Join("\n",
                 "Star commands:",
                 "*help - Show command summary",
                 "*help <command> - Show detailed help for one command",
@@ -128,7 +134,6 @@ internal sealed partial class BotSession
                 "*cancel - Abort current in-flight AI request for this IM",
                 "*restart - Restart this bot via opensim-spawner",
                 "*prompt - Manage prompt layers (status/show/clear/reload)",
-                "*dialog - Manage pending script dialogs",
                 "*permission - Manage pending permission requests",
                 "*question - Manage pending question requests",
                 "*providers - List providers",
@@ -141,6 +146,12 @@ internal sealed partial class BotSession
                 "*say - Speak text via Piper + configured voice backend",
                 "*configure - Configure provider/model/thinking for this IM",
                 "*reset - Alias for '*configure reset'");
+                
+            if(_harnessClient != null)
+            {
+                baseText += _harnessClient.StarHelpText(topicArg);
+            }
+            return baseText;
         }
 
         var topic = topicArg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
@@ -149,14 +160,40 @@ internal sealed partial class BotSession
         {
             "permissions" => "permission",
             "questions" => "question",
-            "projects" => "project",
             "sessions" => "session",
             "prompts" => "prompt",
             "bridges" => "bridge",
             _ => topic
         };
+        
+        if(topic == "all")
+        {
+            var baseText = string.Join("\n",
+                BuildStarHelpText("status"),
+                BuildStarHelpText("usage"),
+                BuildStarHelpText("cancel"),
+                BuildStarHelpText("restart"),
+                BuildStarHelpText("prompt"),
+                BuildStarHelpText("permission"),
+                BuildStarHelpText("question"),
+                BuildStarHelpText("providers"),
+                BuildStarHelpText("models"),
+                BuildStarHelpText("auth"),
+                BuildStarHelpText("session"),
+                BuildStarHelpText("voice"),
+                BuildStarHelpText("voices"),
+                BuildStarHelpText("say"),
+                BuildStarHelpText("configure"),
+                BuildStarHelpText("reset"));
+            
+            if(_harnessClient != null)
+            {
+                baseText += "\n" + _harnessClient.StarHelpTopics();
+            }
+            return baseText;
+        }
 
-        return topic switch
+        var htext = topic switch
         {
             "help" => string.Join(
                 "\n",
@@ -165,26 +202,6 @@ internal sealed partial class BotSession
                 "*help <command> - show detailed variants",
                 "*help all - show detailed variants for all commands",
                 "Examples: *help session, *help configure, *help prompt"),
-            "all" => string.Join(
-                "\n\n",
-                BuildStarHelpText("status"),
-                BuildStarHelpText("usage"),
-                BuildStarHelpText("cancel"),
-                BuildStarHelpText("restart"),
-                BuildStarHelpText("prompt"),
-                BuildStarHelpText("dialog"),
-                BuildStarHelpText("permission"),
-                BuildStarHelpText("question"),
-                BuildStarHelpText("providers"),
-                BuildStarHelpText("models"),
-                BuildStarHelpText("auth"),
-                BuildStarHelpText("session"),
-                BuildStarHelpText("project"),
-                BuildStarHelpText("voice"),
-                BuildStarHelpText("voices"),
-                BuildStarHelpText("say"),
-                BuildStarHelpText("configure"),
-                BuildStarHelpText("reset")),
             "status" => "*status - Show current provider/model/thinking/session and prompt source state for this IM.",
             "usage" => "*usage - Show the latest Opencode response usage for this IM conversation (cost/input/output/reasoning/cache).",
             "cancel" => "*cancel - Abort the current in-flight AI request for this IM conversation.",
@@ -196,11 +213,6 @@ internal sealed partial class BotSession
                 "*prompt show [effective|builtin|project|notecard] - Preview prompt text",
                 "*prompt clear-notecard - Remove active in-world AGENTS.md prompt layer",
                 "*prompt reload-project - Re-read project AGENTS.md from disk"),
-            "dialog" => string.Join(
-                "\n",
-                "*dialog variants:",
-                "*dialog list - Show the latest pending in-world script dialog",
-                "*dialog reply <option-number|button-label> - Reply to the latest script dialog"),
             "permission" => string.Join(
                 "\n",
                 "*permission variants:",
@@ -265,9 +277,25 @@ internal sealed partial class BotSession
                 "*configure variants:",
                 "*configure <provider|model|thinking|reset> ... (try *help)"),
             "reset" => "*reset - Alias for '*configure reset'.",
-            _ => $"Unknown help topic '{topic}'. Try *help."
+            _ => ""
         };
 
+        if(htext == "") 
+        {
+            if(_harnessClient != null)
+            {
+                var helpText = _harnessClient.StarHelpText(topic);
+                if(!string.IsNullOrWhiteSpace(helpText))
+                {
+                    return helpText;
+                }
+            }
+            return $"Unknown help topic '{topic}'. Try *help.";
+        }
+        else
+        {
+            return htext;
+        }
     }
 
     private string BuildUsageText(string conversationKey)
@@ -670,141 +698,6 @@ internal sealed partial class BotSession
         SendImText(client, agentId, from, ok
             ? $"Permission response sent: {response} ({permissionId}){(remember ? " [remembered]" : string.Empty)}"
             : $"Permission response request was sent for {permissionId}, but Opencode did not return an explicit success flag.");
-    }
-
-    private void HandleDialogCommand(GridClient client, UUID agentId, string from, string conversationKey, string arg)
-    {
-        if (!_latestScriptDialogByConversation.TryGetValue(conversationKey, out var dialog))
-        {
-            SendImText(client, agentId, from, "No pending script dialog for this conversation.");
-            return;
-        }
-
-        var parts = arg.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length == 0 || parts[0].Equals("list", StringComparison.OrdinalIgnoreCase))
-        {
-            SendImText(client, agentId, from, BuildFriendlyScriptDialogPrompt(dialog));
-            return;
-        }
-
-        var selectionText = parts[0].Equals("reply", StringComparison.OrdinalIgnoreCase)
-            ? arg[parts[0].Length..].Trim()
-            : arg.Trim();
-        if (!TryResolveScriptDialogChoice(dialog, selectionText, out var selectedIndex, out var selectedLabel))
-        {
-            SendImText(client, agentId, from, "Could not match that dialog option. Reply with option number or exact button label.");
-            return;
-        }
-
-        client.Self.ReplyToScriptDialog(dialog.Channel, selectedIndex, selectedLabel, dialog.ObjectId);
-        _latestScriptDialogByConversation.TryRemove(conversationKey, out _);
-        SendImText(client, agentId, from, $"Dialog response sent: {selectedLabel}");
-    }
-
-    private bool TryHandlePendingScriptDialogBeforeRouting(
-        GridClient client,
-        UUID agentId,
-        string from,
-        string conversationKey,
-        string text)
-    {
-        if (string.IsNullOrWhiteSpace(text) || text.StartsWith('*'))
-        {
-            return false;
-        }
-
-        if (!_latestScriptDialogByConversation.TryGetValue(conversationKey, out var dialog))
-        {
-            return false;
-        }
-
-        if (!TryResolveScriptDialogChoice(dialog, text, out var selectedIndex, out var selectedLabel))
-        {
-            return false;
-        }
-
-        client.Self.ReplyToScriptDialog(dialog.Channel, selectedIndex, selectedLabel, dialog.ObjectId);
-        _latestScriptDialogByConversation.TryRemove(conversationKey, out _);
-        SendImText(client, agentId, from, $"Dialog response sent: {selectedLabel}");
-        return true;
-    }
-
-    private static bool TryResolveScriptDialogChoice(PendingScriptDialog dialog, string input, out int selectedIndex, out string selectedLabel)
-    {
-        selectedIndex = -1;
-        selectedLabel = string.Empty;
-        if (dialog.Buttons.Count == 0 || string.IsNullOrWhiteSpace(input))
-        {
-            return false;
-        }
-
-        var normalized = input.Trim();
-        if (int.TryParse(normalized, out var optionNumber)
-            && optionNumber >= 1
-            && optionNumber <= dialog.Buttons.Count)
-        {
-            selectedIndex = optionNumber - 1;
-            selectedLabel = dialog.Buttons[selectedIndex];
-            return true;
-        }
-
-        for (var i = 0; i < dialog.Buttons.Count; i++)
-        {
-            if (dialog.Buttons[i].Equals(normalized, StringComparison.OrdinalIgnoreCase))
-            {
-                selectedIndex = i;
-                selectedLabel = dialog.Buttons[i];
-                return true;
-            }
-        }
-
-        var answer = normalized.ToLowerInvariant();
-        if (answer is "yes" or "y")
-        {
-            for (var i = 0; i < dialog.Buttons.Count; i++)
-            {
-                if (dialog.Buttons[i].Contains("yes", StringComparison.OrdinalIgnoreCase))
-                {
-                    selectedIndex = i;
-                    selectedLabel = dialog.Buttons[i];
-                    return true;
-                }
-            }
-        }
-
-        if (answer is "no" or "n")
-        {
-            for (var i = 0; i < dialog.Buttons.Count; i++)
-            {
-                if (dialog.Buttons[i].Contains("no", StringComparison.OrdinalIgnoreCase))
-                {
-                    selectedIndex = i;
-                    selectedLabel = dialog.Buttons[i];
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private static string BuildFriendlyScriptDialogPrompt(PendingScriptDialog dialog)
-    {
-        var title = string.IsNullOrWhiteSpace(dialog.ObjectName) ? "Script dialog" : dialog.ObjectName;
-        var lines = new List<string>
-        {
-            "I received an in-world script dialog:",
-            title,
-            dialog.Message
-        };
-
-        for (var i = 0; i < dialog.Buttons.Count; i++)
-        {
-            lines.Add($"{i + 1}) {dialog.Buttons[i]}");
-        }
-
-        lines.Add("Reply with option number or exact button text.");
-        return string.Join("\n", lines);
     }
 
     private async Task HandleQuestionCommandAsync(GridClient client, UUID agentId, string from, string conversationKey, string arg)
@@ -1615,58 +1508,6 @@ internal sealed partial class BotSession
         }
 
         SendImText(client, agentId, from, "Unknown session command. Usage: *session list | *session create [title] [--no-select] | *session use <session-id> | *session status | *session current | *session details <session-id|current> | *session children <session-id|current> | *session patch-title <session-id|current> <new-title> | *session delete <session-id|current> [--force] | *session delete --all [--force] | *session summarize <session-id|current> [provider/model] | *session abort <session-id|current>");
-    }
-
-    private async Task HandleProjectCommandAsync(GridClient client, UUID agentId, string from, string arg)
-    {
-        if (_harnessClient == null)
-        {
-            SendImText(client, agentId, from, "AI chat is currently disabled by configuration.");
-            return;
-        }
-
-        var normalized = string.IsNullOrWhiteSpace(arg) ? "list" : arg.Trim().ToLowerInvariant();
-        if (normalized is "list" or "all")
-        {
-            var projects = await _harnessClient.ListProjectsAsync(CancellationToken.None).ConfigureAwait(false);
-            if (projects.Count == 0)
-            {
-                SendImText(client, agentId, from, "No projects were reported by Opencode.");
-                return;
-            }
-
-            var lines = new List<string> { $"Projects ({projects.Count}):" };
-            foreach (var project in projects.Take(40))
-            {
-                var path = string.IsNullOrWhiteSpace(project.Path) ? "n/a" : project.Path;
-                var marker = project.Current == true ? " [current]" : string.Empty;
-                lines.Add($"- {project.Name} ({project.Id}) [path: {path}]{marker}");
-            }
-
-            if (projects.Count > 40)
-            {
-                lines.Add($"... and {projects.Count - 40} more");
-            }
-
-            SendImText(client, agentId, from, string.Join("\n", lines));
-            return;
-        }
-
-        if (normalized == "current")
-        {
-            var current = await _harnessClient.GetCurrentProjectAsync(CancellationToken.None).ConfigureAwait(false);
-            if (current == null)
-            {
-                SendImText(client, agentId, from, "Opencode did not report a current project.");
-                return;
-            }
-
-            var path = string.IsNullOrWhiteSpace(current.Path) ? "n/a" : current.Path;
-            SendImText(client, agentId, from, $"Current project: {current.Name} ({current.Id}) [path: {path}]");
-            return;
-        }
-
-        SendImText(client, agentId, from, "Usage: *projects | *project current");
     }
 
     private string ResolveSessionSelector(string conversationKey, string selector, bool requireExplicit)

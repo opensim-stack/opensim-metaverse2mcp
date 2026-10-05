@@ -1,7 +1,13 @@
 namespace Opensim.Metaverse2Mcp;
 
+using System.Collections.Concurrent;
+using LibreMetaverse;
+
 internal interface IHarnessClient
 {
+    public string StarHelpTopics();
+    string StarHelpText(string topicArg);
+    string HandleStarCommand(BotSession botSession, GridClient client, UUID agentId, string from, string conversationKey, string[] args);
     Task<HarnessChatReply> SendMessageAsync(string conversationKey, string title, string message, HarnessSendOptions? options, CancellationToken cancellationToken);
     void ResetConversation(string conversationKey);
     void SetConversationSessionId(string conversationKey, string? sessionId);
@@ -29,8 +35,6 @@ internal interface IHarnessClient
     Task<bool> DeleteSessionAsync(string sessionId, CancellationToken cancellationToken);
     Task<bool> SummarizeSessionAsync(string sessionId, string? providerId, string? modelId, CancellationToken cancellationToken);
     Task<bool> AbortSessionAsync(string sessionId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<HarnessProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken);
-    Task<HarnessProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken);
     event Action<HarnessSessionStatusEvent>? SessionStatusChanged;
     event Action<HarnessMessagePartUpdatedEvent>? MessagePartUpdated;
     event Action<HarnessPendingPromptStateEvent>? PendingPromptStateChanged;
@@ -45,7 +49,6 @@ internal sealed record HarnessSendOptions(string? ModelId, string? ThinkingLevel
 internal sealed record HarnessProviderSummary(string Id, string Name, bool? Connected);
 internal sealed record HarnessModelSummary(string Id, string Name, string? Provider);
 internal sealed record HarnessSessionSummary(string Id, string Title, string? Status, string? ProjectId);
-internal sealed record HarnessProjectSummary(string Id, string Name, string? Path, bool? Current);
 internal sealed record HarnessPendingPermission(string Id, string SessionId, string Title, string? Description);
 internal sealed record HarnessPendingQuestion(string Id, string SessionId, string Header, string Question, IReadOnlyList<string> Options, bool? AllowsMultiple, bool? AllowsCustom);
 internal sealed record HarnessProviderAuthMethod(int MethodIndex, string Type, string Label);

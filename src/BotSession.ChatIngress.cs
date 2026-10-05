@@ -205,8 +205,6 @@ internal sealed partial class BotSession
                 if (routedText.StartsWith("*cancel", StringComparison.OrdinalIgnoreCase)
                     || routedText.StartsWith("*usage", StringComparison.OrdinalIgnoreCase)
                     || routedText.StartsWith("*help", StringComparison.OrdinalIgnoreCase)
-                    || routedText.StartsWith("*dialog", StringComparison.OrdinalIgnoreCase)
-                    || routedText.StartsWith("*dialogs", StringComparison.OrdinalIgnoreCase)
                     || routedText.StartsWith("*permission", StringComparison.OrdinalIgnoreCase)
                     || routedText.StartsWith("*question", StringComparison.OrdinalIgnoreCase))
                 {
@@ -215,12 +213,6 @@ internal sealed partial class BotSession
                     {
                         return;
                     }
-                }
-
-                var handledBusyDialog = TryHandlePendingScriptDialogBeforeRouting(client, senderAgentId, from, conversationKey, routedText);
-                if (handledBusyDialog)
-                {
-                    return;
                 }
 
                 var handledBusyPromptReply = await TryHandlePendingTextPromptReplyBeforeRoutingAsync(
@@ -274,12 +266,6 @@ internal sealed partial class BotSession
                 {
                     return;
                 }
-            }
-
-            var handledDialog = TryHandlePendingScriptDialogBeforeRouting(client, senderAgentId, from, conversationKey, routedText);
-            if (handledDialog)
-            {
-                return;
             }
 
             var handledPromptReply = await TryHandlePendingTextPromptReplyBeforeRoutingAsync(

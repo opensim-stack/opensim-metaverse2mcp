@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using LibreMetaverse;
 
 namespace Opensim.Metaverse2Mcp;
 
@@ -19,8 +20,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
     private readonly Task? _eventLoopTask;
     private readonly ConcurrentDictionary<string, string> _sessionIds = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, OpencodeOAuthPendingState> _oauthPendingStates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingPermission>> _pendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingQuestion>> _pendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingPermission>> _eventPendingPermissionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingQuestion>> _eventPendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _requestedModelBySession = new(StringComparer.OrdinalIgnoreCase);
@@ -131,7 +130,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     {
                         if (dataBuilder.Length > 0)
                         {
-                            LogObservedEvent(currentEventName, dataBuilder.ToString());
+                            ProcessObservedEvent(currentEventName, dataBuilder.ToString());
                         }
 
                         currentEventName = "message";
@@ -183,7 +182,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
     }
 
-    private void LogObservedEvent(string eventName, string rawData)
+    private void ProcessObservedEvent(string eventName, string rawData)
     {
         if (string.IsNullOrWhiteSpace(rawData))
         {
@@ -212,7 +211,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 }
             }
 
-            if (ShouldLogEventJson(eventType, root))
+            if (ShouldLogEvent(eventType, root))
             {
                 LogRawJson($"event:{eventType}", rawData);
             }
@@ -291,7 +290,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         _requestedModelBySession.TryRemove(normalizedSessionId, out _);
     }
 
-    private bool ShouldLogEventJson(string eventType, JsonElement root)
+    private bool ShouldLogEvent(string eventType, JsonElement root)
     {
         var normalizedEventType = (eventType ?? string.Empty).Trim();
         if (_opencodeEventDebug)
@@ -571,6 +570,9 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
     {
         var normalizedType = (eventType ?? string.Empty).Trim().ToLowerInvariant();
         var touchedSessions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        
+        // Permissions
+        
         var derivedPermissions = ParsePendingPermissions(root)
             .Select(p => string.IsNullOrWhiteSpace(p.SessionId) && !string.IsNullOrWhiteSpace(hintedSessionId)
                 ? new HarnessPendingPermission(p.Id, hintedSessionId!, p.Title, p.Description)
@@ -586,7 +588,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     .GroupBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
                     .Select(g => g.First())
                     .ToList();
-                _pendingPermissionsBySession[group.Key] = _eventPendingPermissionsBySession[group.Key];
                 touchedSessions.Add(group.Key);
             }
         }
@@ -594,9 +595,10 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             && !string.IsNullOrWhiteSpace(hintedSessionId))
         {
             _eventPendingPermissionsBySession.TryRemove(hintedSessionId, out _);
-            _pendingPermissionsBySession.TryRemove(hintedSessionId, out _);
             touchedSessions.Add(hintedSessionId);
         }
+        
+        // Questions
 
         var derivedQuestions = ParsePendingQuestions(root)
             .Select(q => string.IsNullOrWhiteSpace(q.SessionId) && !string.IsNullOrWhiteSpace(hintedSessionId)
@@ -613,7 +615,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
                     .Select(g => g.First())
                     .ToList();
-                _pendingQuestionsBySession[group.Key] = _eventPendingQuestionsBySession[group.Key];
                 touchedSessions.Add(group.Key);
             }
         }
@@ -621,9 +622,10 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             && !string.IsNullOrWhiteSpace(hintedSessionId))
         {
             _eventPendingQuestionsBySession.TryRemove(hintedSessionId, out _);
-            _pendingQuestionsBySession.TryRemove(hintedSessionId, out _);
             touchedSessions.Add(hintedSessionId);
         }
+
+        // Update sessions
 
         foreach (var sessionKey in touchedSessions)
         {
@@ -805,6 +807,48 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         _ = await PatchJsonRawAsync("/config", patch, cancellationToken).ConfigureAwait(false);
     }
 
+    private string HandleProjectCommand(GridClient client, UUID agentId, string from, string arg)
+    {
+        var normalized = string.IsNullOrWhiteSpace(arg) ? "list" : arg.Trim().ToLowerInvariant();
+        if (normalized is "list" or "all")
+        {
+            var projects = ListProjects(CancellationToken.None);
+            if (projects.Count == 0)
+            {
+                return "No projects were reported by Opencode.";
+            }
+
+            var lines = new List<string> { $"Projects ({projects.Count}):" };
+            foreach (var project in projects.Take(40))
+            {
+                var path = string.IsNullOrWhiteSpace(project.Path) ? "n/a" : project.Path;
+                var marker = project.Current == true ? " [current]" : string.Empty;
+                lines.Add($"- {project.Name} ({project.Id}) [path: {path}]{marker}");
+            }
+
+            if (projects.Count > 40)
+            {
+                lines.Add($"... and {projects.Count - 40} more");
+            }
+
+            return string.Join("\n", lines);
+        }
+
+        if (normalized == "current")
+        {
+            var current = GetCurrentProject(CancellationToken.None);
+            if (current == null)
+            {
+                return "Opencode did not report a current project.";
+            }
+
+            var path = string.IsNullOrWhiteSpace(current.Path) ? "n/a" : current.Path;
+            return $"Current project: {current.Name} ({current.Id}) [path: {path}]";
+        }
+
+        return "Usage: *projects | *project current";
+    }
+
     public void ResetConversation(string conversationKey)
     {
         if (string.IsNullOrWhiteSpace(conversationKey))
@@ -925,6 +969,53 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         return result;
     }
+        
+    public string HandleStarCommand(BotSession bot, GridClient client, UUID agentId, string from, string conversationKey, string[] args)
+    {
+        var command = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
+        var arg = args.Length > 1 ? args[1] : string.Empty;
+
+        switch (command)
+        {
+            case "project":
+            case "projects":
+                return HandleProjectCommand(client, agentId, from, arg);
+            default:
+                return "";
+        }
+    }
+    
+    public  string StarHelpTopics()
+    {
+        return "projects";
+    }
+    
+    public  string StarHelpText(string topic)
+    {
+        if (string.IsNullOrWhiteSpace(topic))
+        {
+            return "*project - Inspect Opencode project context";
+        }
+        else
+        {
+            topic = topic switch
+            {
+                "projects" => "project",
+                _ => topic
+            };
+            
+            return topic switch
+            {
+            "project" => string.Join(
+                "\n",
+                "*project variants:",
+                "*projects - List all Opencode projects",
+                "*project current - Show current Opencode project"),
+            _ => ""
+            };
+        }
+    }
+        
 
     public async Task SetProviderApiKeyAsync(string providerId, string apiKey, CancellationToken cancellationToken)
     {
@@ -1184,12 +1275,11 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         if (filtered.Count > 0)
         {
-            _pendingPermissionsBySession[normalizedSessionId] = filtered;
+            _eventPendingPermissionsBySession[normalizedSessionId] = filtered;
             return filtered;
         }
 
         // Treat an empty /permission result as authoritative for this session.
-        _pendingPermissionsBySession.TryRemove(normalizedSessionId, out _);
         _eventPendingPermissionsBySession.TryRemove(normalizedSessionId, out _);
 
         return Array.Empty<HarnessPendingPermission>();
@@ -1235,21 +1325,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             {
                 var raw = await PostJsonRawAsync(path, payload, cancellationToken).ConfigureAwait(false);
                 var accepted = TryInterpretBooleanResponse(raw, true);
-                if (accepted && _pendingPermissionsBySession.TryGetValue(sessionKey, out var existing))
-                {
-                    var remaining = existing
-                        .Where(p => !p.Id.Equals(permissionKey, StringComparison.OrdinalIgnoreCase))
-                        .ToList();
-                    if (remaining.Count == 0)
-                    {
-                        _pendingPermissionsBySession.TryRemove(sessionKey, out _);
-                    }
-                    else
-                    {
-                        _pendingPermissionsBySession[sessionKey] = remaining;
-                    }
-                }
-
                 if (accepted && _eventPendingPermissionsBySession.TryGetValue(sessionKey, out var eventExisting))
                 {
                     var eventRemaining = eventExisting
@@ -1290,11 +1365,11 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             .ToList();
         if (filtered.Count > 0)
         {
-            _pendingQuestionsBySession[normalizedSessionId] = filtered;
+            _eventPendingQuestionsBySession[normalizedSessionId] = filtered;
             return filtered;
         }
 
-        if (_pendingQuestionsBySession.TryGetValue(normalizedSessionId, out var cached))
+        if (_eventPendingQuestionsBySession.TryGetValue(normalizedSessionId, out var cached))
         {
             return cached;
         }
@@ -1339,21 +1414,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         if (ok)
         {
             var sessionKey = sessionId.Trim();
-            if (_pendingQuestionsBySession.TryGetValue(sessionKey, out var existing))
-            {
-                var remaining = existing
-                    .Where(q => !q.Id.Equals(questionKey, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (remaining.Count == 0)
-                {
-                    _pendingQuestionsBySession.TryRemove(sessionKey, out _);
-                }
-                else
-                {
-                    _pendingQuestionsBySession[sessionKey] = remaining;
-                }
-            }
-
             if (_eventPendingQuestionsBySession.TryGetValue(sessionKey, out var eventExisting))
             {
                 var eventRemaining = eventExisting
@@ -1391,21 +1451,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         if (ok)
         {
             var sessionKey = sessionId.Trim();
-            if (_pendingQuestionsBySession.TryGetValue(sessionKey, out var existing))
-            {
-                var remaining = existing
-                    .Where(q => !q.Id.Equals(questionKey, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (remaining.Count == 0)
-                {
-                    _pendingQuestionsBySession.TryRemove(sessionKey, out _);
-                }
-                else
-                {
-                    _pendingQuestionsBySession[sessionKey] = remaining;
-                }
-            }
-
             if (_eventPendingQuestionsBySession.TryGetValue(sessionKey, out var eventExisting))
             {
                 var eventRemaining = eventExisting
@@ -1516,15 +1561,15 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         return TryInterpretBooleanResponse(raw, true);
     }
 
-    public async Task<IReadOnlyList<HarnessProjectSummary>> ListProjectsAsync(CancellationToken cancellationToken)
+    public IReadOnlyList<HarnessProjectSummary> ListProjects(CancellationToken cancellationToken)
     {
-        var root = await GetJsonAsync<JsonElement>("/project", cancellationToken).ConfigureAwait(false);
+        var root = GetJsonAsync<JsonElement>("/project", cancellationToken).GetAwaiter().GetResult();
         return ParseProjectList(root);
     }
 
-    public async Task<HarnessProjectSummary?> GetCurrentProjectAsync(CancellationToken cancellationToken)
+    public HarnessProjectSummary? GetCurrentProject(CancellationToken cancellationToken)
     {
-        var root = await GetJsonAsync<JsonElement>("/project/current", cancellationToken).ConfigureAwait(false);
+        var root = GetJsonAsync<JsonElement>("/project/current", cancellationToken).GetAwaiter().GetResult();
         return TryBuildProjectSummary(root, null, out var project) ? project : null;
     }
 
@@ -1945,22 +1990,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
     private async Task<HarnessChatReply> SendToSessionAsync(string sessionId, string message, HarnessSendOptions? options, CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(options?.SystemPrompt))
-        {
-            var trimmedSystemPrompt = options.SystemPrompt.Trim();
-            Console.WriteLine($"[opencode:system] session={sessionId} systemPromptLength={trimmedSystemPrompt.Length} chars");
-            if (trimmedSystemPrompt.Contains("requester_position_local:", StringComparison.Ordinal))
-            {
-                var lines = trimmedSystemPrompt.Split('\n');
-                var posLine = lines.FirstOrDefault(l => l.StartsWith("requester_position_local:", StringComparison.Ordinal));
-                var distLine = lines.FirstOrDefault(l => l.StartsWith("requester_distance_to_bot_m:", StringComparison.Ordinal));
-                if (posLine != null || distLine != null)
-                {
-                    Console.WriteLine($"[opencode:location] {posLine ?? "(no position)"} {distLine ?? "(no distance)"}");
-                }
-            }
-        }
-
         var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel, options?.SystemPrompt);
         var body = new Dictionary<string, object?>
         {
@@ -3512,3 +3541,4 @@ internal sealed class OpencodeEmbeddedErrorException : Exception
 }
 
 internal readonly record struct EmbeddedOpencodeError(string Message, int? StatusCode);
+internal sealed record HarnessProjectSummary(string Id, string Name, string? Path, bool? Current);

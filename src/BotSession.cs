@@ -107,15 +107,6 @@ internal sealed partial class BotSession : IDisposable
         Console.WriteLine(message);
     }
 
-    private sealed record PendingScriptDialog(
-        string Id,
-        string Message,
-        string ObjectName,
-        UUID ObjectId,
-        int Channel,
-        IReadOnlyList<string> Buttons,
-        DateTimeOffset ReceivedAt);
-
     private sealed record PendingDialogPromptWait(
         PendingPromptKind Kind,
         string SessionId,
@@ -171,7 +162,6 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, string> _latestPendingQuestionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingPermissionByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedPendingQuestionByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, PendingScriptDialog> _latestScriptDialogByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PendingDialogPromptWait> _pendingDialogPromptWaitByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PendingTextPromptReply> _pendingTextPromptReplyByConversation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
@@ -211,7 +201,6 @@ internal sealed partial class BotSession : IDisposable
     private UUID _lastImSpeakerAgentId = UUID.Zero;
     private string? _lastImSpeakerName;
     private string? _lastImConversationKey;
-    private long _scriptDialogSequence;
     private readonly ConcurrentDictionary<string, byte> __busyHarnessSessions = new(StringComparer.OrdinalIgnoreCase);
     private string? _restoredHarnessSessionId;
     private HashSet<string> _handlerNames = new(StringComparer.OrdinalIgnoreCase);
@@ -368,7 +357,6 @@ internal sealed partial class BotSession : IDisposable
             client.Network.SimChanged += OnNetworkSimChanged;
             client.Self.IM += OnInstantMessage;
             client.Self.ChatFromSimulator += OnChatFromSimulator;
-            client.Self.ScriptDialog += OnScriptDialog;
             EnsureSocialImHookRegistered(client);
             client.Friends.FriendshipOffered += OnFriendshipOffered;
             client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
@@ -1983,51 +1971,6 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private void OnScriptDialog(object? sender, ScriptDialogEventArgs e)
-    {
-        var client = _client;
-        if (client == null)
-        {
-            return;
-        }
-
-        string? conversationKey;
-        UUID targetAgentId;
-        string from;
-        lock (_recentImSpeakerLock)
-        {
-            conversationKey = _lastImConversationKey;
-            targetAgentId = _lastImSpeakerAgentId;
-            from = _lastImSpeakerName ?? "handler";
-        }
-
-        if (string.IsNullOrWhiteSpace(conversationKey) || targetAgentId == UUID.Zero)
-        {
-            Console.WriteLine($"[dialog] received script dialog from '{e.ObjectName}' but no active IM target is known.");
-            return;
-        }
-
-        var labels = e.ButtonLabels
-            .Where(label => !string.IsNullOrWhiteSpace(label))
-            .Select(label => label.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(12)
-            .ToList();
-        var dialogId = $"dlg_{Interlocked.Increment(ref _scriptDialogSequence)}";
-        var pending = new PendingScriptDialog(
-            dialogId,
-            e.Message?.Trim() ?? string.Empty,
-            e.ObjectName?.Trim() ?? string.Empty,
-            e.ObjectID,
-            e.Channel,
-            labels,
-            DateTimeOffset.UtcNow);
-        _latestScriptDialogByConversation[conversationKey] = pending;
-
-        SendImText(client, targetAgentId, from, BuildFriendlyScriptDialogPrompt(pending), conversationKey);
-        Console.WriteLine($"[dialog] forwarded script dialog from '{pending.ObjectName}' to {from} ({conversationKey}).");
-    }
-
     private void AlertMessageHandler(object? sender, PacketReceivedEventArgs e)
     {
         Packet packet = e.Packet;
@@ -2317,7 +2260,6 @@ internal sealed partial class BotSession : IDisposable
         try { client.Self.IM -= OnInstantMessage; } catch { }
         try { client.Self.IM -= OnSocialInstantMessage; } catch { }
         try { client.Self.ChatFromSimulator -= OnChatFromSimulator; } catch { }
-        try { client.Self.ScriptDialog -= OnScriptDialog; } catch { }
         try { client.Friends.FriendshipOffered -= OnFriendshipOffered; } catch { }
         try { client.Inventory.InventoryObjectOffered -= OnInventoryObjectOffered; } catch { }
         try { client.Objects.ObjectUpdate -= OnWorldObjectUpdateForEventStream; } catch { }
