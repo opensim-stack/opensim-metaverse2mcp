@@ -2165,9 +2165,11 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 continue;
             }
 
-            if (kind == "tool" && string.IsNullOrWhiteSpace(part.ToolName))
+            if (kind == "tool"
+                && string.IsNullOrWhiteSpace(part.ToolName)
+                && string.IsNullOrWhiteSpace(part.Tool))
             {
-                throw new InvalidOperationException($"Opencode response from {path} contains tool part[{i}] without 'toolName'.");
+                throw new InvalidOperationException($"Opencode response from {path} contains tool part[{i}] without 'toolName' or 'tool'.");
             }
 
             if (kind != "text"
@@ -2231,7 +2233,15 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
             var toolParts = reply.Parts
                 .Where(p => string.Equals(p.Type, "tool", StringComparison.OrdinalIgnoreCase))
-                .Select(p => string.IsNullOrWhiteSpace(p.ToolName) ? "tool" : p.ToolName)
+                .Select(p =>
+                {
+                    if (!string.IsNullOrWhiteSpace(p.ToolName))
+                    {
+                        return p.ToolName;
+                    }
+
+                    return string.IsNullOrWhiteSpace(p.Tool) ? "tool" : p.Tool;
+                })
                 .ToArray();
 
             if (toolParts.Length > 0)
@@ -2773,14 +2783,13 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         if (normalizedResponse is "allow" or "approve" or "accept" or "yes" or "y")
         {
-            Add("once");
-            Add("always");
+            Add(remember ? "always" : "once");
             return payloads;
         }
 
         if (normalizedResponse is "reject" or "deny" or "no" or "n")
         {
-            Add("reject");
+            Add(remember ? "always" : "reject");
             return payloads;
         }
 
@@ -3436,6 +3445,9 @@ internal sealed class OpencodeChatPart
 
     [JsonPropertyName("toolName")]
     public string? ToolName { get; set; }
+
+    [JsonPropertyName("tool")]
+    public string? Tool { get; set; }
 }
 
 internal sealed record HarnessUsageSummary(

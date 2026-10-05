@@ -1703,12 +1703,6 @@ internal sealed partial class BotSession : IDisposable
             return false;
         }
 
-        if (!await IsPromptStillPendingAsync(state, conversationKey).ConfigureAwait(false))
-        {
-            _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-            return false;
-        }
-
         if (state.Kind == PendingPromptKind.Permission)
         {
             if (!TryParseSimplePermissionResponse(text, out var response, out var remember))
@@ -1718,12 +1712,20 @@ internal sealed partial class BotSession : IDisposable
                 return true;
             }
 
-            _ = await _harnessClient.RespondToPermissionAsync(state.SessionId, state.RequestId, response, remember, CancellationToken.None).ConfigureAwait(false);
-            _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-            _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
-            _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
-            ClearPendingPromptActive(conversationKey, state.RequestId);
-            ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
+            if (!await TrySubmitPendingTextPromptReplyAsync(
+                    client,
+                    agentId,
+                    from,
+                    conversationKey,
+                    promptKindName: "permission",
+                    submitFailureMessage: "I could not submit that approval yet. Please reply again in a moment.",
+                    notAcceptedMessage: "That approval was not accepted yet. Please reply again in a moment.",
+                    submitAsync: () => _harnessClient.RespondToPermissionAsync(state.SessionId, state.RequestId, response, remember, CancellationToken.None)).ConfigureAwait(false))
+            {
+                return true;
+            }
+
+            FinalizeSuccessfulPendingTextPromptReply(client, agentId, from, conversationKey, state);
             return true;
         }
 
@@ -1738,13 +1740,75 @@ internal sealed partial class BotSession : IDisposable
             }
         }
 
-        _ = await _harnessClient.ReplyToQuestionAsync(state.SessionId, state.RequestId, new[] { resolved }, CancellationToken.None).ConfigureAwait(false);
+        if (!await TrySubmitPendingTextPromptReplyAsync(
+                client,
+                agentId,
+                from,
+                conversationKey,
+                promptKindName: "question",
+                submitFailureMessage: "I could not submit that answer yet. Please reply again in a moment.",
+                notAcceptedMessage: "That answer was not accepted yet. Please reply again in a moment.",
+                submitAsync: () => _harnessClient.ReplyToQuestionAsync(state.SessionId, state.RequestId, new[] { resolved }, CancellationToken.None)).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        FinalizeSuccessfulPendingTextPromptReply(client, agentId, from, conversationKey, state);
+        return true;
+    }
+
+    private async Task<bool> TrySubmitPendingTextPromptReplyAsync(
+        GridClient client,
+        UUID agentId,
+        string from,
+        string conversationKey,
+        string promptKindName,
+        string submitFailureMessage,
+        string notAcceptedMessage,
+        Func<Task<bool>> submitAsync)
+    {
+        bool accepted;
+        try
+        {
+            accepted = await submitAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[prompt] failed to submit {promptKindName} reply for {conversationKey}: {ex.Message}");
+            SendImText(client, agentId, from, submitFailureMessage);
+            return false;
+        }
+
+        if (accepted)
+        {
+            return true;
+        }
+
+        SendImText(client, agentId, from, notAcceptedMessage);
+        return false;
+    }
+
+    private void FinalizeSuccessfulPendingTextPromptReply(
+        GridClient client,
+        UUID agentId,
+        string from,
+        string conversationKey,
+        PendingTextPromptReply state)
+    {
         _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
-        _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
-        _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
+        if (state.Kind == PendingPromptKind.Permission)
+        {
+            _latestPendingPermissionByConversation.TryRemove(conversationKey, out _);
+            _announcedPendingPermissionByConversation.TryRemove(conversationKey, out _);
+        }
+        else
+        {
+            _latestPendingQuestionByConversation.TryRemove(conversationKey, out _);
+            _announcedPendingQuestionByConversation.TryRemove(conversationKey, out _);
+        }
+
         ClearPendingPromptActive(conversationKey, state.RequestId);
         ScheduleDrainPendingPrompts(client, agentId, from, conversationKey);
-        return true;
     }
 
     private async Task<bool> IsPromptStillPendingAsync(PendingTextPromptReply state, string conversationKey)
