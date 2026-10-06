@@ -593,6 +593,58 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<BotToolResult> GroupInviteRespondAsync(
+        string groupId,
+        string action,
+        string? sessionId,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(groupId, out var groupUuid) || groupUuid == UUID.Zero)
+        {
+            return BotToolResult.Fail("groupId must be a valid non-zero UUID.");
+        }
+
+        var normalizedAction = (action ?? string.Empty).Trim().ToLowerInvariant();
+        if (normalizedAction != "accept" && normalizedAction != "decline")
+        {
+            return BotToolResult.Fail("action must be one of: accept, decline.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            if (!_pendingGroupInvitesByGroupId.TryGetValue(groupUuid, out var pending))
+            {
+                return Task.FromResult(BotToolResult.Fail(
+                    $"No pending group invitation found for group {groupUuid}. Subscribe to runtime events and wait for groups.invite.received, then retry."));
+            }
+
+            var inviteSessionId = pending.SessionId;
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                if (!UUID.TryParse(sessionId, out var parsedSessionId) || parsedSessionId == UUID.Zero)
+                {
+                    return Task.FromResult(BotToolResult.Fail("sessionId must be a valid non-zero UUID when provided."));
+                }
+
+                if (parsedSessionId != pending.SessionId)
+                {
+                    return Task.FromResult(BotToolResult.Fail(
+                        $"Provided sessionId {parsedSessionId} does not match the pending invite session {pending.SessionId} for group {groupUuid}."));
+                }
+
+                inviteSessionId = parsedSessionId;
+            }
+
+            var accept = normalizedAction == "accept";
+            client.Self.GroupInviteRespond(groupUuid, inviteSessionId, accept);
+            _pendingGroupInvitesByGroupId.TryRemove(groupUuid, out var _removed);
+
+            var verb = accept ? "Accepted" : "Declined";
+            return Task.FromResult(BotToolResult.OkResult(
+                $"{verb} group invitation for group {groupUuid} (sessionId={inviteSessionId})."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<DataToolResult> GroupBanListGetAsync(string groupId, bool includeDetails, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(groupId, out var groupUuid))

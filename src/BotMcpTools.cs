@@ -1299,6 +1299,16 @@ internal sealed class BotMcpTools
         return _bot.GroupInviteUserAsync(groupId, invite, cancellationToken);
     }
 
+    [McpServerTool, Description("Accept or decline a pending incoming group invitation for this bot.")]
+    public Task<BotToolResult> GroupInviteRespond(
+        [Description("Group UUID from the invite event.")] string groupId,
+        [Description("Action: accept or decline.")] string action,
+        [Description("Optional invite session UUID from groups.invite.received event. If provided, must match pending invite session.")] string? sessionId = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.GroupInviteRespondAsync(groupId, action, sessionId, cancellationToken);
+    }
+
     [McpServerTool, Description("List currently banned agents for a group UUID.")]
     public Task<DataToolResult> GroupBanListGet(
         [Description("Group UUID.")] string groupId,

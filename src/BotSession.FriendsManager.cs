@@ -20,9 +20,17 @@ internal sealed partial class BotSession
         UUID SessionId,
         DateTimeOffset ReceivedAtUtc);
 
+    private sealed record PendingGroupInviteMessage(
+        UUID GroupId,
+        string GroupName,
+        UUID SessionId,
+        string Message,
+        DateTimeOffset ReceivedAtUtc);
+
     private readonly ConcurrentDictionary<UUID, PendingTeleportMessage> _pendingTeleportOffersByAgent = new();
     private readonly ConcurrentDictionary<UUID, PendingTeleportMessage> _pendingTeleportRequestsByAgent = new();
     private readonly ConcurrentDictionary<UUID, PendingFriendOfferMessage> _pendingFriendOffersByAgent = new();
+    private readonly ConcurrentDictionary<UUID, PendingGroupInviteMessage> _pendingGroupInvitesByGroupId = new();
     private readonly object _socialImHookLock = new();
     private GridClient? _socialImHookClient;
 
@@ -649,6 +657,31 @@ internal sealed partial class BotSession
                         ["sessionId"] = im.IMSessionID.ToString(),
                         ["dialog"] = im.Dialog.ToString(),
                         ["message"] = message
+                    });
+                break;
+            case InstantMessageDialog.GroupInvitation:
+                _pendingGroupInvitesByGroupId[im.FromAgentID] = new PendingGroupInviteMessage(
+                    im.FromAgentID,
+                    string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName,
+                    im.IMSessionID,
+                    message,
+                    DateTimeOffset.UtcNow);
+                EmitRuntimeEvent(
+                    "friends",
+                    "groups.invite.received",
+                    "opensim",
+                    $"Group invitation received: {im.FromAgentName}.",
+                    new Dictionary<string, string?>
+                    {
+                        ["groupId"] = im.FromAgentID.ToString(),
+                        ["groupName"] = string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName,
+                        ["sessionId"] = im.IMSessionID.ToString(),
+                        ["dialog"] = im.Dialog.ToString(),
+                        ["message"] = message,
+                        // Keep chat-source compatible keys for event stream filters.
+                        ["fromAgentId"] = im.FromAgentID.ToString(),
+                        ["fromName"] = string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName,
+                        ["sourceType"] = "groupInvite"
                     });
                 break;
         }

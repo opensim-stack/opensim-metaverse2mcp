@@ -170,11 +170,13 @@ Social/friends tools:
 - `TeleportOffersList`
 - `TeleportRequestsList`
 - `TeleportOfferRespond`
+- `GroupInviteRespond`
 
 Social/friends notes:
 - `FriendSetRights` controls the three viewer switches: see online, locate on map, and edit/delete/take objects.
 - `FriendRightsGet` reports both sides of rights (`myRights` and `theirRights`) for one friend UUID.
 - Accepting a friendship offer from a configured handler auto-enables all three rights by default.
+- Incoming group invitations emit runtime event `groups.invite.received` on channel `friends`; use `groupId` (+ optional `sessionId`) with `GroupInviteRespond` to accept/decline.
 
 Chat notes:
 - `Chat` accepts optional `chatType` (case-insensitive) and defaults to `Normal`.
