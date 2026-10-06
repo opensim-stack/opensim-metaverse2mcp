@@ -170,6 +170,8 @@ Social/friends tools:
 - `TeleportOffersList`
 - `TeleportRequestsList`
 - `TeleportOfferRespond`
+- `ListScriptDialogs`
+- `ScriptDialogChoice`
 - `GroupInviteRespond`
 
 Social/friends notes:
@@ -177,6 +179,7 @@ Social/friends notes:
 - `FriendRightsGet` reports both sides of rights (`myRights` and `theirRights`) for one friend UUID.
 - Accepting a friendship offer from a configured handler auto-enables all three rights by default.
 - Incoming group invitations emit runtime event `groups.invite.received` on channel `friends`; use `groupId` (+ optional `sessionId`) with `GroupInviteRespond` to accept/decline.
+- Incoming scripted object dialogs emit runtime event `script.dialog.received` on channel `general`; use `pendingDialogHandle` with `ScriptDialogChoice` (`buttonIndex=-1` cancels without responding).
 
 Chat notes:
 - `Chat` accepts optional `chatType` (case-insensitive) and defaults to `Normal`.

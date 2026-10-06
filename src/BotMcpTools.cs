@@ -1101,6 +1101,23 @@ internal sealed class BotMcpTools
         return _bot.TeleportOfferRespondAsync(requesterAgentId, sessionId, accept, cancellationToken);
     }
 
+    [McpServerTool, Description("List pending scripted object dialogs captured during this session.")]
+    public Task<DataToolResult> ListScriptDialogs(
+        [Description("Pending dialog handle filter. Use 'all' (or empty) to list all pending dialogs.")] string? pendingDialogHandle = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ListScriptDialogsAsync(pendingDialogHandle, cancellationToken);
+    }
+
+    [McpServerTool, Description("Choose a button for a pending scripted object dialog, or cancel it without responding.")]
+    public Task<BotToolResult> ScriptDialogChoice(
+        [Description("Pending dialog handle from ListScriptDialogs or script.dialog.received event.")] string pendingDialogHandle,
+        [Description("Zero-based button index to press. Use -1 to cancel with no response.")] int buttonIndex,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ScriptDialogChoiceAsync(pendingDialogHandle, buttonIndex, cancellationToken);
+    }
+
     [McpServerTool, Description("Search the avatar directory for people by name text.")]
     public Task<DataToolResult> DirectorySearchPeople(
         [Description("Name text to search for.")] string query,
