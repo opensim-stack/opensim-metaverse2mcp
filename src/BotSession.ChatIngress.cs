@@ -77,15 +77,6 @@ internal sealed partial class BotSession
             isGroupIm ? groupSessionId : e.IM.FromAgentID,
             e.IM.FromAgentID,
             from);
-        if (!isGroupIm)
-        {
-            _requesterImLocationHintByConversation[conversationKey] = new RequesterImLocationHint(
-                e.IM.FromAgentID,
-                e.IM.RegionID,
-                e.IM.Position,
-                DateTimeOffset.UtcNow);
-        }
-
         lock (_recentImSpeakerLock)
         {
             _lastImSpeakerAgentId = e.IM.FromAgentID;
@@ -275,7 +266,7 @@ internal sealed partial class BotSession
             globalGateHeld = !routedText.StartsWith('*');
 
             TryBindRestoredOpencodeSessionToConversation(conversationKey);
-            var sendOptions = BuildSendOptions(conversationKey, senderAgentId, from);
+            var sendOptions = await BuildSendOptions(conversationKey, senderAgentId, from).ConfigureAwait(false);
             using var requestCts = new CancellationTokenSource();
             inFlightRequestCts = requestCts;
             _inFlightRequestCtsByConversation.AddOrUpdate(

@@ -1236,7 +1236,7 @@ internal sealed partial class BotSession
             }
 
             var requestedTitle = titleParts.Count == 0 ? null : string.Join(' ', titleParts);
-            var createOptions = BuildSendOptions(conversationKey);
+            var createOptions = await BuildSendOptions(conversationKey).ConfigureAwait(false);
             var created = await _harnessClient
                 .CreateSessionAsync(requestedTitle, null, createOptions?.ModelId, CancellationToken.None)
                 .ConfigureAwait(false);

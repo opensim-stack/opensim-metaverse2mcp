@@ -372,7 +372,7 @@ internal sealed class AgentLocator
             
         AgentMonitorStatus? candidate = null;
             
-        // Branch: friend-map fallback for non-visible avatars.
+        // Branch: friend-map
         var mapReply = await TryMapFriendLocationOnceAsync(client, targetId, FriendMapTimeout, cancellationToken).ConfigureAwait(false);
         if (mapReply != null)
         {

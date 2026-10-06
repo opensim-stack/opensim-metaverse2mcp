@@ -139,12 +139,6 @@ internal sealed partial class BotSession : IDisposable
         Console.WriteLine(message);
     }
 
-    private readonly record struct RequesterImLocationHint(
-        UUID RequesterAgentId,
-        UUID RegionId,
-        Vector3 Position,
-        DateTimeOffset ObservedAt);
-
     private readonly AppOptions _options;
     private readonly SemaphoreSlim _actionGate = new(1, 1);
     private readonly SemaphoreSlim _globalConversationGate = new(1, 1);
@@ -158,7 +152,6 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, RequesterImLocationHint> _requesterImLocationHintByConversation = new(StringComparer.Ordinal);
     private readonly AsyncLocal<string?> _ambientConversationKey = new();
     private readonly string _handlerConfigPath;
     private readonly string? _parentFullName;

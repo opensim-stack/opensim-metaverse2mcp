@@ -23,12 +23,12 @@ internal sealed partial class BotSession
         "- For multi-step tasks, inspect -> plan -> execute -> verify and report results clearly.\n" +
         "- Respect handler and policy restrictions configured by the bridge.";
         
-    private HarnessSendOptions? BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
+    private async Task<HarnessSendOptions?> BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
     {
         _conversationConfigs.TryGetValue(conversationKey, out var cfg);
         cfg ??= GetPersistedDefaultConversationConfigSnapshot();
 
-        var requesterContextLayer = BuildRequesterContextPrompt(requesterAgentId, requesterName, conversationKey);
+        var requesterContextLayer = await BuildRequesterContextPrompt(requesterAgentId, requesterName, conversationKey).ConfigureAwait(false);
         var systemPrompt = BuildLayeredPromptText(requesterContextLayer);
         var modelId = cfg?.ModelId ?? GetStartupDefaultModelId();
         var thinkingLevel = cfg?.ThinkingLevel;
@@ -118,7 +118,7 @@ internal sealed partial class BotSession
         return layers.Count == 0 ? null : string.Join("\n\n", layers);
     }
 
-    private string? BuildRequesterContextPrompt(UUID requesterAgentId, string? requesterName, string conversationKey)
+    private async Task<string?> BuildRequesterContextPrompt(UUID requesterAgentId, string? requesterName, string conversationKey)
     {
         var diagnosticsEnabled = IsFollowDiagnosticsEnabled();
         var trimmedName = (requesterName ?? string.Empty).Trim();
@@ -139,144 +139,57 @@ internal sealed partial class BotSession
 
         var client = _client;
         var sim = client?.Network.CurrentSim;
-        var hint = TryGetRequesterImLocationHint(conversationKey, requesterAgentId);
-        if (hint.HasValue)
+        var snapshot = await TryGetRequesterLocationSnapshotAsync(requesterAgentId).ConfigureAwait(false);
+        if (snapshot != null)
         {
-            var hintValue = hint.Value;
-            var hintPosition = FormatPosition(hintValue.Position);
-            if (hintValue.Position != Vector3.Zero)
+            if (snapshot.Position.HasValue)
             {
-                lines.Add($"requester_position_local: {hintPosition}");
-            }
-            if (hintValue.RegionId != UUID.Zero)
-            {
-                lines.Add($"requester_region_uuid: {hintValue.RegionId}");
+                lines.Add($"requester_position_local: {FormatPosition(snapshot.Position.Value)}");
             }
 
-            if (client != null)
+            if (snapshot.RegionHandle.HasValue)
             {
-                var hintSim = TryFindSimulatorByRegionId(client, hintValue.RegionId);
-                if (hintSim != null)
-                {
-                    lines.Add($"requester_sim_name: {hintSim.Name}");
-                }
+                lines.Add($"requester_region_handle: {snapshot.RegionHandle.Value}");
+            }
 
-                if (sim != null && hintValue.RegionId != UUID.Zero && hintValue.RegionId == sim.ID)
-                {
-                    var distance = Vector3.Distance(client.Self.SimPosition, hintValue.Position);
-                    lines.Add($"requester_distance_to_bot_m: {distance:F1}");
-                    Console.WriteLine($"[prompt:location] conversation={conversationKey} requester={trimmedName} uuid={requesterAgentId} source=im sim={sim.Name} position={hintPosition} distance_m={distance:F1}");
-                }
-                else
-                {
-                    Console.WriteLine($"[prompt:location] conversation={conversationKey} requester={trimmedName} uuid={requesterAgentId} source=im sim={(sim?.Name ?? "(unknown)")} requester_region_uuid={(hintValue.RegionId == UUID.Zero ? "(unknown)" : hintValue.RegionId.ToString())} position={hintPosition} distance_m=n/a");
-                }
+            if (!string.IsNullOrWhiteSpace(snapshot.RegionName))
+            {
+                lines.Add($"requester_sim_name: {snapshot.RegionName}");
             }
         }
-
-        if (sim != null)
+        else if (requesterAgentId != UUID.Zero && diagnosticsEnabled)
         {
-            if (requesterAgentId != UUID.Zero && ( !hint.HasValue || hint.Value.RegionId == UUID.Zero || hint.Value.Position == Vector3.Zero))
-            {
-                var requesterAvatar = sim.ObjectsAvatars.Values
-                    .FirstOrDefault(avatar => avatar != null && avatar.ID == requesterAgentId);
-                if (requesterAvatar != null)
-                {
-                    var position = FormatPosition(requesterAvatar.Position);
-                    lines.Add($"requester_position_local: {position}");
-                    if (client != null)
-                    {
-                        var distance = Vector3.Distance(client.Self.SimPosition, requesterAvatar.Position);
-                        lines.Add($"requester_distance_to_bot_m: {distance:F1}");
-                        Console.WriteLine($"[prompt:location] conversation={conversationKey} requester={trimmedName} uuid={requesterAgentId} sim={sim.Name} position={position} distance_m={distance:F1}");
-                    }
-
-                    if (diagnosticsEnabled)
-                    {
-                        Console.WriteLine(
-                            $"[requester][diag] resolved_in_current_sim conversation={conversationKey} requesterUuid={requesterAgentId} sim={DescribeSimulator(sim)} localId={requesterAvatar.LocalID} pos={FormatPosition(requesterAvatar.Position)}");
-                    }
-                }
-                else if (diagnosticsEnabled && client != null)
-                {
-                    if (TryFindAvatarByIdAcrossSims(client, requesterAgentId, out var seenSim, out var seenAvatar))
-                    {
-                        Console.WriteLine(
-                            $"[requester][diag] missing_from_current_sim conversation={conversationKey} requesterUuid={requesterAgentId} currentSim={DescribeSimulator(sim)} seenSim={DescribeSimulator(seenSim)} seenLocalId={seenAvatar!.LocalID} seenPos={FormatPosition(seenAvatar.Position)} botPos={FormatPosition(client.Self.SimPosition)}");
-                    }
-                    else
-                    {
-                        Console.WriteLine(
-                            $"[requester][diag] not_visible_any_sim conversation={conversationKey} requesterUuid={requesterAgentId} currentSim={DescribeSimulator(sim)} knownSims={client.Network.Simulators.Count}");
-                    }
-                }
-            }
-
-            var nearby = sim.ObjectsAvatars.Values
-                .Where(avatar => avatar != null && avatar.ID != UUID.Zero && avatar.ID != client?.Self.AgentID)
-                .Select(avatar =>
-                {
-                    var name = string.IsNullOrWhiteSpace(avatar!.Name) ? "(unknown)" : avatar.Name.Trim();
-                    var distance = client == null ? float.NaN : Vector3.Distance(client.Self.SimPosition, avatar.Position);
-                    return $"- {name} ({avatar.ID}) distance_m={(float.IsNaN(distance) ? "n/a" : distance.ToString("F1"))}";
-                })
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(entry => entry, StringComparer.OrdinalIgnoreCase)
-                .Take(12)
-                .ToList();
-
-            if (nearby.Count > 0)
-            {
-                lines.Add("nearby_avatars:");
-                lines.AddRange(nearby);
-            }
+            Console.WriteLine(
+                $"[requester][diag] locator_unavailable conversation={conversationKey} requesterUuid={requesterAgentId} reason=location_unresolved");
         }
 
         return string.Join("\n", lines);
     }
 
-    private RequesterImLocationHint? TryGetRequesterImLocationHint(string conversationKey, UUID requesterAgentId)
+    private async Task<AgentMonitorSnapshot?> TryGetRequesterLocationSnapshotAsync(UUID requesterAgentId)
     {
         if (requesterAgentId == UUID.Zero)
         {
             return null;
         }
 
-        if (!_requesterImLocationHintByConversation.TryGetValue(conversationKey, out var hint))
+        try
         {
-            return null;
-        }
-
-        if (hint.RequesterAgentId != requesterAgentId)
-        {
-            return null;
-        }
-
-        // Ignore very old hints so stale IM metadata does not outlive long-running sessions.
-        if (DateTimeOffset.UtcNow - hint.ObservedAt > TimeSpan.FromMinutes(10))
-        {
-            return null;
-        }
-
-        return hint;
-    }
-
-    private static Simulator? TryFindSimulatorByRegionId(GridClient client, UUID regionId)
-    {
-        if (regionId == UUID.Zero)
-        {
-            return null;
-        }
-
-        foreach (var candidate in client.Network.Simulators)
-        {
-            if (candidate.ID == regionId)
+            var monitorRead = await _agentLocator
+                .ReadSingleMonitorSnapshotAsync(requesterAgentId, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (!monitorRead.Ok || monitorRead.Snapshot == null || monitorRead.Snapshot.Online != true)
             {
-                return candidate;
+                return null;
             }
-        }
 
-        return null;
+            return monitorRead.Snapshot;
+        }
+        catch
+        {
+            // Location enrichment is optional and must not fail prompt construction.
+            return null;
+        }
     }
 
     private static string FormatPosition(Vector3 position)
