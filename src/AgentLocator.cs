@@ -56,7 +56,23 @@ internal sealed class AgentLocator
             StringComparison.OrdinalIgnoreCase);
     }
 
-    public async Task<BotTaskHandle> MonitorAgent(string targetAgentId, CancellationToken cancellationToken)
+    private void LogDiag(string message)
+    {
+        Console.WriteLine($"[agent-locator][diag] {message}");
+    }
+
+    private void LogDiag(string? correlationId, string message)
+    {
+        if (string.IsNullOrWhiteSpace(correlationId))
+        {
+            LogDiag(message);
+            return;
+        }
+
+        LogDiag($"corr={correlationId} {message}");
+    }
+
+    public async Task<BotTaskHandle> MonitorAgent(string targetAgentId, CancellationToken cancellationToken, string? correlationId = null)
     {
         
         /* TODO there may be a better way to do this. AvatarManager, RequestTrackAgent, but I'm not sure how it works. 
@@ -87,7 +103,7 @@ internal sealed class AgentLocator
         
         if (_bot.TryGetConnectedClientSnapshot(out var connectedClient) && connectedClient != null)
         {
-            var initialStatus = await CaptureInitialStatusBestEffortAsync(targetId, connectedClient, cancellationToken).ConfigureAwait(false);
+            var initialStatus = await CaptureInitialStatusBestEffortAsync(targetId, connectedClient, cancellationToken, correlationId).ConfigureAwait(false);
     
             var task = _bot.StartBotTask(
                 $"Monitor agent '{targetId}'.",
@@ -103,7 +119,7 @@ internal sealed class AgentLocator
                         {
                             try
                             {
-                                var current = await CaptureStatusAsync(targetId, connectedClient, previous, taskCancellationToken).ConfigureAwait(false);
+                                var current = await CaptureStatusAsync(targetId, connectedClient, previous, taskCancellationToken, correlationId).ConfigureAwait(false);
                                 current = current with
                                 {
                                     HeadingDegrees = TryComputeHeading(previous, current)
@@ -299,25 +315,30 @@ internal sealed class AgentLocator
         }
 
         BotTaskHandle? monitorTask = null;
+        var correlationId = Guid.NewGuid().ToString("N")[..8];
         try
         {
-            monitorTask = await MonitorAgent(targetId.ToString(), cancellationToken).ConfigureAwait(false);
+            monitorTask = await MonitorAgent(targetId.ToString(), cancellationToken, correlationId).ConfigureAwait(false);
             if (monitorTask == null || string.IsNullOrWhiteSpace(monitorTask.Handle))
             {
                 return (false, null, "Failed to create agent monitor task.");
             }
+
+            LogDiag(correlationId, $"single-read started target={targetId} handle={monitorTask.Handle}");
 
             for (var attempt = 0; attempt < 20; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (TryGetLatestStatus(monitorTask.Handle, out var snapshot))
                 {
+                    LogDiag(correlationId, $"single-read success target={targetId} handle={monitorTask.Handle} attempt={attempt + 1} online={(snapshot.Online.HasValue ? snapshot.Online.Value.ToString() : "unknown")} regionHandle={(snapshot.RegionHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(snapshot.Position?.ToString() ?? "n/a")}");
                     return (true, snapshot, null);
                 }
 
                 await Task.Delay(50, cancellationToken).ConfigureAwait(false);
             }
 
+            LogDiag(correlationId, $"single-read timeout target={targetId} handle={monitorTask.Handle}");
             return (false, null, "Timed out waiting for first agent monitor reading.");
         }
         finally
@@ -329,11 +350,11 @@ internal sealed class AgentLocator
         }
     }
 
-    private async Task<AgentMonitorStatus> CaptureInitialStatusBestEffortAsync(UUID targetId, GridClient client, CancellationToken cancellationToken)
+    private async Task<AgentMonitorStatus> CaptureInitialStatusBestEffortAsync(UUID targetId, GridClient client, CancellationToken cancellationToken, string? correlationId = null)
     {
         try
         {
-            return await CaptureStatusAsync(targetId, client, previous: null, cancellationToken).ConfigureAwait(false);
+            return await CaptureStatusAsync(targetId, client, previous: null, cancellationToken, correlationId).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -363,7 +384,8 @@ internal sealed class AgentLocator
         UUID targetId,
         GridClient client,
         AgentMonitorStatus? previous,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? correlationId = null)
     {
         var status = AgentMonitorStatus.Unknown;
 
@@ -376,6 +398,7 @@ internal sealed class AgentLocator
         var mapReply = await TryMapFriendLocationOnceAsync(client, targetId, FriendMapTimeout, cancellationToken).ConfigureAwait(false);
         if (mapReply != null)
         {
+            LogDiag(correlationId, $"friend-map hit target={targetId} regionHandle={mapReply.RegionHandle} pos={FormatVector(mapReply.Location)}");
             candidate = status with
             {
                 Online = true,
@@ -386,6 +409,10 @@ internal sealed class AgentLocator
                 Velocity = null,
                 HeadingDegrees = null
             };
+        }
+        else
+        {
+            LogDiag(correlationId, $"friend-map miss target={targetId}");
         }
         
 
@@ -406,6 +433,7 @@ internal sealed class AgentLocator
             {
                 if (!_cachedExternalFallbackResult.Found)
                 {
+                    LogDiag(correlationId, $"external-fallback offline target={targetId}");
                     return status with
                     {
                         Online = false
@@ -415,6 +443,7 @@ internal sealed class AgentLocator
                 var cached = _cachedExternalFallbackResult;
                 var cachedHandle = cached.RegionHandle == 0 ? null : (ulong?)cached.RegionHandle;
                 var cachedRegionName = ResolveRegionName(cached.RegionName, cached.Simulator, cached.RegionHandle);
+                LogDiag(correlationId, $"external-fallback hit target={targetId} found={cached.Found} regionHandle={(cachedHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={FormatVector(cached.Position)}");
                 return status with
                 {
                     Online = true,
@@ -436,6 +465,7 @@ internal sealed class AgentLocator
             
             if(candidate == null || candidate.RegionHandle == currentSim?.Handle)
             {
+                LogDiag(correlationId, $"current-sim hit target={targetId} sim={(currentSim?.Name ?? "(unknown)")} localId={(foundAvatar?.LocalID.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(knownPosition.HasValue ? FormatVector(knownPosition.Value) : "n/a")}");
                 return new AgentMonitorStatus(
                     Online: true,
                     RegionName: RegionNameFromHandle(client, foundAvatar?.RegionHandle ?? 0),
@@ -450,14 +480,27 @@ internal sealed class AgentLocator
             else 
             {
                 // Branch: potentially stale current-sim cache hit, but we have a friend-map or spawner candidate that is off-region.  In this case, we will return the candidate as authoritative and clear the LocalId since it is not valid in the candidate's region.
+                LogDiag(correlationId, $"current-sim stale target={targetId} sim={(currentSim?.Name ?? "(unknown)")} candidateRegionHandle={(candidate.RegionHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")}");
                 return candidate with
                 {
                     LocalId = null
                 };
             }
         }
+
+        if (candidate != null)
+        {
+            // Critical: if map/spawner resolved the avatar in another region and there is no current-sim cache hit,
+            // return that candidate instead of downgrading to Unknown.
+            LogDiag(correlationId, $"candidate-only return target={targetId} regionHandle={(candidate.RegionHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(candidate.Position.HasValue ? FormatVector(candidate.Position.Value) : "n/a")}");
+            return candidate with
+            {
+                LocalId = null
+            };
+        }
         
         // Branch: connected but target not found anywhere this cycle.
+        LogDiag(correlationId, $"unresolved target={targetId}");
         return status with
         {
             LocalId = null
@@ -934,6 +977,9 @@ internal sealed class AgentLocator
         Utils.LongToUInts(regionHandle, out var regionX, out var regionY);
         return new Vector3(regionX + localPosition.X, regionY + localPosition.Y, localPosition.Z);
     }
+
+    private static string FormatVector(Vector3 value)
+        => $"<{value.X:0.###}, {value.Y:0.###}, {value.Z:0.###}>";
 
     private readonly record struct SpawnerAgentResponse(bool Found, UUID RegionId, string? RegionName, Vector3 Position);
 
