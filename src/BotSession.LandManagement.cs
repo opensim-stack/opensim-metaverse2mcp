@@ -709,6 +709,31 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<BotToolResult> ParcelReclaimAsync(CancellationToken cancellationToken)
+    {
+        Console.WriteLine("[land] ParcelReclaimAsync");
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            await EnsureParcelMapAsync(client, sim, forceRefresh: false, token).ConfigureAwait(false);
+
+            var localId = client.Parcels.GetParcelLocalID(sim, client.Self.SimPosition);
+            if (localId <= 0)
+            {
+                return BotToolResult.Fail("Unable to resolve current parcel local ID from simulator parcel map.");
+            }
+
+            client.Parcels.Reclaim(sim, localId);
+            return BotToolResult.OkResult($"Submitted reclaim request for current parcel {localId}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<DataToolResult> TerrainHeightmapSampleAsync(int stepMeters, CancellationToken cancellationToken)
     {
         if (stepMeters < 1 || stepMeters > 64)

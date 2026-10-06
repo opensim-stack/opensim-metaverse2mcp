@@ -725,6 +725,12 @@ internal sealed class BotMcpTools
         return _bot.ParcelDeedToGroupAsync(groupId, forceRefresh, cancellationToken);
     }
 
+    [McpServerTool, Description("Reclaim the parcel under the bot's current position using the current simulator and parcel local ID.")]
+    public Task<BotToolResult> ParcelReclaim(CancellationToken cancellationToken = default)
+    {
+        return _bot.ParcelReclaimAsync(cancellationToken);
+    }
+
     [McpServerTool, Description("Sample terrain heights from cached land patches on a regular grid.")]
     public Task<DataToolResult> TerrainHeightmapSample(
         [Description("Grid sampling step in meters (1..64).") ] int stepMeters,
