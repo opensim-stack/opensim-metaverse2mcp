@@ -149,6 +149,7 @@ The server publishes tools including:
 - `ParcelJoin`
 - `ParcelSubdivide`
 - `ParcelPermissionDiagnostics`
+- `ParcelDeedToGroup`
 - `RlvGetStatus`
 - `RlvSetRuntimeEnabled`
 - `RlvProcessCommand`
@@ -276,6 +277,7 @@ Land notes:
 - `ParcelAccessListSet(action="clear")` clears the target scope list and ignores `agentIdsCsv`.
 - `ParcelFlagsGet(localId?, forceRefresh?)` returns `flags` plus `flagsMask` and normalized `flagStates` booleans.
 - `ParcelSetFlags(localId, enableFlagsCsv?, disableFlagsCsv?)` applies `after = (before | enableFlags) & ~disableFlags`; overlapping flags are rejected.
+- `ParcelDeedToGroup(groupId, forceRefresh?)` resolves the current parcel under the bot and submits a deed request to the provided group UUID (bot must currently own the parcel).
 - Example MCP call forms:
   - `ParcelAccessListSet(localId=42, listType="access", action="add", agentIdsCsv="uuid-a,uuid-b")`
   - `ParcelAccessListSet(localId=42, listType="ban", action="clear")`

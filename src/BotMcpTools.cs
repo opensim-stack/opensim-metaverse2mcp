@@ -716,6 +716,15 @@ internal sealed class BotMcpTools
         return _bot.ParcelPermissionDiagnosticsAsync(localId, forceRefresh, cancellationToken);
     }
 
+    [McpServerTool, Description("Deed the parcel under the bot's current position to a target group UUID when the bot owns the parcel.")]
+    public Task<BotToolResult> ParcelDeedToGroup(
+        [Description("Target group UUID.")] string groupId,
+        [Description("Force a fresh simulator parcel-map refresh before resolving current parcel.")] bool forceRefresh = false,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ParcelDeedToGroupAsync(groupId, forceRefresh, cancellationToken);
+    }
+
     [McpServerTool, Description("Sample terrain heights from cached land patches on a regular grid.")]
     public Task<DataToolResult> TerrainHeightmapSample(
         [Description("Grid sampling step in meters (1..64).") ] int stepMeters,

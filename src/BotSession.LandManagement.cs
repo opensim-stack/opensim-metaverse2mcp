@@ -644,6 +644,71 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<BotToolResult> ParcelDeedToGroupAsync(string groupId, bool forceRefresh, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(groupId))
+        {
+            return BotToolResult.Fail("groupId is required.");
+        }
+
+        if (!UUID.TryParse(groupId.Trim(), out var targetGroupId) || targetGroupId == UUID.Zero)
+        {
+            return BotToolResult.Fail("groupId must be a valid non-zero UUID.");
+        }
+
+        Console.WriteLine($"[land] ParcelDeedToGroupAsync: groupId={targetGroupId}, forceRefresh={forceRefresh}");
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            await EnsureParcelMapAsync(client, sim, forceRefresh, token).ConfigureAwait(false);
+
+            var localId = client.Parcels.GetParcelLocalID(sim, client.Self.SimPosition);
+            if (localId <= 0)
+            {
+                return BotToolResult.Fail("Unable to resolve current parcel local ID from simulator parcel map.");
+            }
+
+            var parcel = await GetParcelAsync(client, sim, localId, refreshFromSimulator: true, token).ConfigureAwait(false);
+            if (parcel == null)
+            {
+                return BotToolResult.Fail($"Parcel localId={localId} was not found.");
+            }
+
+            var botId = client.Self.AgentID;
+            if (parcel.OwnerID != botId)
+            {
+                return BotToolResult.Fail(
+                    $"Current parcel {localId} is not owned by this bot (ownerId={parcel.OwnerID}); cannot deed.");
+            }
+
+            // Many grids require assigning parcel group before submitting a deed transaction.
+            if (parcel.GroupID != targetGroupId)
+            {
+                parcel.GroupID = targetGroupId;
+                parcel.Update(client, sim, wantReply: true);
+                await Task.Delay(TimeSpan.FromMilliseconds(350), token).ConfigureAwait(false);
+            }
+
+            client.Parcels.DeedToGroup(sim, localId, targetGroupId);
+
+            var refreshed = await GetParcelAsync(client, sim, localId, refreshFromSimulator: true, token).ConfigureAwait(false);
+            if (refreshed != null && refreshed.OwnerID != botId)
+            {
+                return BotToolResult.OkResult(
+                    $"Deeded parcel {localId} to group {targetGroupId}.");
+            }
+
+            return BotToolResult.OkResult(
+                $"Submitted deed request for parcel {localId} to group {targetGroupId}; ownership has not changed yet.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<DataToolResult> TerrainHeightmapSampleAsync(int stepMeters, CancellationToken cancellationToken)
     {
         if (stepMeters < 1 || stepMeters > 64)
