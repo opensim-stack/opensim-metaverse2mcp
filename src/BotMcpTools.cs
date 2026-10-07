@@ -385,6 +385,36 @@ internal sealed class BotMcpTools
         return _bot.SitAsync(cancellationToken);
     }
 
+    [McpServerTool, Description("Sit on a target prim/object by local ID in the current simulator.")]
+    public Task<BotToolResult> SitOnPrim(
+        [Description("Target prim local ID in current simulator cache.")] uint localId,
+        [Description("Optional settle wait in ms after sit handshake (0..5000). Default 400.")] int settleMs = 400,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SitOnPrimAsync(localId, settleMs, cancellationToken);
+    }
+
+    [McpServerTool, Description("Sit on the nearest prim/object whose name matches the filter in the current simulator.")]
+    public Task<BotToolResult> SitOnPrimByName(
+        [Description("Prim name or fragment to match.")] string name,
+        [Description("When true, require exact name match. Default false.")] bool exactMatch = false,
+        [Description("When true, use case-sensitive comparison. Default false.")] bool caseSensitive = false,
+        [Description("Optional settle wait in ms after sit handshake (0..5000). Default 400.")] int settleMs = 400,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SitOnPrimByNameAsync(name, exactMatch, caseSensitive, settleMs, cancellationToken);
+    }
+
+    [McpServerTool, Description("Sit on the nearest candidate prim/object in the current simulator.")]
+    public Task<BotToolResult> SitOnNearestSittablePrim(
+        [Description("Search radius in meters around the bot (0..256]. Default 12.")] float radiusMeters = 12f,
+        [Description("When true, only consider explicit sit targets (SitName or ClickAction=Sit). Default false.")] bool requireExplicitSitTarget = false,
+        [Description("Optional settle wait in ms after sit handshake (0..5000). Default 400.")] int settleMs = 400,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SitOnNearestSittablePrimAsync(radiusMeters, requireExplicitSitTarget, settleMs, cancellationToken);
+    }
+
     [McpServerTool, Description("Stand up.")]
     public Task<BotToolResult> Stand(CancellationToken cancellationToken)
     {

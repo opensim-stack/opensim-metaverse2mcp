@@ -43,9 +43,228 @@ internal sealed partial class BotSession
         return await RunActionAsync("Sitting down...", c => c.Self.SitOnGround(), cancellationToken);
     }
 
+    public async Task<BotToolResult> SitOnPrimAsync(uint localId, int settleMs, CancellationToken cancellationToken)
+    {
+        if (settleMs < 0 || settleMs > 5000)
+        {
+            return BotToolResult.Fail("settleMs must be between 0 and 5000.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            if (!sim.ObjectsPrimitives.TryGetValue(localId, out var prim) || prim == null)
+            {
+                return BotToolResult.Fail($"Prim {localId} was not found in the current simulator object cache.");
+            }
+
+            var response = await RequestAndExecuteSitAsync(client, prim.ID, token).ConfigureAwait(false);
+            if (!response.Ok)
+            {
+                return response;
+            }
+
+            if (settleMs > 0)
+            {
+                await Task.Delay(settleMs, token).ConfigureAwait(false);
+            }
+
+            var primName = string.IsNullOrWhiteSpace(prim.Properties?.Name) ? "(unnamed)" : prim.Properties.Name.Trim();
+            var settleText = settleMs > 0 ? $"; waited {settleMs}ms for settle" : string.Empty;
+            return BotToolResult.OkResult($"Sit request completed on prim {localId} ('{primName}'){settleText}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SitOnPrimByNameAsync(
+        string name,
+        bool exactMatch,
+        bool caseSensitive,
+        int settleMs,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return BotToolResult.Fail("name is required.");
+        }
+
+        if (settleMs < 0 || settleMs > 5000)
+        {
+            return BotToolResult.Fail("settleMs must be between 0 and 5000.");
+        }
+
+        var matchText = name.Trim();
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+            var at = client.Self.SimPosition;
+            var matches = sim.ObjectsPrimitives.Values
+                .Where(p => !string.IsNullOrWhiteSpace(p.Properties?.Name))
+                .Where(p => exactMatch
+                    ? string.Equals(p.Properties!.Name.Trim(), matchText, comparison)
+                    : p.Properties!.Name.Contains(matchText, comparison))
+                .OrderBy(p => Vector3.Distance(at, p.Position))
+                .ThenBy(p => p.LocalID)
+                .ToList();
+
+            if (matches.Count == 0)
+            {
+                var mode = exactMatch ? "exact" : "contains";
+                return BotToolResult.Fail($"No prim name match found for '{matchText}' ({mode}, caseSensitive={caseSensitive}).");
+            }
+
+            var selected = matches[0];
+            var response = await RequestAndExecuteSitAsync(client, selected.ID, token).ConfigureAwait(false);
+            if (!response.Ok)
+            {
+                return response;
+            }
+
+            if (settleMs > 0)
+            {
+                await Task.Delay(settleMs, token).ConfigureAwait(false);
+            }
+
+            var selectedName = string.IsNullOrWhiteSpace(selected.Properties?.Name) ? "(unnamed)" : selected.Properties.Name.Trim();
+            var settleText = settleMs > 0 ? $"; waited {settleMs}ms for settle" : string.Empty;
+            if (matches.Count == 1)
+            {
+                return BotToolResult.OkResult($"Sit request completed on prim {selected.LocalID} ('{selectedName}'){settleText}.");
+            }
+
+            return BotToolResult.OkResult(
+                $"Matched {matches.Count} prims; sat on nearest prim {selected.LocalID} ('{selectedName}'){settleText}. Narrow the name or set exactMatch=true for stricter targeting.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> SitOnNearestSittablePrimAsync(
+        float radiusMeters,
+        bool requireExplicitSitTarget,
+        int settleMs,
+        CancellationToken cancellationToken)
+    {
+        if (radiusMeters <= 0f || radiusMeters > 256f)
+        {
+            return BotToolResult.Fail("radiusMeters must be in range (0, 256].");
+        }
+
+        if (settleMs < 0 || settleMs > 5000)
+        {
+            return BotToolResult.Fail("settleMs must be between 0 and 5000.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            var at = client.Self.SimPosition;
+            var candidates = sim.ObjectsPrimitives.Values
+                .Where(p => p != null && !p.IsAttachment)
+                .Select(p =>
+                {
+                    var hasSitName = !string.IsNullOrWhiteSpace(p.Properties?.SitName);
+                    var clickSit = p.ClickAction == ClickAction.Sit;
+                    var explicitSit = hasSitName || clickSit;
+                    var distance = Vector3.Distance(at, p.Position);
+                    return new { Prim = p, ExplicitSit = explicitSit, Distance = distance };
+                })
+                .Where(x => x.Distance <= radiusMeters)
+                .Where(x => !requireExplicitSitTarget || x.ExplicitSit)
+                .OrderByDescending(x => x.ExplicitSit)
+                .ThenBy(x => x.Distance)
+                .ThenBy(x => x.Prim.LocalID)
+                .ToList();
+
+            if (candidates.Count == 0)
+            {
+                return BotToolResult.Fail(
+                    requireExplicitSitTarget
+                        ? $"No explicit sit targets (SitName/ClickAction=Sit) found within {radiusMeters:F1}m."
+                        : $"No non-attachment prims found within {radiusMeters:F1}m.");
+            }
+
+            var selected = candidates[0];
+            var response = await RequestAndExecuteSitAsync(client, selected.Prim.ID, token).ConfigureAwait(false);
+            if (!response.Ok)
+            {
+                return response;
+            }
+
+            if (settleMs > 0)
+            {
+                await Task.Delay(settleMs, token).ConfigureAwait(false);
+            }
+
+            var primName = string.IsNullOrWhiteSpace(selected.Prim.Properties?.Name)
+                ? "(unnamed)"
+                : selected.Prim.Properties.Name.Trim();
+            var settleText = settleMs > 0 ? $"; waited {settleMs}ms for settle" : string.Empty;
+            var marker = selected.ExplicitSit ? "explicit sit target" : "fallback non-attachment";
+            return BotToolResult.OkResult(
+                $"Sit request completed on nearest {marker} prim {selected.Prim.LocalID} ('{primName}') at {selected.Distance:F1}m{settleText}.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<BotToolResult> StandAsync(CancellationToken cancellationToken)
     {
         return await RunActionAsync("Standing up.", c => c.Self.Stand(), cancellationToken);
+    }
+
+    private static async Task<BotToolResult> RequestAndExecuteSitAsync(GridClient client, UUID targetObjectId, CancellationToken cancellationToken)
+    {
+        if (targetObjectId == UUID.Zero)
+        {
+            return BotToolResult.Fail("Target object UUID is not available in cache yet.");
+        }
+
+        var tcs = new TaskCompletionSource<AvatarSitResponseEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Handler(object? _, AvatarSitResponseEventArgs e)
+        {
+            if (e.ObjectID == targetObjectId)
+            {
+                tcs.TrySetResult(e);
+            }
+        }
+
+        client.Self.AvatarSitResponse += Handler;
+        try
+        {
+            client.Self.RequestSit(targetObjectId, Vector3.Zero);
+
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(6), cancellationToken);
+            var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
+            if (completed != tcs.Task)
+            {
+                return BotToolResult.Fail($"Timed out waiting for sit response from object {targetObjectId}. Move closer and retry.");
+            }
+
+            var response = await tcs.Task.ConfigureAwait(false);
+            client.Self.Sit();
+
+            var autoPilotNote = response.Autopilot
+                ? " Simulator requested autopilot assist before seating."
+                : string.Empty;
+            return BotToolResult.OkResult($"Sit handshake accepted by object {targetObjectId}.{autoPilotNote}");
+        }
+        finally
+        {
+            client.Self.AvatarSitResponse -= Handler;
+        }
     }
 
     public async Task<BotToolResult> FlyAsync(bool enabled, CancellationToken cancellationToken)

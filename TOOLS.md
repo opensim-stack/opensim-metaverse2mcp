@@ -15,6 +15,9 @@ The server publishes tools including:
 - `BotRestart`
 - `BotDelete`
 - `Sit`
+- `SitOnPrim`
+- `SitOnPrimByName`
+- `SitOnNearestSittablePrim`
 - `Stand`
 - `Fly`
 - `Jump`
@@ -255,6 +258,10 @@ UV preset notes:
 - `PrimTileUvNonUniform` sets independent U/V repeat values.
 
 Movement notes:
+- `Sit` performs a ground sit only (`SitOnGround`).
+- `SitOnPrim` performs object sit handshake (`RequestSit` + wait for `AvatarSitResponse` + `Sit`) for a target local ID.
+- `SitOnPrimByName` resolves nearest name match in current simulator cache, then performs the same object sit handshake.
+- `SitOnNearestSittablePrim` picks the nearest candidate prim in radius (prefers explicit sit targets by default ordering) and performs object sit handshake.
 - `WalkTo`/`FlyTo` use stepped autopilot waypoints for improved reliability over larger distances.
 - `TeleportTo` resolves named regions to handles before teleporting for stricter targeting.
 - `RegionUuid(globalX, globalY)` converts global map coordinates to a region handle using `PositionHelper.RegionHandleFromGlobal`, and returns region origin plus derived local coordinates.
