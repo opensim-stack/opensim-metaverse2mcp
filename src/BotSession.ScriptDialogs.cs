@@ -7,6 +7,7 @@ namespace Opensim.Metaverse2Mcp;
 internal sealed partial class BotSession
 {
     private const int PendingScriptDialogCacheLimit = 200;
+    private const int PendingScriptPermissionCacheLimit = 200;
 
     private sealed record PendingScriptDialog(
         string Handle,
@@ -20,9 +21,22 @@ internal sealed partial class BotSession
         IReadOnlyList<string> ButtonLabels,
         DateTimeOffset ReceivedAtUtc);
 
+    private sealed record PendingScriptPermissionRequest(
+        string Handle,
+        Simulator Simulator,
+        UUID TaskId,
+        UUID ItemId,
+        string ObjectName,
+        string ObjectOwnerName,
+        ScriptPermission RequestedPermissions,
+        DateTimeOffset ReceivedAtUtc);
+
     private readonly ConcurrentDictionary<string, PendingScriptDialog> _pendingScriptDialogsByHandle = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<string> _pendingScriptDialogOrder = new();
     private readonly object _pendingScriptDialogLock = new();
+    private readonly ConcurrentDictionary<string, PendingScriptPermissionRequest> _pendingScriptPermissionsByHandle = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Queue<string> _pendingScriptPermissionOrder = new();
+    private readonly object _pendingScriptPermissionLock = new();
     private readonly object _scriptDialogHookLock = new();
     private GridClient? _scriptDialogHookClient;
 
@@ -114,6 +128,83 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<DataToolResult> ListScriptAnimationPermissionRequestsAsync(string? pendingPermissionHandle, CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, _token) =>
+        {
+            EnsureScriptDialogHookRegistered(client);
+
+            var normalizedHandle = (pendingPermissionHandle ?? string.Empty).Trim();
+            var listAll = string.IsNullOrWhiteSpace(normalizedHandle)
+                || string.Equals(normalizedHandle, "all", StringComparison.OrdinalIgnoreCase)
+                || normalizedHandle == "*";
+
+            var requests = listAll
+                ? _pendingScriptPermissionsByHandle.Values.OrderByDescending(x => x.ReceivedAtUtc).ToList()
+                : (_pendingScriptPermissionsByHandle.TryGetValue(normalizedHandle, out var pending)
+                    ? new List<PendingScriptPermissionRequest> { pending }
+                    : new List<PendingScriptPermissionRequest>());
+
+            var payload = new
+            {
+                summary = new
+                {
+                    count = requests.Count,
+                    filtered = !listAll,
+                    pendingPermissionHandle = listAll ? null : normalizedHandle
+                },
+                requests = requests.Select(request => (object)new
+                {
+                    pendingPermissionHandle = request.Handle,
+                    taskId = request.TaskId.ToString(),
+                    itemId = request.ItemId.ToString(),
+                    objectName = request.ObjectName,
+                    objectOwnerName = request.ObjectOwnerName,
+                    simulator = request.Simulator.Name,
+                    requestedPermissions = request.RequestedPermissions.ToString(),
+                    requestedPermissionsMask = (int)request.RequestedPermissions,
+                    includesTriggerAnimation = (request.RequestedPermissions & ScriptPermission.TriggerAnimation) != 0,
+                    receivedAtUtc = request.ReceivedAtUtc
+                }).ToList()
+            };
+
+            var message = listAll
+                ? $"Retrieved {requests.Count} pending animation permission request(s)."
+                : (requests.Count == 0
+                    ? $"No pending animation permission request found for handle '{normalizedHandle}'."
+                    : $"Retrieved pending animation permission request '{normalizedHandle}'.");
+
+            return Task.FromResult(DataToolResult.OkResult(message, JsonSerializer.Serialize(payload, JsonOptions)));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> ScriptAnimationPermissionRespondAsync(string pendingPermissionHandle, bool allow, CancellationToken cancellationToken)
+    {
+        var normalizedHandle = (pendingPermissionHandle ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedHandle))
+        {
+            return BotToolResult.Fail("pendingPermissionHandle is required.");
+        }
+
+        return await ExecuteLockedAsync((client, _) =>
+        {
+            EnsureScriptDialogHookRegistered(client);
+
+            if (!_pendingScriptPermissionsByHandle.TryGetValue(normalizedHandle, out var pendingRequest))
+            {
+                return Task.FromResult(BotToolResult.Fail($"No pending animation permission request found for handle '{normalizedHandle}'."));
+            }
+
+            var grantedPermissions = allow ? ScriptPermission.TriggerAnimation : ScriptPermission.None;
+            client.Self.ScriptQuestionReply(pendingRequest.Simulator, pendingRequest.ItemId, pendingRequest.TaskId, grantedPermissions);
+            _pendingScriptPermissionsByHandle.TryRemove(normalizedHandle, out var _removedRequest);
+
+            var action = allow ? "accepted" : "declined";
+            return Task.FromResult(BotToolResult.OkResult(
+                $"Animation permission request '{normalizedHandle}' {action} for object '{pendingRequest.ObjectName}'."));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private void EnsureScriptDialogHookRegistered(GridClient client)
     {
         lock (_scriptDialogHookLock)
@@ -124,6 +215,7 @@ internal sealed partial class BotSession
             }
 
             client.Self.ScriptDialog += OnScriptDialogReceived;
+            client.Self.ScriptQuestion += OnScriptQuestionReceived;
             _scriptDialogHookClient = client;
         }
     }
@@ -176,6 +268,44 @@ internal sealed partial class BotSession
             });
     }
 
+    private void OnScriptQuestionReceived(object? sender, ScriptQuestionEventArgs e)
+    {
+        if ((e.Questions & ScriptPermission.TriggerAnimation) == 0)
+        {
+            return;
+        }
+
+        var pending = new PendingScriptPermissionRequest(
+            $"script-permission:{Guid.NewGuid():N}",
+            e.Simulator,
+            e.TaskID,
+            e.ItemID,
+            string.IsNullOrWhiteSpace(e.ObjectName) ? "(unknown)" : e.ObjectName,
+            string.IsNullOrWhiteSpace(e.ObjectOwnerName) ? "(unknown)" : e.ObjectOwnerName,
+            e.Questions,
+            DateTimeOffset.UtcNow);
+
+        StorePendingScriptPermissionRequest(pending);
+
+        EmitRuntimeEvent(
+            "general",
+            "script.permission.animation.requested",
+            "opensim",
+            $"Animation permission requested by '{pending.ObjectName}'.",
+            new Dictionary<string, string?>
+            {
+                ["pendingPermissionHandle"] = pending.Handle,
+                ["taskId"] = pending.TaskId.ToString(),
+                ["itemId"] = pending.ItemId.ToString(),
+                ["objectName"] = pending.ObjectName,
+                ["objectOwnerName"] = pending.ObjectOwnerName,
+                ["simulator"] = pending.Simulator.Name,
+                ["requestedPermissions"] = pending.RequestedPermissions.ToString(),
+                ["requestedPermissionsMask"] = ((int)pending.RequestedPermissions).ToString(),
+                ["includesTriggerAnimation"] = "true"
+            });
+    }
+
     private void StorePendingScriptDialog(PendingScriptDialog pending)
     {
         lock (_pendingScriptDialogLock)
@@ -187,6 +317,21 @@ internal sealed partial class BotSession
                    && _pendingScriptDialogOrder.TryDequeue(out var oldestHandle))
             {
                 _pendingScriptDialogsByHandle.TryRemove(oldestHandle, out _);
+            }
+        }
+    }
+
+    private void StorePendingScriptPermissionRequest(PendingScriptPermissionRequest pending)
+    {
+        lock (_pendingScriptPermissionLock)
+        {
+            _pendingScriptPermissionsByHandle[pending.Handle] = pending;
+            _pendingScriptPermissionOrder.Enqueue(pending.Handle);
+
+            while (_pendingScriptPermissionsByHandle.Count > PendingScriptPermissionCacheLimit
+                   && _pendingScriptPermissionOrder.TryDequeue(out var oldestHandle))
+            {
+                _pendingScriptPermissionsByHandle.TryRemove(oldestHandle, out _);
             }
         }
     }

@@ -1148,6 +1148,23 @@ internal sealed class BotMcpTools
         return _bot.ScriptDialogChoiceAsync(pendingDialogHandle, buttonIndex, cancellationToken);
     }
 
+    [McpServerTool, Description("List pending object animation permission requests captured during this session.")]
+    public Task<DataToolResult> ListScriptAnimationPermissionRequests(
+        [Description("Pending permission handle filter. Use 'all' (or empty) to list all pending requests.")] string? pendingPermissionHandle = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ListScriptAnimationPermissionRequestsAsync(pendingPermissionHandle, cancellationToken);
+    }
+
+    [McpServerTool, Description("Accept or reject a pending object animation permission request.")]
+    public Task<BotToolResult> ScriptAnimationPermissionRespond(
+        [Description("Pending permission handle from ListScriptAnimationPermissionRequests or script.permission.animation.requested event.")] string pendingPermissionHandle,
+        [Description("True to allow object-triggered animation, false to reject.")] bool allow,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ScriptAnimationPermissionRespondAsync(pendingPermissionHandle, allow, cancellationToken);
+    }
+
     [McpServerTool, Description("Search the avatar directory for people by name text.")]
     public Task<DataToolResult> DirectorySearchPeople(
         [Description("Name text to search for.")] string query,
