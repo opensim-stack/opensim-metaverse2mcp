@@ -1254,12 +1254,15 @@ internal sealed partial class BotSession
             }
             else
             {
-                Console.WriteLine($"[appearance] saving current outfit to folder '{folderName}' under default Clothing folder.");
-                var clothingFolder = client.Inventory.FindFolderForType(FolderType.Clothing);
-                if (clothingFolder != UUID.Zero)
+                Console.WriteLine($"[appearance] saving current outfit to folder '{folderName}' under default My Outfits/Outfits root.");
+                if (TryResolveOutfitsRootFolder(client, store, out var outfitsRootFolder, out var resolveError))
                 {
-                    parentId = clothingFolder;
-                    Console.WriteLine($"[appearance] using Clothing folder {parentId} as parent for new outfit folder.");
+                    parentId = outfitsRootFolder.UUID;
+                    Console.WriteLine($"[appearance] using outfits root folder {parentId} ('{outfitsRootFolder.Name}') as parent for new outfit folder.");
+                }
+                else
+                {
+                    Console.WriteLine($"[appearance] failed to resolve outfits root folder ({resolveError}); using inventory root {parentId} as parent for new outfit folder.");
                 }
             }
 

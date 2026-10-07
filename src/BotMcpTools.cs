@@ -253,7 +253,7 @@ internal sealed class BotMcpTools
     public Task<DataToolResult> BotRestart(
         [Description("Bot first name.")] string first,
         [Description("Bot last name.")] string last,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         return ChangeBotRunningStateAsync(first, last, "restart", cancellationToken);
     }
@@ -2970,7 +2970,7 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Save the current outfit links into a new inventory folder snapshot.")]
     public Task<OutfitSaveResult> AppearanceSaveCurrentOutfit(
         [Description("Name for the new snapshot folder.")] string folderName,
-        [Description("Optional parent folder UUID. Empty uses Clothing folder when available.")] string? parentFolderId = null,
+        [Description("Optional parent folder UUID. Empty uses My Outfits/Outfits root when available.")] string? parentFolderId = null,
         CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceSaveCurrentOutfitAsync(folderName, parentFolderId, CancellationToken.None);
