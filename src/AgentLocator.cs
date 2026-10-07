@@ -331,8 +331,13 @@ internal sealed class AgentLocator
                 cancellationToken.ThrowIfCancellationRequested();
                 if (TryGetLatestStatus(monitorTask.Handle, out var snapshot))
                 {
-                    LogDiag(correlationId, $"single-read success target={targetId} handle={monitorTask.Handle} attempt={attempt + 1} online={(snapshot.Online.HasValue ? snapshot.Online.Value.ToString() : "unknown")} regionHandle={(snapshot.RegionHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(snapshot.Position?.ToString() ?? "n/a")}");
-                    return (true, snapshot, null);
+                    if (snapshot.Online.HasValue)
+                    {
+                        LogDiag(correlationId, $"single-read success target={targetId} handle={monitorTask.Handle} attempt={attempt + 1} online={(snapshot.Online.Value ? "true" : "false")} regionHandle={(snapshot.RegionHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(snapshot.Position?.ToString() ?? "n/a")}");
+                        return (true, snapshot, null);
+                    }
+
+                    LogDiag(correlationId, $"single-read unresolved target={targetId} handle={monitorTask.Handle} attempt={attempt + 1}; waiting for resolved online state");
                 }
 
                 await Task.Delay(50, cancellationToken).ConfigureAwait(false);
