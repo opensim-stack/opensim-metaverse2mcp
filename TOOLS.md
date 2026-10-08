@@ -251,6 +251,11 @@ Chat notes:
 - Inventory offers from configured handler avatars are always accepted (policy rules are bypassed for handler offers).
 - TODO: add local chat and group chat routing.
 - Voice routing note: `VOICE_BACKEND=webrtc` is the supported backend for Piper WAV injection in this service.
+- Security and upload hardening settings:
+  - `OPENSIM_SECURITY_VERIFY_SERVER_CERTIFICATES` (default `true`) verifies TLS certificates during grid login/HTTP usage.
+  - `OPENSIM_SECURITY_CA_BUNDLE_PATH` points to a PEM CA bundle used for TLS validation when custom/private CAs are required.
+  - `OPENSIM_SECURITY_TRUST_CERTIFICATE` pins one trusted server certificate by SHA-256 fingerprint (hex, separators optional).
+  - `OPENSIM_RESTRICT_TEXTURES_TO_MODEL_DIRECTORY` (default `true`) limits Collada texture path resolution to the model directory to reduce unsafe path usage.
 - TODO: add a security policy to control which users the AI may respond to.
 
 UV preset notes:

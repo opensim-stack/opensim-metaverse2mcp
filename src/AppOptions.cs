@@ -32,6 +32,10 @@ internal sealed class AppOptions
     public bool CacheEnabled { get; set; } = true;
     public long CacheMaxSize { get; set; } = 1024L * 1024 * 1024;
     public int BotLoginTimeoutSeconds { get; set; } = 30;
+    public string? SecurityTrustCertificate { get; set; }
+    public string? SecurityCaBundlePath { get; set; }
+    public bool SecurityVerifyServerCertificates { get; set; } = true;
+    public bool RestrictTexturesToModelDirectory { get; set; } = true;
 
     public bool OpencodeEnabled { get; set; } = true;
     public string OpencodeScheme { get; set; } = "http";
@@ -118,6 +122,24 @@ internal sealed class AppOptions
         if (BotLoginTimeoutSeconds < 1)
         {
             errors.Add("Bot login timeout must be at least 1 second.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(SecurityCaBundlePath))
+        {
+            try
+            {
+                _ = Path.GetFullPath(SecurityCaBundlePath);
+            }
+            catch
+            {
+                errors.Add("Security CA bundle path is invalid.");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(SecurityTrustCertificate)
+            && !LooksLikeSha256Fingerprint(SecurityTrustCertificate))
+        {
+            errors.Add("Security trust certificate must be a SHA-256 certificate fingerprint.");
         }
 
         if (OpencodeEnabled)
@@ -307,5 +329,27 @@ internal sealed class AppOptions
     public static bool TryParseLong(string? raw, out long value)
     {
         return long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool LooksLikeSha256Fingerprint(string value)
+    {
+        var filtered = new string(value.Where(static c => c != ':' && c != '-' && !char.IsWhiteSpace(c)).ToArray());
+        if (filtered.Length != 64)
+        {
+            return false;
+        }
+
+        foreach (var c in filtered)
+        {
+            var isHex = (c >= '0' && c <= '9')
+                || (c >= 'a' && c <= 'f')
+                || (c >= 'A' && c <= 'F');
+            if (!isHex)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

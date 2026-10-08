@@ -371,6 +371,8 @@ internal sealed partial class BotSession : IDisposable
                 "opensim-metaverse2mcp",
                 "0.1.0");
 
+            ApplySecurityAndUploadHardening(client);
+
             login.URI = _options.BotLoginUri;
             login.Start = _options.BotStartLocation;
 
@@ -1075,6 +1077,24 @@ internal sealed partial class BotSession : IDisposable
         }
 
         return $"[{requestId}] {summary}";
+    }
+
+    private void ApplySecurityAndUploadHardening(GridClient client)
+    {
+        client.Settings.Security.VerifyServerCertificates = _options.SecurityVerifyServerCertificates;
+        client.Settings.Security.CaBundlePath = string.IsNullOrWhiteSpace(_options.SecurityCaBundlePath)
+            ? null
+            : _options.SecurityCaBundlePath.Trim();
+
+        if (!string.IsNullOrWhiteSpace(_options.SecurityTrustCertificate))
+        {
+            client.Settings.Security.TrustCertificate(_options.SecurityTrustCertificate.Trim());
+        }
+
+        Console.WriteLine(
+            $"[security] verifyServerCertificates={client.Settings.Security.VerifyServerCertificates} " +
+            $"caBundlePath={(string.IsNullOrWhiteSpace(client.Settings.Security.CaBundlePath) ? "(none)" : client.Settings.Security.CaBundlePath)} " +
+            $"trustedFingerprint={(string.IsNullOrWhiteSpace(_options.SecurityTrustCertificate) ? "(none)" : "configured")}");
     }
 
     private static string GetPermissionPrimaryText(HarnessPendingPermission permission, out bool titleLooksLikeId)

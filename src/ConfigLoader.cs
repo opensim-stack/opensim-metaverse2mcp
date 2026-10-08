@@ -27,6 +27,10 @@ internal static class ConfigLoader
             BotLoginUri = FirstDefined("OPENSIM_LOGIN_URI", "BOT_LOGIN_URI") ?? "http://opensim:9000",
             BotStartLocation = FirstDefined("OPENSIM_LOGIN_START", "BOT_LOGIN_START") ?? "last",
             BotLoginTimeoutSeconds = ParseInt(FirstDefined("OPENSIM_LOGIN_TIMEOUT_SECONDS"), 30),
+            SecurityTrustCertificate = Env("OPENSIM_SECURITY_TRUST_CERTIFICATE"),
+            SecurityCaBundlePath = Env("OPENSIM_SECURITY_CA_BUNDLE_PATH"),
+            SecurityVerifyServerCertificates = ParseBool(Env("OPENSIM_SECURITY_VERIFY_SERVER_CERTIFICATES"), true),
+            RestrictTexturesToModelDirectory = ParseBool(Env("OPENSIM_RESTRICT_TEXTURES_TO_MODEL_DIRECTORY"), true),
             WearFolderName = Env("WEAR_FOLDER_NAME") ?? "Setup",
             CacheDir = Env("OPENSIM_CACHE") ?? string.Empty,
             CacheMaxSize = ParseLong(Env("OPENSIM_CACHE_MAXSIZE"), 1024L * 1024 * 1024),
@@ -98,6 +102,14 @@ internal static class ConfigLoader
             "  --start-location <value>       Start location (env: OPENSIM_LOGIN_START, default: last)",
             "  --wear-folder-name <value>     Folder to wear on provision (env: WEAR_FOLDER_NAME, default: Setup)",
             "  --login-timeout-seconds <int>  Login timeout (env: OPENSIM_LOGIN_TIMEOUT_SECONDS, default: 30)",
+            "  --security-trust-certificate <sha256-fingerprint>",
+            "                                Trust one server certificate by SHA-256 fingerprint (env: OPENSIM_SECURITY_TRUST_CERTIFICATE)",
+            "  --security-ca-bundle-path <path>",
+            "                                PEM CA bundle path for certificate validation (env: OPENSIM_SECURITY_CA_BUNDLE_PATH)",
+            "  --security-verify-server-certificates <bool>",
+            "                                Verify server TLS certificates (env: OPENSIM_SECURITY_VERIFY_SERVER_CERTIFICATES, default: true)",
+            "  --restrict-textures-to-model-directory <bool>",
+            "                                Restrict Collada texture resolution to model directory (env: OPENSIM_RESTRICT_TEXTURES_TO_MODEL_DIRECTORY, default: true)",
             "  --cache <path>                 Cache path (env: OPENSIM_CACHE, default: <resources>/cache)",
             "  --no-cache                     Disable cache (env: OPENSIM_CACHE_ENABLED, default: true)",
             "  --cache-max-size <bytes>       Cache max size (env: OPENSIM_CACHE_MAXSIZE, default: <resources>/cache)",
@@ -240,6 +252,18 @@ internal static class ConfigLoader
                     break;
                 case "--login-timeout-seconds":
                     options.BotLoginTimeoutSeconds = ParseInt(RequireValue(args, ref i, arg), options.BotLoginTimeoutSeconds);
+                    break;
+                case "--security-trust-certificate":
+                    options.SecurityTrustCertificate = RequireValue(args, ref i, arg);
+                    break;
+                case "--security-ca-bundle-path":
+                    options.SecurityCaBundlePath = RequireValue(args, ref i, arg);
+                    break;
+                case "--security-verify-server-certificates":
+                    options.SecurityVerifyServerCertificates = ParseBool(RequireValue(args, ref i, arg), options.SecurityVerifyServerCertificates);
+                    break;
+                case "--restrict-textures-to-model-directory":
+                    options.RestrictTexturesToModelDirectory = ParseBool(RequireValue(args, ref i, arg), options.RestrictTexturesToModelDirectory);
                     break;
                 case "--spawner-parent":
                     options.BotSpawnerParent = RequireValue(args, ref i, arg);

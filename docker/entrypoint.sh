@@ -32,6 +32,10 @@ set -- \
   --login-uri "${OPENSIM_LOGIN_URI:-http://opensim:9000}" \
   --start-location "${OPENSIM_LOGIN_START:-last}" \
   --login-timeout-seconds "${OPENSIM_LOGIN_TIMEOUT_SECONDS:-30}" \
+  --security-trust-certificate "${OPENSIM_SECURITY_TRUST_CERTIFICATE:-}" \
+  --security-ca-bundle-path "${OPENSIM_SECURITY_CA_BUNDLE_PATH:-}" \
+  --security-verify-server-certificates "${OPENSIM_SECURITY_VERIFY_SERVER_CERTIFICATES:-true}" \
+  --restrict-textures-to-model-directory "${OPENSIM_RESTRICT_TEXTURES_TO_MODEL_DIRECTORY:-true}" \
   --opencode-scheme "${OPENCODE_SCHEME:-http}" \
   --opencode-host "${OPENCODE_HOST:-opensim-opencode}" \
   --opencode-port "${OPENCODE_PORT:-8998}" \

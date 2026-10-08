@@ -7,13 +7,21 @@
 
 The server logs in the bot on startup (no separate login tool), then serves MCP at a configurable HTTP endpoint.
 
+> [!IMPORTANT]
+> LibreMetaverse `3.1.8` introduces stricter certificate handling and safer Collada texture resolution defaults. Existing deployments that relied on self-signed or untrusted TLS certs can fail to connect after upgrading.
+>
+> If your grid uses private/self-signed certs, set one of the following before upgrading:
+> - Preferred: `OPENSIM_SECURITY_CA_BUNDLE_PATH` to a PEM CA bundle.
+> - Pin a specific cert by SHA-256 fingerprint: `OPENSIM_SECURITY_TRUST_CERTIFICATE=<fingerprint>`.
+> - Last resort (lower security): `OPENSIM_SECURITY_VERIFY_SERVER_CERTIFICATES=false`.
+
 *This is part of the [opensim-stack](https://opensim-stack.github.io/) and is intended to be used in conjunction with other parts of the stack. See [Docs](https://opensim-stack.github.io/docs/index.html) for full details.*
 
 **For Issues And Discussions see main project [opensim-ai-docker](https://github.com/opensim-stack/opensim-ai-docker)**
 
 ## What it does
 
-- Uses `LibreMetaverse` (`3.1.3`) to connect to OpenSim/SL-compatible grids.
+- Uses `LibreMetaverse` (`3.1.8`) to connect to OpenSim/SL-compatible grids.
 - Routes avatar IM conversations to Opencode server sessions with [NOpenCode](https://github.com/ylvict/NOpenCode).
 - Uses MCP tools for avatar actions that the AI can invoke via Opencode.
 - Exposes MCP tools with the official C# MCP libraries:
@@ -78,6 +86,10 @@ docker run --rm \
 - `OPENSIM_LOGIN_URI` (default: `http://opensim:9000`)
 - `OPENSIM_LOGIN_START` (default: `last`)
 - `OPENSIM_LOGIN_TIMEOUT_SECONDS` (default: `30`)
+- `OPENSIM_SECURITY_TRUST_CERTIFICATE` (optional SHA-256 certificate fingerprint string)
+- `OPENSIM_SECURITY_CA_BUNDLE_PATH` (optional PEM CA bundle path)
+- `OPENSIM_SECURITY_VERIFY_SERVER_CERTIFICATES` (default: `true`)
+- `OPENSIM_RESTRICT_TEXTURES_TO_MODEL_DIRECTORY` (default: `true`)
 - `OPENSIM_CACHE` (default `/app/linden/cache`)
 - `OPENSIM_CACHE_ENABLED` (default `true`)
 - `OPENSIM_CACHE_MAXSIZE` (default `1073741824` - 1GB)
