@@ -1594,29 +1594,6 @@ internal sealed partial class BotSession
         return true;
     }
 
-    private static bool TryFindAvatarByIdAcrossSims(GridClient client, UUID avatarId, out Simulator? foundSim, out Avatar? foundAvatar)
-    {
-        foundSim = null;
-        foundAvatar = null;
-        if (avatarId == UUID.Zero)
-        {
-            return false;
-        }
-
-        foreach (var candidate in client.Network.Simulators)
-        {
-            var match = candidate.ObjectsAvatars.Values.FirstOrDefault(avatar => avatar != null && avatar.ID == avatarId);
-            if (match != null)
-            {
-                foundSim = candidate;
-                foundAvatar = match;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private static bool TryResolveAvatarAcrossSims(
         GridClient client,
         string target,

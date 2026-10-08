@@ -47,6 +47,7 @@ The server publishes tools including:
 - `GetCameraState`
 - `Follow`
 - `MonitorAgent`
+- `AgentNameToUUID`
 - `StopFollow`
 - `PrimCreate`
 - `PrimSetPosition`
@@ -278,6 +279,10 @@ Movement notes:
 - `MonitorAgent` starts a long-running BotTask that tracks one avatar UUID and emits `agentMonitor` events when observed status changes.
 - `MonitorAgent` only reports region/position/velocity/fly from current-region simulator cache; when the target is off-region those fields become unknown (`null`).
 - Optional external presence fallback is disabled by default; set `AGENT_MONITOR_EXTERNAL_FALLBACK=true` to probe spawner/friend-map (throttled) only when the target is otherwise lost.
+
+Agent lookup notes:
+- `AgentNameToUUID(first,last)` resolves avatar names via `AvatarManager.RequestAvatarNameSearch` (`AvatarPickerReply`) and returns the matched UUID.
+- `AgentFind(first,last)` uses the same AvatarPicker-based name resolution before running a short-lived monitor snapshot.
 
 Animation notes:
 - `AnimationStart`/`AnimationStop` accept either a built-in animation name (e.g. `DANCE1`, `WAVE`, `CLAP`, `SIT`) or a raw animation UUID.

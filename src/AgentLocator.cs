@@ -8,7 +8,12 @@ namespace Opensim.Metaverse2Mcp;
 internal sealed class AgentLocator
 {
     private static readonly TimeSpan MonitorInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MonitorDelayOffline = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MonitorDelayOnlineNoLocation = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan MonitorDelayOnlineDifferentSim = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan FriendMapTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan AvatarNameSearchTimeout = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan SingleSnapshotFriendMapTimeout = TimeSpan.FromSeconds(1.5);
     private static readonly TimeSpan ExternalFallbackProbeInterval = TimeSpan.FromSeconds(10);
     private static readonly HashSet<UUID> FlyingAnimationIds = new()
     {
@@ -109,10 +114,11 @@ internal sealed class AgentLocator
                 $"Monitor agent '{targetId}'.",
                 async (taskHandle, taskCancellationToken) =>
                 {
-    
+
                     try
                     {
                         AgentMonitorStatus? previous = initialStatus;
+                        var lastStatus = initialStatus;
         
                         _latestStatusByHandle[taskHandle.Handle] = ToSnapshot(targetId, initialStatus);
                         while (!taskCancellationToken.IsCancellationRequested)
@@ -124,9 +130,10 @@ internal sealed class AgentLocator
                                 {
                                     HeadingDegrees = TryComputeHeading(previous, current)
                                 };
-    
+
                                 _latestStatusByHandle[taskHandle.Handle] = ToSnapshot(targetId, current);
-    
+                                lastStatus = current;
+
                                 if (!AreEquivalent(previous, current))
                                 {
                                     EmitStatusChangedEvent(taskHandle.Handle, targetId, current, "Agent monitor status changed.");
@@ -141,8 +148,10 @@ internal sealed class AgentLocator
                             {
                                 // Keep monitor alive across transient cache/network races.
                             }
-    
-                            await Task.Delay(MonitorInterval, taskCancellationToken).ConfigureAwait(false);
+
+                            // Progressive back-off: slower polling when target is offline or not locally resolvable.
+                            var delay = GetMonitorDelay(lastStatus, connectedClient.Network.CurrentSim?.Handle);
+                            await Task.Delay(delay, taskCancellationToken).ConfigureAwait(false);
                         }
                     }
                     finally
@@ -196,113 +205,67 @@ internal sealed class AgentLocator
         {
             return (false, UUID.Zero, "first and last are required.");
         }
-        
-        /* TODO there must be a better way to do this.
-           NOTE: I found something in the libremetaverse code that does , AvatarManager.RequestAvatarName  
-         */
-
         var normalizedFirst = first.Trim();
         var normalizedLast = last.Trim();
         var query = $"{normalizedFirst} {normalizedLast}";
-        var queryStart = 0;
-        var visitedQueryStarts = new HashSet<int>();
 
-        for (var page = 0; page < 10; page++)
+        if (!_bot.TryGetConnectedClientSnapshot(out var connectedClient) || connectedClient == null)
         {
-            if (!visitedQueryStarts.Add(queryStart))
+            return (false, UUID.Zero, "No connected client snapshot available for avatar name search.");
+        }
+
+        var queryId = UUID.Random();
+        var reply = await WaitForAvatarPickerReplyAsync(connectedClient, query, queryId, AvatarNameSearchTimeout, cancellationToken).ConfigureAwait(false);
+        if (reply == null)
+        {
+            return (false, UUID.Zero, $"Timed out waiting for avatar name search reply for '{query}'.");
+        }
+
+        foreach (var candidate in reply.Avatars)
+        {
+            if (candidate.Key == UUID.Zero)
             {
-                break;
+                continue;
             }
 
-            var search = await _bot.DirectorySearchPeopleAsync(query, queryStart, cancellationToken).ConfigureAwait(false);
-            if (!search.Ok)
+            if (string.Equals(candidate.Value, query, StringComparison.OrdinalIgnoreCase))
             {
-                return (false, UUID.Zero, $"People directory search failed: {search.Message}");
-            }
-
-            if (string.IsNullOrWhiteSpace(search.PayloadJson))
-            {
-                return (false, UUID.Zero, "People directory search returned no payload.");
-            }
-
-            try
-            {
-                using var document = JsonDocument.Parse(search.PayloadJson);
-                var root = document.RootElement;
-
-                if (root.TryGetProperty("results", out var resultsElement)
-                    && resultsElement.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var result in resultsElement.EnumerateArray())
-                    {
-                        var candidateFirst = result.TryGetProperty("firstName", out var firstElement) && firstElement.ValueKind == JsonValueKind.String
-                            ? firstElement.GetString()
-                            : null;
-                        var candidateLast = result.TryGetProperty("lastName", out var lastElement) && lastElement.ValueKind == JsonValueKind.String
-                            ? lastElement.GetString()
-                            : null;
-                        var candidateFull = result.TryGetProperty("fullName", out var fullElement) && fullElement.ValueKind == JsonValueKind.String
-                            ? fullElement.GetString()
-                            : null;
-
-                        var isExactNameMatch = string.Equals(candidateFirst, normalizedFirst, StringComparison.OrdinalIgnoreCase)
-                            && string.Equals(candidateLast, normalizedLast, StringComparison.OrdinalIgnoreCase);
-                        var isExactFullNameMatch = string.Equals(candidateFull, query, StringComparison.OrdinalIgnoreCase);
-                        if (!isExactNameMatch && !isExactFullNameMatch)
-                        {
-                            continue;
-                        }
-
-                        if (!result.TryGetProperty("agentId", out var agentIdElement)
-                            || agentIdElement.ValueKind != JsonValueKind.String)
-                        {
-                            continue;
-                        }
-
-                        var agentIdText = agentIdElement.GetString();
-                        if (!string.IsNullOrWhiteSpace(agentIdText)
-                            && UUID.TryParse(agentIdText, out var agentId)
-                            && agentId != UUID.Zero)
-                        {
-                            return (true, agentId, null);
-                        }
-                    }
-                }
-
-                var hasMore = false;
-                var nextQueryStart = queryStart + 1;
-                if (root.TryGetProperty("pagination", out var pagination)
-                    && pagination.ValueKind == JsonValueKind.Object)
-                {
-                    if (pagination.TryGetProperty("hasMore", out var hasMoreElement)
-                        && (hasMoreElement.ValueKind == JsonValueKind.True || hasMoreElement.ValueKind == JsonValueKind.False))
-                    {
-                        hasMore = hasMoreElement.GetBoolean();
-                    }
-
-                    if (pagination.TryGetProperty("nextQueryStart", out var nextElement)
-                        && nextElement.ValueKind == JsonValueKind.Number
-                        && nextElement.TryGetInt32(out var nextFromPayload)
-                        && nextFromPayload >= 0)
-                    {
-                        nextQueryStart = nextFromPayload;
-                    }
-                }
-
-                if (!hasMore)
-                {
-                    break;
-                }
-
-                queryStart = nextQueryStart;
-            }
-            catch (JsonException ex)
-            {
-                return (false, UUID.Zero, $"Failed to parse people directory payload: {ex.Message}");
+                return (true, candidate.Key, null);
             }
         }
 
-        return (false, UUID.Zero, $"Agent '{normalizedFirst} {normalizedLast}' could not be found.");
+        return (false, UUID.Zero, $"Agent '{query}' could not be found.");
+    }
+
+    private static async Task<AvatarPickerReplyEventArgs?> WaitForAvatarPickerReplyAsync(
+        GridClient client,
+        string query,
+        UUID queryId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var tcs = new TaskCompletionSource<AvatarPickerReplyEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Handler(object? _, AvatarPickerReplyEventArgs e)
+        {
+            if (e.QueryID == queryId)
+            {
+                tcs.TrySetResult(e);
+            }
+        }
+
+        client.Avatars.AvatarPickerReply += Handler;
+        try
+        {
+            client.Avatars.RequestAvatarNameSearch(query, queryId);
+            var timeoutTask = Task.Delay(timeout, cancellationToken);
+            var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
+            return completed == tcs.Task ? await tcs.Task.ConfigureAwait(false) : null;
+        }
+        finally
+        {
+            client.Avatars.AvatarPickerReply -= Handler;
+        }
     }
 
     public async Task<(bool Ok, AgentMonitorSnapshot? Snapshot, string? ErrorMessage)> ReadSingleMonitorSnapshotAsync(
@@ -314,44 +277,36 @@ internal sealed class AgentLocator
             return (false, null, "targetId must be a valid non-zero UUID.");
         }
 
-        BotTaskHandle? monitorTask = null;
         var correlationId = Guid.NewGuid().ToString("N")[..8];
+
+        if (!_bot.TryGetConnectedClientSnapshot(out var connectedClient) || connectedClient == null)
+        {
+            return (false, null, "No connected client snapshot available for agent monitor lookup.");
+        }
+
         try
         {
-            monitorTask = await MonitorAgent(targetId.ToString(), cancellationToken, correlationId).ConfigureAwait(false);
-            if (monitorTask == null || string.IsNullOrWhiteSpace(monitorTask.Handle))
-            {
-                return (false, null, "Failed to create agent monitor task.");
-            }
+            var status = await CaptureStatusAsync(
+                targetId,
+                connectedClient,
+                previous: null,
+                cancellationToken,
+                correlationId,
+                friendMapTimeoutOverride: SingleSnapshotFriendMapTimeout,
+                unresolvedAsOffline: true).ConfigureAwait(false);
 
-            LogDiag(correlationId, $"single-read started target={targetId} handle={monitorTask.Handle}");
-
-            for (var attempt = 0; attempt < 20; attempt++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (TryGetLatestStatus(monitorTask.Handle, out var snapshot))
-                {
-                    if (snapshot.Online.HasValue)
-                    {
-                        LogDiag(correlationId, $"single-read success target={targetId} handle={monitorTask.Handle} attempt={attempt + 1} online={(snapshot.Online.Value ? "true" : "false")} regionHandle={(snapshot.RegionHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(snapshot.Position?.ToString() ?? "n/a")}");
-                        return (true, snapshot, null);
-                    }
-
-                    LogDiag(correlationId, $"single-read unresolved target={targetId} handle={monitorTask.Handle} attempt={attempt + 1}; waiting for resolved online state");
-                }
-
-                await Task.Delay(50, cancellationToken).ConfigureAwait(false);
-            }
-
-            LogDiag(correlationId, $"single-read timeout target={targetId} handle={monitorTask.Handle}");
-            return (false, null, "Timed out waiting for first agent monitor reading.");
+            var snapshot = ToSnapshot(targetId, status);
+            LogDiag(correlationId, $"single-read resolved target={targetId} online={(snapshot.Online.HasValue ? (snapshot.Online.Value ? "true" : "false") : "unknown")} regionHandle={(snapshot.RegionHandle?.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(snapshot.Position?.ToString() ?? "n/a")}");
+            return (true, snapshot, null);
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (monitorTask != null && !string.IsNullOrWhiteSpace(monitorTask.Handle))
-            {
-                _bot.CancelBotTask(monitorTask.Handle);
-            }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogDiag(correlationId, $"single-read failed target={targetId} message={ex.Message}");
+            return (false, null, "Failed to read agent monitor snapshot.");
         }
     }
 
@@ -390,7 +345,9 @@ internal sealed class AgentLocator
         GridClient client,
         AgentMonitorStatus? previous,
         CancellationToken cancellationToken,
-        string? correlationId = null)
+        string? correlationId = null,
+        TimeSpan? friendMapTimeoutOverride = null,
+        bool unresolvedAsOffline = false)
     {
         var status = AgentMonitorStatus.Unknown;
 
@@ -400,7 +357,8 @@ internal sealed class AgentLocator
         AgentMonitorStatus? candidate = null;
             
         // Branch: friend-map
-        var mapReply = await TryMapFriendLocationOnceAsync(client, targetId, FriendMapTimeout, cancellationToken).ConfigureAwait(false);
+        var friendMapTimeout = friendMapTimeoutOverride ?? FriendMapTimeout;
+        var mapReply = await TryMapFriendLocationOnceAsync(client, targetId, friendMapTimeout, cancellationToken).ConfigureAwait(false);
         if (mapReply != null)
         {
             LogDiag(correlationId, $"friend-map hit target={targetId} regionHandle={mapReply.RegionHandle} pos={FormatVector(mapReply.Location)}");
@@ -418,6 +376,24 @@ internal sealed class AgentLocator
         else
         {
             LogDiag(correlationId, $"friend-map miss target={targetId}");
+        }
+
+        // Branch: friend-presence fallback (online visibility can be granted even when map visibility is denied).
+        var friendOnlineHint = TryResolveFriendOnlinePresence(client, targetId);
+        if (candidate == null && friendOnlineHint.HasValue)
+        {
+            LogDiag(correlationId, $"friend-presence hint target={targetId} online={(friendOnlineHint.Value ? "true" : "false")}");
+            candidate = status with
+            {
+                Online = friendOnlineHint.Value,
+                RegionName = null,
+                RegionHandle = null,
+                Position = null,
+                IsFlying = null,
+                Velocity = null,
+                HeadingDegrees = null,
+                LocalId = null
+            };
         }
         
 
@@ -468,7 +444,7 @@ internal sealed class AgentLocator
             // Branch: current-sim cache hit, dont take as authorative unless friend map matches region
             var knownPosition = foundAvatar?.Position;
             
-            if(candidate == null || candidate.RegionHandle == currentSim?.Handle)
+            if(candidate == null || ( candidate.RegionHandle == null || candidate.RegionHandle == currentSim?.Handle))
             {
                 LogDiag(correlationId, $"current-sim hit target={targetId} sim={(currentSim?.Name ?? "(unknown)")} localId={(foundAvatar?.LocalID.ToString(CultureInfo.InvariantCulture) ?? "n/a")} pos={(knownPosition.HasValue ? FormatVector(knownPosition.Value) : "n/a")}");
                 return new AgentMonitorStatus(
@@ -508,8 +484,57 @@ internal sealed class AgentLocator
         LogDiag(correlationId, $"unresolved target={targetId}");
         return status with
         {
+            Online = unresolvedAsOffline
+                ? (friendOnlineHint ?? false)
+                : friendOnlineHint,
             LocalId = null
         };
+    }
+
+    private static bool? TryResolveFriendOnlinePresence(GridClient client, UUID targetId)
+    {
+        if (targetId == UUID.Zero)
+        {
+            return null;
+        }
+
+        if (!client.Friends.FriendList.TryGetValue(targetId, out var friend) || friend == null)
+        {
+            return null;
+        }
+
+        // Without online-visibility rights, IsOnline cannot be trusted for this target.
+        return friend.CanSeeThemOnline ? friend.IsOnline : null;
+    }
+
+    private static TimeSpan GetMonitorDelay(AgentMonitorStatus status, ulong? currentSimHandle)
+    {
+        if (status.Online == false)
+        {
+            return MonitorDelayOffline;
+        }
+
+        if (status.Online == true)
+        {
+            var regionHandle = status.RegionHandle;
+            var hasLocation = regionHandle.HasValue
+                && regionHandle.Value > 0
+                && status.Position.HasValue;
+
+            if (!hasLocation)
+            {
+                return MonitorDelayOnlineNoLocation;
+            }
+
+            if (currentSimHandle.HasValue && regionHandle.HasValue && regionHandle.Value == currentSimHandle.Value)
+            {
+                return MonitorInterval;
+            }
+
+            return MonitorDelayOnlineDifferentSim;
+        }
+
+        return MonitorDelayOnlineNoLocation;
     }
 
     private static bool? ReadFlyingSignal(Avatar avatar)

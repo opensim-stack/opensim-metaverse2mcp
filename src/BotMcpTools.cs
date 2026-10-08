@@ -996,7 +996,7 @@ internal sealed class BotMcpTools
         return _bot.MapItemsAsync(regionHandle, itemType, layerType, cancellationToken);
     }
 
-    [McpServerTool, Description("Locate an agent (avatar, player, user, NPC, bot) by first/last name. Resolves UUID via people directory search, captures a single short-lived monitor snapshot, then disposes the monitor task. Returns not found when the target is offline/unresolved; returns an error if monitor bootstrap/read fails.")]
+    [McpServerTool, Description("Locate an agent (avatar, player, user, NPC, bot) by first/last name. Resolves UUID via AvatarPicker name search (RequestAvatarNameSearch), captures a single short-lived monitor snapshot, and returns the best available status payload. If the target is offline/unresolved, returns online=false with partial fields.")]
     public async Task<DataToolResult> AgentFind(
         [Description("Agent first name.")] string first,
         [Description("Agent last name.")] string last,
@@ -1022,7 +1022,40 @@ internal sealed class BotMcpTools
             cancellationToken).ConfigureAwait(false);
     }
 
-    [McpServerTool, Description("Locate an agent (avatar, player, user, NPC, bot) by UUID using a single short-lived monitor snapshot, then dispose the monitor task. Returns not found when the target is offline/unresolved; returns an error if monitor bootstrap/read fails.")]
+    [McpServerTool, Description("Resolve an agent first/last name directly to UUID using AvatarPicker name search (RequestAvatarNameSearch).")]
+    public async Task<DataToolResult> AgentNameToUUID(
+        [Description("Agent first name.")] string first,
+        [Description("Agent last name.")] string last,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+        {
+            return DataToolResult.FailResult("first and last are required.");
+        }
+
+        var normalizedFirst = first.Trim();
+        var normalizedLast = last.Trim();
+        var resolved = await _agentLocator.ResolveAgentIdByNameAsync(normalizedFirst, normalizedLast, cancellationToken).ConfigureAwait(false);
+        if (!resolved.Ok)
+        {
+            return DataToolResult.FailResult(resolved.ErrorMessage!);
+        }
+
+        var payload = new
+        {
+            source = "avatarPicker",
+            firstName = normalizedFirst,
+            lastName = normalizedLast,
+            fullName = $"{normalizedFirst} {normalizedLast}",
+            agentId = resolved.AgentId.ToString()
+        };
+
+        return DataToolResult.OkResult(
+            $"Resolved agent '{normalizedFirst} {normalizedLast}' to UUID.",
+            JsonSerializer.Serialize(payload));
+    }
+
+    [McpServerTool, Description("Locate an agent (avatar, player, user, NPC, bot) by UUID using a single short-lived monitor snapshot, and return the best available status payload. If the target is offline/unresolved, returns online=false with partial fields.")]
     public Task<DataToolResult> AgentFindByUuid(
         [Description("Agent UUID.")] string uuid,
         CancellationToken cancellationToken)
@@ -1053,14 +1086,11 @@ internal sealed class BotMcpTools
         }
 
         var snapshot = monitorRead.Snapshot!;
-        if (snapshot.Online != true)
-        {
-            return DataToolResult.FailResult($"Agent '{targetId}' could not be found.");
-        }
+        var isOnline = snapshot.Online == true;
 
         var payload = new
         {
-            found = true,
+            found = isOnline,
             source = "agentMonitor",
             agentId = targetId.ToString(),
             firstName,
@@ -1086,8 +1116,12 @@ internal sealed class BotMcpTools
             ? targetId.ToString()
             : $"{firstName} {lastName}";
 
+        var message = isOnline
+            ? $"Located agent {displayName} via agent monitor."
+            : $"Agent {displayName} is offline or unresolved from current visibility; returning best available status.";
+
         return DataToolResult.OkResult(
-            $"Located agent {displayName} via agent monitor.",
+            message,
             JsonSerializer.Serialize(payload));
     }
 
