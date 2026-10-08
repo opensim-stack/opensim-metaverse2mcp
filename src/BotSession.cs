@@ -353,7 +353,8 @@ internal sealed partial class BotSession : IDisposable
             client.Inventory.InventoryObjectOffered += OnInventoryObjectOffered;
             client.Objects.ObjectUpdate += OnWorldObjectUpdateForEventStream;
             client.Objects.TerseObjectUpdate += OnTerseWorldObjectUpdateForEventStream;
-            client.Objects.AvatarUpdate += AvatarUpdateHandler;     
+            client.Objects.AvatarUpdate += AvatarUpdateHandler;
+            client.Grid.CoarseLocationUpdate += OnCoarseLocationUpdateForAgentLocator;
 
             client.Network.RegisterCallback(PacketType.AlertMessage, AlertMessageHandler);
             
@@ -1371,6 +1372,11 @@ internal sealed partial class BotSession : IDisposable
             SetDefaultCamera();
         }
     }
+
+    private void OnCoarseLocationUpdateForAgentLocator(object? sender, CoarseLocationUpdateEventArgs e)
+    {
+        _agentLocator.ObserveCoarseLocationUpdate(e);
+    }
     
     private void SetDefaultCamera()
     {
@@ -1647,6 +1653,7 @@ internal sealed partial class BotSession : IDisposable
         try { client.Network.LoginProgress -= OnLoginProgress; } catch { }
         try { client.Objects.TerseObjectUpdate -= OnTerseWorldObjectUpdateForEventStream; } catch { }
         try { client.Objects.AvatarUpdate -= AvatarUpdateHandler; } catch { }
+        try { client.Grid.CoarseLocationUpdate -= OnCoarseLocationUpdateForAgentLocator; } catch { }
         
         try { client.Network.UnregisterCallback(PacketType.AlertMessage, AlertMessageHandler); } catch { }
 

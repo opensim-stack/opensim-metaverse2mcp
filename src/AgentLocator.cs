@@ -15,6 +15,7 @@ internal sealed class AgentLocator
     private static readonly TimeSpan AvatarNameSearchTimeout = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan SingleSnapshotFriendMapTimeout = TimeSpan.FromSeconds(1.5);
     private static readonly TimeSpan ExternalFallbackProbeInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan CoarsePresenceFreshnessWindow = TimeSpan.FromSeconds(20);
     private static readonly HashSet<UUID> FlyingAnimationIds = new()
     {
         Animations.FLY,
@@ -49,6 +50,7 @@ internal sealed class AgentLocator
     private readonly bool _allowExternalFallback;
     private SpawnerLocatedAgent? _cachedExternalFallbackResult;
     private readonly ConcurrentDictionary<string, AgentMonitorSnapshot> _latestStatusByHandle = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<ulong, CoarsePresenceSnapshot> _latestCoarsePresenceByRegionHandle = new();
     private DateTime _lastExternalProbeAtUtc = DateTime.MinValue;
 
     public AgentLocator(BotSession bot, SpawnerClient spawnerClient)
@@ -75,6 +77,31 @@ internal sealed class AgentLocator
         }
 
         LogDiag($"corr={correlationId} {message}");
+    }
+
+    public void ObserveCoarseLocationUpdate(CoarseLocationUpdateEventArgs e)
+    {
+        if (e == null || e.Simulator == null)
+        {
+            return;
+        }
+
+        var regionHandle = e.Simulator.Handle;
+        if (regionHandle == 0)
+        {
+            return;
+        }
+
+        var positions = new Dictionary<UUID, Vector3>(e.Positions.Count);
+        foreach (var entry in e.Positions)
+        {
+            if (entry.Key != UUID.Zero)
+            {
+                positions[entry.Key] = entry.Value;
+            }
+        }
+
+        _latestCoarsePresenceByRegionHandle[regionHandle] = new CoarsePresenceSnapshot(DateTime.UtcNow, positions);
     }
 
     public async Task<BotTaskHandle> MonitorAgent(string targetAgentId, CancellationToken cancellationToken, string? correlationId = null)
@@ -439,7 +466,24 @@ internal sealed class AgentLocator
             }
         }
         
-        if (currentSim != null && TryFindAvatarByIdInSim(currentSim, targetId, expectedLocalId, out var foundAvatar))
+        var localPresenceHint = GetLocalPresenceHint(currentSim, targetId, out var coarsePosition);
+        if (localPresenceHint == LocalPresenceHint.Present
+            && (candidate == null || candidate.RegionHandle == null || candidate.RegionHandle == currentSim?.Handle))
+        {
+            candidate = status with
+            {
+                Online = true,
+                RegionName = currentSim == null ? null : RegionNameFromHandle(client, currentSim.Handle),
+                RegionHandle = currentSim?.Handle,
+                Position = coarsePosition,
+                IsFlying = null,
+                Velocity = null,
+                HeadingDegrees = null,
+                LocalId = null
+            };
+        }
+
+        if (currentSim != null && TryFindAvatarByIdInSim(currentSim, targetId, expectedLocalId, localPresenceHint, out var foundAvatar))
         {
             // Branch: current-sim cache hit, dont take as authorative unless friend map matches region
             var knownPosition = foundAvatar?.Position;
@@ -593,10 +637,17 @@ internal sealed class AgentLocator
         Simulator simulator,
         UUID avatarId,
         uint? expectedLocalId,
+        LocalPresenceHint presenceHint,
         out Avatar? foundAvatar)
     {
         foundAvatar = null;
         if (avatarId == UUID.Zero)
+        {
+            return false;
+        }
+
+        // A fresh coarse snapshot for this region is a stronger presence signal than ObjectAvatars cache.
+        if (presenceHint == LocalPresenceHint.Absent)
         {
             return false;
         }
@@ -631,6 +682,33 @@ internal sealed class AgentLocator
         }
 
         return false;
+    }
+
+    private LocalPresenceHint GetLocalPresenceHint(Simulator? currentSim, UUID targetId, out Vector3? coarsePosition)
+    {
+        coarsePosition = null;
+        if (currentSim == null || currentSim.Handle == 0 || targetId == UUID.Zero)
+        {
+            return LocalPresenceHint.Unknown;
+        }
+
+        if (!_latestCoarsePresenceByRegionHandle.TryGetValue(currentSim.Handle, out var snapshot))
+        {
+            return LocalPresenceHint.Unknown;
+        }
+
+        if (DateTime.UtcNow - snapshot.ObservedAtUtc > CoarsePresenceFreshnessWindow)
+        {
+            return LocalPresenceHint.Unknown;
+        }
+
+        if (snapshot.Positions.TryGetValue(targetId, out var position))
+        {
+            coarsePosition = position;
+            return LocalPresenceHint.Present;
+        }
+
+        return LocalPresenceHint.Absent;
     }
 
     private static Avatar? SelectDeterministicAvatar(IReadOnlyList<Avatar> matches, uint? expectedLocalId, out bool matchedExpected)
@@ -1020,6 +1098,15 @@ internal sealed class AgentLocator
         Vector3 Position,
         ulong RegionHandle,
         Simulator? Simulator);
+
+    private sealed record CoarsePresenceSnapshot(DateTime ObservedAtUtc, Dictionary<UUID, Vector3> Positions);
+
+    private enum LocalPresenceHint
+    {
+        Unknown,
+        Present,
+        Absent,
+    }
 
     private sealed record AgentMonitorStatus(
         bool? Online,
