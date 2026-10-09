@@ -745,6 +745,7 @@ internal sealed partial class BotSession
         var sameRegionLastProgressAt = DateTime.UtcNow;
         var sameRegionRecoveryAttempts = 0;
         var sameRegionLastRecoveryAt = DateTime.MinValue;
+        var crossingMovementPaused = false;
 
         // Stage 1: Apply locomotion mode deltas only when required.
         // This keeps network updates lower and avoids control-flag churn.
@@ -1108,6 +1109,35 @@ internal sealed partial class BotSession
 
                 var viewerCrossingInProgress = IsViewerCrossingInProgress(client.Self.GetCrossingState());
 
+                // Pause steering while the viewer crossing state-machine is active.
+                // This prevents follow/autopilot updates from fighting LMV crossing recovery.
+                if (viewerCrossingInProgress && targetIsCrossRegion)
+                {
+                    if (!crossingMovementPaused)
+                    {
+                        client.Self.AutoPilotCancel();
+                        client.Self.Movement.ResetControlFlags();
+                        client.Self.Movement.SendUpdate(true);
+                        lastAppliedLocomotionMode = null;
+                        crossingMovementPaused = true;
+
+                        if (IsFollowDiagnosticsEnabled())
+                        {
+                            Console.WriteLine(
+                                $"[follow][diag] crossing_pause target={label} crossingState={client.Self.GetCrossingState()} followMode={followMovementMode} botSim={DescribeSimulator(botSim)}");
+                        }
+                    }
+                }
+                else if (crossingMovementPaused)
+                {
+                    crossingMovementPaused = false;
+                    if (IsFollowDiagnosticsEnabled())
+                    {
+                        Console.WriteLine(
+                            $"[follow][diag] crossing_resume target={label} crossingState={client.Self.GetCrossingState()} followMode={followMovementMode} botSim={DescribeSimulator(botSim)}");
+                    }
+                }
+
                 if (targetIsCrossRegion)
                 {
                     // Stage 3e: Cross-region state machine.
@@ -1377,6 +1407,7 @@ internal sealed partial class BotSession
                     // Stage 3h: Normal movement command emission.
                     // Re-issue movement at most once per second to avoid packet spam.
                     if (!holdPositionForTeleportAssist
+                        && !crossingMovementPaused
                         && (DateTime.UtcNow - lastPilotAt) >= TimeSpan.FromSeconds(1))
                     {
                         var movementModeToApply = targetIsCrossRegion && IsCrossRegionPhase(followMovementMode)
