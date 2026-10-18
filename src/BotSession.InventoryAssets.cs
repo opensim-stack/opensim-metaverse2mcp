@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Xml;
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using LibreMetaverse;
 using LibreMetaverse.Assets;
 using LibreMetaverse.Packets;
@@ -22,6 +23,13 @@ internal sealed partial class BotSession
     private int _nextInventoryOfferEventId;
 
     private const int MaxInventoryOfferHistory = 200;
+
+    // Own-attachment prims arrive from the simulator without OwnerID/NameValues (AttachItemID); those are only
+    // filled in after an object property request. Remember what we already asked for so repeated lookups do not
+    // re-request the same prims.
+    private readonly ConcurrentDictionary<UUID, DateTimeOffset> _ownAttachmentPropertiesRequestedAtByObjectId = new();
+    private static readonly TimeSpan OwnAttachmentPropertiesRequestCooldown = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan OwnAttachmentPropertiesWaitTimeout = TimeSpan.FromSeconds(3);
     private const int StartupSetupProvisionStateIdle = 0;
     private const int StartupSetupProvisionStateRunning = 1;
     private const int StartupSetupProvisionStateCompleted = 2;
@@ -78,17 +86,31 @@ internal sealed partial class BotSession
                 .ConfigureAwait(false);
 
             var unresolvedLiveAttachmentObjects = 0;
-            var attachments = (await CollectAttachmentPointMappingsAsync(
+            var pendingAttachmentMappings = 0;
+            var mappings = await CollectAttachmentPointMappingsAsync(
                         client,
                         token,
                         includeAttachmentsAndWearables,
                         includeCurrentOutfit)
-                    .ConfigureAwait(false))
+                    .ConfigureAwait(false);
+
+            // Attachment prims are present under the bot's avatar before their properties arrive. When some of them
+            // are still unidentified, an unresolved mapping is pending rather than missing for the session.
+            var unidentifiedOwnAttachmentPrims = CountUnidentifiedOwnAttachmentPrims(client);
+            var attachments = mappings
                 .Select(a =>
                 {
                     if (!TryFindAttachedObjectForInventoryItem(client, a.Key, out var objectId, out var localId))
                     {
-                        unresolvedLiveAttachmentObjects++;
+                        if (unidentifiedOwnAttachmentPrims > 0)
+                        {
+                            pendingAttachmentMappings++;
+                        }
+                        else
+                        {
+                            unresolvedLiveAttachmentObjects++;
+                        }
+
                         return new AttachmentInfo(
                             a.Key.ToString(),
                             a.Value.ToString(),
@@ -111,8 +133,19 @@ internal sealed partial class BotSession
                 : includeAttachmentsAndWearables
                     ? "runtime-only mode"
                     : "COF-only mode";
-            var message = unresolvedLiveAttachmentObjects > 0
-                ? $"Collected currently worn wearables and attachments in {mode} ({unresolvedLiveAttachmentObjects} attachment(s) had no live object snapshot this session)."
+            var notes = new List<string>();
+            if (unresolvedLiveAttachmentObjects > 0)
+            {
+                notes.Add($"{unresolvedLiveAttachmentObjects} attachment(s) had no live object snapshot this session");
+            }
+
+            if (pendingAttachmentMappings > 0)
+            {
+                notes.Add($"{pendingAttachmentMappings} attachment mapping(s) still awaiting object properties");
+            }
+
+            var message = notes.Count > 0
+                ? $"Collected currently worn wearables and attachments in {mode} ({string.Join("; ", notes)})."
                 : $"Collected currently worn wearables and attachments in {mode}.";
             return AppearanceStateResult.OkResult(wearables, attachments, message);
         }, cancellationToken).ConfigureAwait(false);
@@ -1170,7 +1203,9 @@ internal sealed partial class BotSession
         for (var attempt = 0; attempt < 10; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (TryFindAttachedObjectForInventoryItem(client, attachmentItem.UUID, out objectId, out localId))
+            bool found;
+            (found, objectId, localId) = await FindAttachedObjectForInventoryItemAsync(client, attachmentItem.UUID, cancellationToken).ConfigureAwait(false);
+            if (found)
             {
                 break;
             }
@@ -1486,7 +1521,8 @@ internal sealed partial class BotSession
                 return AttachmentObjectResolutionResult.FailResult("No current simulator available.");
             }
 
-            if (!TryFindAttachedObjectForInventoryItem(client, itemUuid, out var attachedObjectId, out var attachedLocalId))
+            var (found, attachedObjectId, attachedLocalId) = await FindAttachedObjectForInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+            if (!found)
             {
                 return AttachmentObjectResolutionResult.FailResult(
                     $"Unable to resolve an attached object for inventory item {itemUuid}. The item may not be worn yet or object updates are still pending.");
@@ -1568,7 +1604,8 @@ internal sealed partial class BotSession
                 return AttachmentTransformResult.FailResult("No current simulator available.");
             }
 
-            if (!TryFindAttachedObjectForInventoryItem(client, itemUuid, out var attachedObjectId, out var attachedLocalId))
+            var (found, attachedObjectId, attachedLocalId) = await FindAttachedObjectForInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+            if (!found)
             {
                 return AttachmentTransformResult.FailResult($"Unable to find a currently worn attachment object for inventory item {itemUuid}. The attachment may not be worn yet or object updates are still pending.");
             }
@@ -1626,7 +1663,8 @@ internal sealed partial class BotSession
                 return AttachmentTransformResult.FailResult("No current simulator available.");
             }
 
-            if (!TryFindAttachedObjectForInventoryItem(client, itemUuid, out var attachedObjectId, out var attachedLocalId))
+            var (found, attachedObjectId, attachedLocalId) = await FindAttachedObjectForInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+            if (!found)
             {
                 return AttachmentTransformResult.FailResult($"Unable to find a currently worn attachment object for inventory item {itemUuid}. The attachment may not be worn yet or object updates are still pending.");
             }
@@ -1746,31 +1784,26 @@ internal sealed partial class BotSession
 
         // Simulator object updates are often the most reliable source for what is currently attached.
         // Only trust objects owned by this bot; nearby avatars expose the same AttachItemID NameValue key.
+        // The bot's own attachments arrive without OwnerID/NameValues, so fetch their properties first.
+        await EnsureOwnAttachmentPropertiesAsync(client, cancellationToken).ConfigureAwait(false);
+
         var sim = client.Network.CurrentSim;
         var botAgentId = client.Self.AgentID;
         if (sim != null)
         {
+            var avatarLocalId = client.Self.LocalID;
             foreach (var prim in sim.ObjectsPrimitives.Values)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (prim == null || prim.OwnerID != botAgentId || prim.NameValues == null || !prim.NameValues.Any())
+                if (prim == null || !IsPrimOwnedByBot(prim, botAgentId))
                 {
                     continue;
                 }
 
-                foreach (var nameValue in prim.NameValues)
+                if (TryGetAttachedInventoryItemId(prim, avatarLocalId, out var attachedItemId))
                 {
-                    if (!nameValue.Name.Equals("AttachItemID", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    var raw = nameValue.Value?.ToString();
-                    if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out var attachedItemId) && attachedItemId != UUID.Zero)
-                    {
-                        merged[attachedItemId] = prim.PrimData.AttachmentPoint;
-                    }
+                    merged[attachedItemId] = prim.PrimData.AttachmentPoint;
                 }
             }
         }
@@ -6096,14 +6129,78 @@ internal sealed partial class BotSession
         }
 
         var botAgentId = client.Self.AgentID;
+        var avatarLocalId = client.Self.LocalID;
         foreach (var prim in sim.ObjectsPrimitives.Values)
         {
             // Attachment fallback lookup must be owner-scoped so nearby avatars do not match by item UUID.
-            if (prim == null || prim.OwnerID != botAgentId || prim.NameValues == null || !prim.NameValues.Any())
+            if (prim == null || !IsPrimOwnedByBot(prim, botAgentId))
             {
                 continue;
             }
 
+            if (TryGetAttachedInventoryItemId(prim, avatarLocalId, out var attachedItemId) && attachedItemId == inventoryItemId)
+            {
+                attachedObjectId = prim.ID;
+                attachedLocalId = prim.LocalID;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Same as <see cref="TryFindAttachedObjectForInventoryItem"/>, but when the cached lookup misses it first
+    /// requests object properties for the bot's own attachment prims that the simulator delivered without
+    /// OwnerID / AttachItemID, then retries once.
+    /// </summary>
+    private async Task<(bool Found, UUID ObjectId, uint LocalId)> FindAttachedObjectForInventoryItemAsync(
+        GridClient client,
+        UUID inventoryItemId,
+        CancellationToken cancellationToken)
+    {
+        if (TryFindAttachedObjectForInventoryItem(client, inventoryItemId, out var objectId, out var localId))
+        {
+            return (true, objectId, localId);
+        }
+
+        await EnsureOwnAttachmentPropertiesAsync(client, cancellationToken).ConfigureAwait(false);
+
+        var found = TryFindAttachedObjectForInventoryItem(client, inventoryItemId, out objectId, out localId);
+        return (found, objectId, localId);
+    }
+
+    private static bool IsPrimOwnedByBot(Primitive prim, UUID botAgentId)
+    {
+        return prim.OwnerID == botAgentId || (prim.Properties?.OwnerID ?? UUID.Zero) == botAgentId;
+    }
+
+    private static bool IsOwnAttachmentPrim(Primitive prim, uint avatarLocalId)
+    {
+        return avatarLocalId != 0 && prim.ParentID == avatarLocalId;
+    }
+
+    /// <summary>
+    /// True when the prim carries enough data for the owner-scoped AttachItemID match: an owner (from the object
+    /// update or from fetched properties) and an inventory item id (NameValues AttachItemID, or ObjectProperties.ItemID).
+    /// </summary>
+    private static bool HasAttachmentIdentity(Primitive prim, uint avatarLocalId)
+    {
+        var ownerKnown = prim.OwnerID != UUID.Zero || (prim.Properties?.OwnerID ?? UUID.Zero) != UUID.Zero;
+        return ownerKnown && TryGetAttachedInventoryItemId(prim, avatarLocalId, out _);
+    }
+
+    /// <summary>
+    /// Resolves the inventory item a prim is attached from. The AttachItemID NameValue is authoritative; for prims
+    /// parented to the bot's own avatar, ObjectProperties.ItemID (filled by a property fetch) is used as a fallback
+    /// because Second Life omits NameValues from the initial attachment ObjectUpdate.
+    /// </summary>
+    private static bool TryGetAttachedInventoryItemId(Primitive prim, uint avatarLocalId, out UUID itemId)
+    {
+        itemId = UUID.Zero;
+
+        if (prim.NameValues != null)
+        {
             foreach (var nameValue in prim.NameValues)
             {
                 if (!nameValue.Name.Equals("AttachItemID", StringComparison.OrdinalIgnoreCase))
@@ -6112,12 +6209,21 @@ internal sealed partial class BotSession
                 }
 
                 var raw = nameValue.Value?.ToString();
-                if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out var attachedItemId) && attachedItemId == inventoryItemId)
+                if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out var parsed) && parsed != UUID.Zero)
                 {
-                    attachedObjectId = prim.ID;
-                    attachedLocalId = prim.LocalID;
+                    itemId = parsed;
                     return true;
                 }
+            }
+        }
+
+        if (IsOwnAttachmentPrim(prim, avatarLocalId))
+        {
+            var propertyItemId = prim.Properties?.ItemID ?? UUID.Zero;
+            if (propertyItemId != UUID.Zero)
+            {
+                itemId = propertyItemId;
+                return true;
             }
         }
 
@@ -6429,6 +6535,123 @@ internal sealed partial class BotSession
 
         localId = 0;
         return false;
+    }
+
+    private static int CountUnidentifiedOwnAttachmentPrims(GridClient client)
+    {
+        var sim = client.Network.CurrentSim;
+        var avatarLocalId = client.Self.LocalID;
+        if (sim == null || avatarLocalId == 0)
+        {
+            return 0;
+        }
+
+        return sim.ObjectsPrimitives.Values.Count(prim =>
+            prim != null && IsOwnAttachmentPrim(prim, avatarLocalId) && !HasAttachmentIdentity(prim, avatarLocalId));
+    }
+
+    /// <summary>
+    /// Requests object properties for every prim parented to the bot's own avatar whose owner or attached item id is
+    /// still unknown, and waits (bounded) for them to populate. Prims requested recently are skipped so repeated
+    /// lookups do not re-request the same objects.
+    /// </summary>
+    private async Task EnsureOwnAttachmentPropertiesAsync(GridClient client, CancellationToken cancellationToken)
+    {
+        var sim = client.Network.CurrentSim;
+        var avatarLocalId = client.Self.LocalID;
+        if (sim == null || avatarLocalId == 0)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var pending = new List<Primitive>();
+        foreach (var prim in sim.ObjectsPrimitives.Values)
+        {
+            if (prim == null || !IsOwnAttachmentPrim(prim, avatarLocalId) || HasAttachmentIdentity(prim, avatarLocalId))
+            {
+                continue;
+            }
+
+            if (_ownAttachmentPropertiesRequestedAtByObjectId.TryGetValue(prim.ID, out var requestedAt)
+                && now - requestedAt < OwnAttachmentPropertiesRequestCooldown)
+            {
+                continue;
+            }
+
+            pending.Add(prim);
+        }
+
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        var pendingByObjectId = new Dictionary<UUID, Primitive>(pending.Count);
+        foreach (var prim in pending)
+        {
+            pendingByObjectId[prim.ID] = prim;
+            _ownAttachmentPropertiesRequestedAtByObjectId[prim.ID] = now;
+        }
+
+        void OnObjectPropertiesFamily(object? sender, ObjectPropertiesFamilyEventArgs e)
+        {
+            if (!ReferenceEquals(e.Simulator, sim) || !pendingByObjectId.TryGetValue(e.Properties.ObjectID, out var prim))
+            {
+                return;
+            }
+
+            prim.Properties ??= new Primitive.ObjectProperties();
+            prim.Properties.SetFamilyProperties(e.Properties);
+            _primPropertiesRefreshedAtByObjectId[prim.ID] = DateTimeOffset.UtcNow;
+        }
+
+        void OnObjectPropertiesUpdated(object? sender, ObjectPropertiesUpdatedEventArgs e)
+        {
+            if (!ReferenceEquals(e.Simulator, sim) || !pendingByObjectId.TryGetValue(e.Prim.ID, out var prim))
+            {
+                return;
+            }
+
+            prim.Properties = e.Properties;
+            _primPropertiesRefreshedAtByObjectId[prim.ID] = DateTimeOffset.UtcNow;
+        }
+
+        client.Objects.ObjectPropertiesFamily += OnObjectPropertiesFamily;
+        client.Objects.ObjectPropertiesUpdated += OnObjectPropertiesUpdated;
+        try
+        {
+            // Selecting makes the simulator send ObjectProperties (and a full ObjectUpdate carrying NameValues);
+            // the family request additionally fills in OwnerID for prims whose update lacked it.
+            client.Objects.SelectObjects(sim, pending.Select(p => p.LocalID).ToArray(), automaticDeselect: true);
+            foreach (var prim in pending)
+            {
+                client.Objects.RequestObjectPropertiesFamily(sim, prim.ID);
+            }
+
+            var deadline = now + OwnAttachmentPropertiesWaitTimeout;
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (pending.All(prim => HasAttachmentIdentity(prim, avatarLocalId)))
+                {
+                    break;
+                }
+
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            }
+
+            var resolved = pending.Count(prim => HasAttachmentIdentity(prim, avatarLocalId));
+            if (resolved < pending.Count)
+            {
+                Console.WriteLine($"[appearance] attachment property fetch: {resolved}/{pending.Count} own attachment prim(s) identified within {OwnAttachmentPropertiesWaitTimeout.TotalSeconds:0.#}s.");
+            }
+        }
+        finally
+        {
+            client.Objects.ObjectPropertiesFamily -= OnObjectPropertiesFamily;
+            client.Objects.ObjectPropertiesUpdated -= OnObjectPropertiesUpdated;
+        }
     }
 
     private static AttachmentTransformResult BuildAttachmentTransformResult(
