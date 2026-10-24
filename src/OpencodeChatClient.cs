@@ -24,6 +24,8 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
     private readonly ConcurrentDictionary<string, IReadOnlyList<HarnessPendingQuestion>> _eventPendingQuestionsBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _requestedModelBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, HarnessSessionStatusEvent> _lastSessionStatusBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SessionExecutionFailureSnapshot> _lastExecutionFailureBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IReadOnlyList<FormFieldBinding>> _formFieldBindingsByFormId = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _opencodeEventDebug;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -42,10 +44,9 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             Timeout = TimeSpan.FromSeconds(options.OpencodeRequestTimeoutSeconds)
         };
 
-        var username = string.IsNullOrWhiteSpace(options.OpencodeUsername) ? "opencode" : options.OpencodeUsername.Trim();
         if (!string.IsNullOrWhiteSpace(options.OpencodePassword))
         {
-            var bytes = Encoding.ASCII.GetBytes($"{username}:{options.OpencodePassword}");
+            var bytes = Encoding.ASCII.GetBytes($"opencode:{options.OpencodePassword}");
             _http.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Basic", Convert.ToBase64String(bytes));
         }
@@ -84,8 +85,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         var workers = new[]
         {
-            ObserveEventStreamLoopAsync("/event", cancellationToken),
-            //ObserveEventStreamLoopAsync("/global/event", cancellationToken)
+            ObserveEventStreamLoopAsync("/api/event", cancellationToken),
         };
 
         await Task.WhenAll(workers).ConfigureAwait(false);
@@ -224,6 +224,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 LogRawJson($"event:{eventType}", rawData);
             }
 
+            TrackFormFieldBindings(eventType, root);
             IngestEventDerivedPendingState(eventType, sessionId, root);
             if (TryParseSessionStatusEvent(root, eventType, sessionId, out var statusEvent))
             {
@@ -248,6 +249,11 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 {
                     Console.WriteLine($"[opencode:event] message part callback error: {ex.Message}");
                 }
+            }
+
+            if (TryParseSessionExecutionFailedEvent(root, eventType, sessionId, out var executionFailedEvent))
+            {
+                TrackSessionExecutionFailure(executionFailedEvent!.SessionId, executionFailedEvent.Message);
             }
         }
         catch (JsonException)
@@ -571,6 +577,80 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         partUpdatedEvent = new HarnessMessagePartUpdatedEvent(sessionId, partType);
+        return true;
+    }
+
+    private static bool TryParseSessionExecutionFailedEvent(JsonElement root, string eventType, string? hintedSessionId, out SessionExecutionFailedEvent? failedEvent)
+    {
+        failedEvent = null;
+        var normalizedEventType = (eventType ?? string.Empty).Trim();
+        if (!normalizedEventType.Equals("session.execution.failed", StringComparison.OrdinalIgnoreCase)
+            && !normalizedEventType.Equals("session.step.failed", StringComparison.OrdinalIgnoreCase)
+            && !normalizedEventType.Equals("session.tool.failed", StringComparison.OrdinalIgnoreCase)
+            && !normalizedEventType.Equals("session.execution.interrupted", StringComparison.OrdinalIgnoreCase)
+            || root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var source = root;
+        if (root.TryGetProperty("data", out var data)
+            && data.ValueKind == JsonValueKind.Object)
+        {
+            source = data;
+        }
+
+        var sessionId = TryGetStringPropertyAny(source, out var parsedSessionId, "sessionID", "sessionId")
+            && !string.IsNullOrWhiteSpace(parsedSessionId)
+            ? parsedSessionId!.Trim()
+            : (hintedSessionId?.Trim() ?? string.Empty);
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var message = normalizedEventType switch
+        {
+            "session.step.failed" => "Session step failed.",
+            "session.tool.failed" => "Tool call failed.",
+            "session.execution.interrupted" => "Session execution was interrupted.",
+            _ => "Session execution failed."
+        };
+
+        if (source.TryGetProperty("error", out var errorElement) && errorElement.ValueKind == JsonValueKind.Object)
+        {
+            var type = TryGetStringPropertyAny(errorElement, out var parsedType, "type")
+                && !string.IsNullOrWhiteSpace(parsedType)
+                ? parsedType!.Trim()
+                : null;
+            var detail = TryGetStringPropertyAny(errorElement, out var parsedMessage, "message", "detail", "reason", "text")
+                && !string.IsNullOrWhiteSpace(parsedMessage)
+                ? parsedMessage!.Trim()
+                : null;
+
+            if (!string.IsNullOrWhiteSpace(detail) && !string.IsNullOrWhiteSpace(type))
+            {
+                message = $"{type}: {detail}";
+            }
+            else if (!string.IsNullOrWhiteSpace(detail))
+            {
+                message = detail;
+            }
+            else if (!string.IsNullOrWhiteSpace(type))
+            {
+                message = type;
+            }
+        }
+        else if (TryGetStringPropertyAny(source, out var reason, "reason")
+            && !string.IsNullOrWhiteSpace(reason))
+        {
+            message = normalizedEventType.Equals("session.execution.interrupted", StringComparison.OrdinalIgnoreCase)
+                ? $"Execution interrupted: {reason!.Trim()}"
+                : reason!.Trim();
+        }
+
+        failedEvent = new SessionExecutionFailedEvent(sessionId, message);
         return true;
     }
 
@@ -904,78 +984,43 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             .Where(p => p.Connected == true)
             .ToList();
 
-        if (connected.Count > 0)
-        {
-            return connected;
-        }
-
-        // Fallback for older server builds where /provider does not expose connected status.
-        var response = await GetJsonAsync<OpencodeProvidersResponse>("/config/providers", cancellationToken).ConfigureAwait(false);
-        var all = response?.Providers ?? new List<OpencodeProviderEntry>();
-        return all
-            .Where(p => !string.IsNullOrWhiteSpace(p.Id))
-            .Select(p => new HarnessProviderSummary(p.Id!, string.IsNullOrWhiteSpace(p.Name) ? p.Id! : p.Name!, true))
-            .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        return connected.Count > 0 ? connected : available;
     }
 
     public async Task<IReadOnlyList<HarnessProviderSummary>> ListAvailableProvidersAsync(CancellationToken cancellationToken)
     {
-        var response = await GetJsonAsync<OpencodeAllProvidersResponse>("/provider", cancellationToken).ConfigureAwait(false);
-        var all = response?.All ?? new List<OpencodeProviderEntry>();
-        return all
+        var providers = await GetProviderInfoListAsync(cancellationToken).ConfigureAwait(false);
+        return providers
             .Where(p => !string.IsNullOrWhiteSpace(p.Id))
-            .Select(p => new HarnessProviderSummary(p.Id!, string.IsNullOrWhiteSpace(p.Name) ? p.Id! : p.Name!, p.Connected))
+            .Select(p => new HarnessProviderSummary(p.Id!, string.IsNullOrWhiteSpace(p.Name) ? p.Id! : p.Name!,
+                p.Activation?.Equals("disabled", StringComparison.OrdinalIgnoreCase) == true ? false : null))
             .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
     public async Task<IReadOnlyDictionary<string, IReadOnlyList<HarnessProviderAuthMethod>>> ListProviderAuthMethodsAsync(CancellationToken cancellationToken)
     {
-        using var response = await _http.GetAsync("/provider/auth", cancellationToken).ConfigureAwait(false);
-        var raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new OpencodeHttpException(response.StatusCode, "/provider/auth", raw);
-        }
+        var providers = await GetProviderInfoListAsync(cancellationToken).ConfigureAwait(false);
+        var providerToIntegration = providers
+            .Where(p => !string.IsNullOrWhiteSpace(p.Id) && !string.IsNullOrWhiteSpace(p.IntegrationId))
+            .ToDictionary(p => p.Id!, p => p.IntegrationId!, StringComparer.OrdinalIgnoreCase);
 
-        var result = new Dictionary<string, IReadOnlyList<HarnessProviderAuthMethod>>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return result;
-        }
+        var integrations = await GetIntegrationInfoListAsync(cancellationToken).ConfigureAwait(false);
+        var methodsByProvider = new Dictionary<string, IReadOnlyList<HarnessProviderAuthMethod>>(StringComparer.OrdinalIgnoreCase);
 
-        using var doc = JsonDocument.Parse(raw);
-        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+        foreach (var pair in providerToIntegration)
         {
-            return result;
-        }
-
-        foreach (var providerProperty in doc.RootElement.EnumerateObject())
-        {
-            if (providerProperty.Value.ValueKind != JsonValueKind.Array)
+            if (!integrations.TryGetValue(pair.Value, out var integrationMethods))
             {
                 continue;
             }
 
-            var methods = new List<HarnessProviderAuthMethod>();
-            var index = 0;
-            foreach (var entry in providerProperty.Value.EnumerateArray())
-            {
-                var type = TryGetStringProperty(entry, "type", out var parsedType) && !string.IsNullOrWhiteSpace(parsedType)
-                    ? parsedType!
-                    : "unknown";
-                var label = TryGetStringProperty(entry, "label", out var parsedLabel) && !string.IsNullOrWhiteSpace(parsedLabel)
-                    ? parsedLabel!
-                    : type;
-                methods.Add(new HarnessProviderAuthMethod(index, type, label));
-                index++;
-            }
-
-            result[providerProperty.Name] = methods;
+            methodsByProvider[pair.Key] = integrationMethods
+                .Select((m, idx) => new HarnessProviderAuthMethod(idx, m.Type, string.IsNullOrWhiteSpace(m.Label) ? m.Type : m.Label!))
+                .ToList();
         }
 
-        return result;
+        return methodsByProvider;
     }
         
     public string HandleStarCommand(BotSession bot, GridClient client, UUID agentId, string from, string conversationKey, string[] args)
@@ -1037,13 +1082,13 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             throw new ArgumentException("apiKey is required.", nameof(apiKey));
         }
 
+        var integrationId = await ResolveProviderIntegrationIdAsync(providerId, cancellationToken).ConfigureAwait(false);
         var body = new
         {
-            type = "api",
             key = apiKey
         };
 
-        _ = await PutJsonRawAsync($"/auth/{Uri.EscapeDataString(providerId)}", body, cancellationToken).ConfigureAwait(false);
+        _ = await PostJsonRawAsync($"/api/integration/{Uri.EscapeDataString(integrationId)}/connect/key", body, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<HarnessOAuthStartResult> StartProviderOAuthAsync(string providerId, int methodIndex, IReadOnlyDictionary<string, string>? inputs, CancellationToken cancellationToken)
@@ -1058,25 +1103,37 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             throw new ArgumentException("methodIndex must be >= 0.", nameof(methodIndex));
         }
 
-        var body = new
+        var integrationId = await ResolveProviderIntegrationIdAsync(providerId, cancellationToken).ConfigureAwait(false);
+        var method = await ResolveIntegrationMethodAsync(integrationId, methodIndex, cancellationToken).ConfigureAwait(false);
+        var body = new Dictionary<string, object?>
         {
-            method = methodIndex,
-            inputs = inputs ?? new Dictionary<string, string>()
+            ["methodID"] = method.Id
         };
+        if (inputs != null && inputs.Count > 0)
+        {
+            body["answer"] = inputs;
+        }
 
-        var raw = await PostJsonRawAsync($"/provider/{Uri.EscapeDataString(providerId)}/oauth/authorize", body, cancellationToken).ConfigureAwait(false);
+        var raw = await PostJsonRawAsync($"/api/integration/{Uri.EscapeDataString(integrationId)}/connect/oauth", body, cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(raw))
         {
             throw new InvalidOperationException("Opencode did not return OAuth authorization details.");
         }
 
-        var parsed = JsonSerializer.Deserialize<OpencodeOAuthAuthorizeResponse>(raw, _jsonOptions);
-        if (parsed == null || string.IsNullOrWhiteSpace(parsed.Url))
+        using var doc = JsonDocument.Parse(raw);
+        var payload = doc.RootElement;
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("data", out var dataElement))
+        {
+            payload = dataElement;
+        }
+
+        var parsed = JsonSerializer.Deserialize<OpencodeOAuthAuthorizeResponse>(payload.GetRawText(), _jsonOptions);
+        if (parsed == null || string.IsNullOrWhiteSpace(parsed.Url) || string.IsNullOrWhiteSpace(parsed.AttemptId))
         {
             throw new InvalidOperationException("Opencode OAuth authorize response did not include a URL.");
         }
 
-        _oauthPendingStates[BuildOAuthStateKey(providerId, methodIndex)] = ParseOAuthPendingState(providerId, methodIndex, raw, parsed);
+        _oauthPendingStates[BuildOAuthStateKey(providerId, methodIndex)] = ParseOAuthPendingState(providerId, integrationId, methodIndex, method.Id, payload.GetRawText(), parsed);
 
         return new HarnessOAuthStartResult(parsed.Url!, parsed.Method, parsed.Instructions);
     }
@@ -1096,6 +1153,12 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         var stateKey = BuildOAuthStateKey(providerId, methodIndex);
         _oauthPendingStates.TryGetValue(stateKey, out var pending);
         var callbackPayloads = BuildOAuthCallbackPayloads(methodIndex, code, pending);
+        var integrationId = pending?.IntegrationId ?? await ResolveProviderIntegrationIdAsync(providerId, cancellationToken).ConfigureAwait(false);
+        var attemptId = pending?.AttemptId;
+        if (string.IsNullOrWhiteSpace(attemptId))
+        {
+            throw new InvalidOperationException("OAuth completion requires an active attempt. Start OAuth again and then run oauth-complete.");
+        }
 
         Exception? lastCallbackError = null;
         var callbackSucceeded = false;
@@ -1103,7 +1166,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         {
             try
             {
-                _ = await PostJsonRawAsync($"/provider/{Uri.EscapeDataString(providerId)}/oauth/callback", payload, cancellationToken).ConfigureAwait(false);
+                _ = await PostJsonRawAsync($"/api/integration/{Uri.EscapeDataString(integrationId)}/connect/oauth/{Uri.EscapeDataString(attemptId)}/complete", payload, cancellationToken).ConfigureAwait(false);
                 callbackSucceeded = true;
                 break;
             }
@@ -1138,69 +1201,24 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
     {
         var normalizedProviderId = NormalizeProviderQuery(providerId);
 
-        var response = await GetJsonAsync<OpencodeProvidersResponse>("/config/providers", cancellationToken).ConfigureAwait(false);
-        var providers = response?.Providers ?? new List<OpencodeProviderEntry>();
+        var root = await GetJsonAsync<JsonElement>("/api/model", cancellationToken).ConfigureAwait(false);
+        var modelArray = TryGetArrayPropertyAny(root, out var wrapped, "data", "all", "models", "items") ? wrapped : root;
+        var allModels = new List<HarnessModelSummary>();
+        CollectModelsFromElement(modelArray, null, allModels);
 
-        if (!string.IsNullOrWhiteSpace(normalizedProviderId))
-        {
-            providers = providers
-                .Where(p => string.Equals(p.Id, normalizedProviderId, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(p.Name, normalizedProviderId, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-        }
+        var filtered = string.IsNullOrWhiteSpace(normalizedProviderId)
+            ? allModels
+            : allModels.Where(m => string.Equals(m.Provider, normalizedProviderId, StringComparison.OrdinalIgnoreCase)
+                || m.Id.StartsWith(normalizedProviderId + "/", StringComparison.OrdinalIgnoreCase)).ToList();
 
-        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var models = new List<HarnessModelSummary>();
-        foreach (var provider in providers)
-        {
-            var providerKey = provider.Id?.Trim();
-            foreach (var modelEntry in provider.Models ?? new Dictionary<string, OpencodeModelEntry>())
-            {
-                var model = modelEntry.Value;
-                var modelId = !string.IsNullOrWhiteSpace(model.Id)
-                    ? model.Id!.Trim()
-                    : modelEntry.Key.Trim();
-                if (string.IsNullOrWhiteSpace(modelId))
-                {
-                    continue;
-                }
-
-                var canonicalId = !string.IsNullOrWhiteSpace(providerKey) && !modelId.Contains('/')
-                    ? $"{providerKey}/{modelId}"
-                    : modelId;
-
-                if (!seenIds.Add(canonicalId))
-                {
-                    continue;
-                }
-
-                var name = string.IsNullOrWhiteSpace(model.Name) ? canonicalId : model.Name.Trim();
-                models.Add(new HarnessModelSummary(canonicalId, name, providerKey));
-            }
-
-            foreach (var defaultModel in EnumerateProviderDefaultModelIds(provider))
-            {
-                var modelId = defaultModel.Trim();
-                var canonicalId = !string.IsNullOrWhiteSpace(providerKey) && !modelId.Contains('/')
-                    ? $"{providerKey}/{modelId}"
-                    : modelId;
-                if (!seenIds.Add(canonicalId))
-                {
-                    continue;
-                }
-
-                models.Add(new HarnessModelSummary(canonicalId, canonicalId, providerKey));
-            }
-        }
-
-        return models
+        return filtered
             .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
     public async Task<IReadOnlyList<HarnessSessionSummary>> ListSessionsAsync(CancellationToken cancellationToken)
     {
-        var root = await GetJsonAsync<JsonElement>("/session", cancellationToken).ConfigureAwait(false);
+        var root = await GetJsonAsync<JsonElement>("/api/session", cancellationToken).ConfigureAwait(false);
         return ParseSessionList(root);
     }
 
@@ -1209,7 +1227,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         var body = BuildSessionCreateBody(title, configuredModelId, parentSessionId);
         Console.WriteLine($"[opencode] POST /session payload: {JsonSerializer.Serialize(body, _jsonOptions)}");
 
-        var created = await PostJsonAsync<JsonElement>("/session", body, cancellationToken).ConfigureAwait(false);
+        var created = await PostJsonAsync<JsonElement>("/api/session", body, cancellationToken).ConfigureAwait(false);
         if (!TryBuildSessionSummary(created, null, out var summary))
         {
             throw new InvalidOperationException("Opencode returned an unexpected payload while creating a session.");
@@ -1223,7 +1241,19 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         Dictionary<string, JsonElement>? response = null;
         try
         {
-            response = await GetJsonAsync<Dictionary<string, JsonElement>>("/session/status", cancellationToken).ConfigureAwait(false);
+            var active = await GetJsonAsync<JsonElement>("/api/session/active", cancellationToken).ConfigureAwait(false);
+            var extracted = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+            if (active.ValueKind == JsonValueKind.Object
+                && active.TryGetProperty("data", out var data)
+                && data.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var pair in data.EnumerateObject())
+                {
+                    extracted[pair.Name] = pair.Value;
+                }
+            }
+
+            response = extracted;
         }
         catch (OpencodeHttpException ex)
         {
@@ -1263,7 +1293,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             throw new ArgumentException("sessionId is required.", nameof(sessionId));
         }
 
-        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}";
+        var path = $"/api/session/{Uri.EscapeDataString(sessionId.Trim())}";
         var details = await GetJsonAsync<JsonElement>(path, cancellationToken).ConfigureAwait(false);
         return JsonSerializer.Serialize(details, new JsonSerializerOptions { WriteIndented = true });
     }
@@ -1276,7 +1306,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         var normalizedSessionId = sessionId.Trim();
-        var allPending = await GetJsonAsync<JsonElement>("/permission", cancellationToken).ConfigureAwait(false);
+        var allPending = await GetJsonAsync<JsonElement>($"/api/session/{Uri.EscapeDataString(normalizedSessionId)}/permission", cancellationToken).ConfigureAwait(false);
         var filtered = ParsePendingPermissions(allPending)
             .Where(p => p.SessionId.Equals(normalizedSessionId, StringComparison.OrdinalIgnoreCase))
             .ToList();
@@ -1326,7 +1356,8 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         var normalizedResponse = response.Trim().ToLowerInvariant();
         var payloads = BuildPermissionResponsePayloads(normalizedResponse, remember);
         Exception? lastClientError = null;
-        var path = $"/permission/{Uri.EscapeDataString(permissionKey)}/reply";
+        Exception? firstDecisionPayloadError = null;
+        var path = $"/api/session/{Uri.EscapeDataString(sessionKey)}/permission/{Uri.EscapeDataString(permissionKey)}/reply";
         foreach (var payload in payloads)
         {
             try
@@ -1352,11 +1383,15 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             }
             catch (OpencodeHttpException ex) when ((int)ex.StatusCode >= 400 && (int)ex.StatusCode < 500)
             {
+                if (firstDecisionPayloadError == null && payload.ContainsKey("decision"))
+                {
+                    firstDecisionPayloadError = ex;
+                }
                 lastClientError = ex;
             }
         }
 
-        throw lastClientError ?? new InvalidOperationException("Permission response request failed.");
+        throw firstDecisionPayloadError ?? lastClientError ?? new InvalidOperationException("Permission response request failed.");
     }
 
     public async Task<IReadOnlyList<HarnessPendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken)
@@ -1367,8 +1402,8 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         var normalizedSessionId = sessionId.Trim();
-        var allPending = await GetJsonAsync<JsonElement>("/question", cancellationToken).ConfigureAwait(false);
-        var filtered = ParsePendingQuestions(allPending)
+        var allPending = await GetJsonAsync<JsonElement>($"/api/session/{Uri.EscapeDataString(normalizedSessionId)}/form", cancellationToken).ConfigureAwait(false);
+        var filtered = ParsePendingQuestionsFromForms(allPending)
             .Where(q => q.SessionId.Equals(normalizedSessionId, StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (filtered.Count > 0)
@@ -1409,19 +1444,36 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         var questionKey = questionId.Trim();
-        var payload = new
-        {
-            answers = new[]
-            {
-                (answers ?? Array.Empty<string>()).Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => a.Trim()).ToArray()
-            }
-        };
+        var answerValues = (answers ?? Array.Empty<string>()).Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => a.Trim()).ToArray();
+        var sessionKey = sessionId.Trim();
+        var answerValue = answerValues.Length <= 1 ? (object?)(answerValues.FirstOrDefault() ?? string.Empty) : answerValues;
+        var fieldBindings = await ResolveFormFieldBindingsAsync(sessionKey, questionKey, cancellationToken).ConfigureAwait(false);
+        var payloads = BuildQuestionReplyPayloads(fieldBindings, answerValue);
 
-        var raw = await PostJsonRawAsync($"/question/{Uri.EscapeDataString(questionKey)}/reply", payload, cancellationToken).ConfigureAwait(false);
-        var ok = TryInterpretBooleanResponse(raw, true);
+        Exception? lastClientError = null;
+        var path = $"/api/session/{Uri.EscapeDataString(sessionKey)}/form/{Uri.EscapeDataString(questionKey)}/reply";
+        bool ok = false;
+        foreach (var payload in payloads)
+        {
+            try
+            {
+                var raw = await PostJsonRawAsync(path, payload, cancellationToken).ConfigureAwait(false);
+                ok = TryInterpretBooleanResponse(raw, true);
+                break;
+            }
+            catch (OpencodeHttpException ex) when ((int)ex.StatusCode >= 400 && (int)ex.StatusCode < 500)
+            {
+                lastClientError = ex;
+            }
+        }
+
+        if (!ok && lastClientError != null)
+        {
+            throw lastClientError;
+        }
+
         if (ok)
         {
-            var sessionKey = sessionId.Trim();
             if (_eventPendingQuestionsBySession.TryGetValue(sessionKey, out var eventExisting))
             {
                 var eventRemaining = eventExisting
@@ -1441,6 +1493,274 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         return ok;
     }
 
+    private async Task<IReadOnlyList<FormFieldBinding>> ResolveFormFieldBindingsAsync(string sessionId, string formId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(formId))
+        {
+            return Array.Empty<FormFieldBinding>();
+        }
+
+        var normalizedFormId = formId.Trim();
+        if (_formFieldBindingsByFormId.TryGetValue(normalizedFormId, out var cachedBindings)
+            && cachedBindings.Count > 0)
+        {
+            return cachedBindings;
+        }
+
+        try
+        {
+            var root = await GetJsonAsync<JsonElement>($"/api/session/{Uri.EscapeDataString(sessionId)}/form", cancellationToken).ConfigureAwait(false);
+            var forms = TryGetArrayPropertyAny(root, out var wrappedArray, "data", "items", "forms") ? wrappedArray : root;
+            if (forms.ValueKind != JsonValueKind.Array)
+            {
+                return Array.Empty<FormFieldBinding>();
+            }
+
+            foreach (var form in forms.EnumerateArray())
+            {
+                if (!TryGetStringPropertyAny(form, out var candidateId, "id")
+                    || string.IsNullOrWhiteSpace(candidateId)
+                    || !candidateId.Trim().Equals(normalizedFormId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!form.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Array)
+                {
+                    return Array.Empty<FormFieldBinding>();
+                }
+
+                var bindings = fields.EnumerateArray()
+                    .Where(f => f.ValueKind == JsonValueKind.Object
+                        && TryGetStringPropertyAny(f, out var key, "key")
+                        && !string.IsNullOrWhiteSpace(key))
+                    .Select(f =>
+                    {
+                        var key = f.GetProperty("key").GetString()!.Trim();
+                        var isMulti = TryGetStringPropertyAny(f, out var fieldType, "type")
+                            && fieldType != null
+                            && fieldType.Trim().Equals("multiselect", StringComparison.OrdinalIgnoreCase);
+                        return new FormFieldBinding(key, isMulti);
+                    })
+                    .GroupBy(b => b.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g.First())
+                    .ToList();
+
+                if (bindings.Count > 0)
+                {
+                    _formFieldBindingsByFormId[normalizedFormId] = bindings;
+                }
+
+                return bindings;
+            }
+        }
+        catch
+        {
+            // Fall back to legacy answer key payloads when form lookup fails.
+        }
+
+        return Array.Empty<FormFieldBinding>();
+    }
+
+    private static IReadOnlyList<Dictionary<string, object?>> BuildQuestionReplyPayloads(IReadOnlyList<FormFieldBinding> fieldBindings, object? answerValue)
+    {
+        var payloads = new List<Dictionary<string, object?>>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Add(Dictionary<string, object?> answer)
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["answer"] = answer
+            };
+
+            var signature = JsonSerializer.Serialize(payload);
+            if (seen.Add(signature))
+            {
+                payloads.Add(payload);
+            }
+        }
+
+        if (fieldBindings != null)
+        {
+            foreach (var binding in fieldBindings)
+            {
+                if (string.IsNullOrWhiteSpace(binding.Key))
+                {
+                    continue;
+                }
+
+                var key = binding.Key.Trim();
+                object? typedValue = answerValue;
+                if (binding.IsMulti && answerValue is string singleValue)
+                {
+                    typedValue = new[] { singleValue };
+                }
+
+                Add(new Dictionary<string, object?>
+                {
+                    [key] = typedValue
+                });
+
+                if (binding.IsMulti && answerValue is string scalarValue)
+                {
+                    Add(new Dictionary<string, object?>
+                    {
+                        [key] = scalarValue
+                    });
+                }
+            }
+        }
+
+        // Race-safe fallback when form listing lags behind event delivery.
+        Add(new Dictionary<string, object?>
+        {
+            ["q0"] = answerValue is string single ? new[] { single } : answerValue
+        });
+        Add(new Dictionary<string, object?>
+        {
+            ["q0"] = answerValue
+        });
+
+        // Legacy fallback used by earlier question payloads.
+        Add(new Dictionary<string, object?>
+        {
+            ["answer"] = answerValue
+        });
+
+        return payloads;
+    }
+
+    private void TrackFormFieldBindings(string eventType, JsonElement root)
+    {
+        var normalized = (eventType ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized) || root.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        if (normalized.Equals("form.created", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("form.updated", StringComparison.OrdinalIgnoreCase))
+        {
+            if (TryExtractFormFieldBindings(root, out var formId, out var bindings)
+                && !string.IsNullOrWhiteSpace(formId)
+                && bindings.Count > 0)
+            {
+                _formFieldBindingsByFormId[formId] = bindings;
+            }
+
+            return;
+        }
+
+        if (normalized.Equals("form.replied", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("form.deleted", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("form.expired", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("form.closed", StringComparison.OrdinalIgnoreCase))
+        {
+            if (TryExtractFormIdFromEvent(root, out var formId) && !string.IsNullOrWhiteSpace(formId))
+            {
+                _formFieldBindingsByFormId.TryRemove(formId, out _);
+            }
+        }
+    }
+
+    private static bool TryExtractFormFieldBindings(JsonElement root, out string formId, out IReadOnlyList<FormFieldBinding> bindings)
+    {
+        formId = string.Empty;
+        bindings = Array.Empty<FormFieldBinding>();
+
+        if (!TryGetFormPayload(root, out var formPayload))
+        {
+            return false;
+        }
+
+        if (!TryGetStringPropertyAny(formPayload, out var parsedFormId, "id")
+            || string.IsNullOrWhiteSpace(parsedFormId))
+        {
+            return false;
+        }
+
+        if (!formPayload.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        var extracted = new List<FormFieldBinding>();
+        foreach (var field in fields.EnumerateArray())
+        {
+            if (field.ValueKind != JsonValueKind.Object
+                || !TryGetStringPropertyAny(field, out var key, "key")
+                || string.IsNullOrWhiteSpace(key))
+            {
+                continue;
+            }
+
+            var isMulti = TryGetStringPropertyAny(field, out var fieldType, "type")
+                && fieldType != null
+                && fieldType.Trim().Equals("multiselect", StringComparison.OrdinalIgnoreCase);
+            extracted.Add(new FormFieldBinding(key.Trim(), isMulti));
+        }
+
+        if (extracted.Count == 0)
+        {
+            return false;
+        }
+
+        formId = parsedFormId!.Trim();
+        bindings = extracted
+            .GroupBy(b => b.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+        return true;
+    }
+
+    private static bool TryExtractFormIdFromEvent(JsonElement root, out string formId)
+    {
+        formId = string.Empty;
+        if (!TryGetFormPayload(root, out var formPayload))
+        {
+            return false;
+        }
+
+        if (TryGetStringPropertyAny(formPayload, out var parsedFormId, "id")
+            && !string.IsNullOrWhiteSpace(parsedFormId))
+        {
+            formId = parsedFormId!.Trim();
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetFormPayload(JsonElement root, out JsonElement formPayload)
+    {
+        formPayload = default;
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
+        {
+            if (data.TryGetProperty("form", out var form) && form.ValueKind == JsonValueKind.Object)
+            {
+                formPayload = form;
+                return true;
+            }
+
+            formPayload = data;
+            return true;
+        }
+
+        if (root.TryGetProperty("form", out var directForm) && directForm.ValueKind == JsonValueKind.Object)
+        {
+            formPayload = directForm;
+            return true;
+        }
+
+        return false;
+    }
+
     public async Task<bool> RejectQuestionAsync(string sessionId, string questionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
@@ -1454,7 +1774,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         var questionKey = questionId.Trim();
-        var raw = await PostJsonRawAsync($"/question/{Uri.EscapeDataString(questionKey)}/reject", new { }, cancellationToken).ConfigureAwait(false);
+        var raw = await DeleteRawAsync($"/api/session/{Uri.EscapeDataString(sessionId.Trim())}/form/{Uri.EscapeDataString(questionKey)}", cancellationToken).ConfigureAwait(false);
         var ok = TryInterpretBooleanResponse(raw, true);
         if (ok)
         {
@@ -1485,7 +1805,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             throw new ArgumentException("sessionId is required.", nameof(sessionId));
         }
 
-        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}/children";
+        var path = $"/api/session?parentID={Uri.EscapeDataString(sessionId.Trim())}";
         var root = await GetJsonAsync<JsonElement>(path, cancellationToken).ConfigureAwait(false);
         return ParseSessionList(root);
     }
@@ -1502,14 +1822,9 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             throw new ArgumentException("title is required.", nameof(title));
         }
 
-        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}";
-        var raw = await PatchJsonRawAsync(path, new { title = title.Trim() }, cancellationToken).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            throw new InvalidOperationException("Opencode returned an empty response while updating the session title.");
-        }
-
-        var updated = JsonSerializer.Deserialize<JsonElement>(raw, _jsonOptions);
+        var path = $"/api/session/{Uri.EscapeDataString(sessionId.Trim())}";
+        _ = await PatchJsonRawAsync(path, new { title = title.Trim() }, cancellationToken).ConfigureAwait(false);
+        var updated = await GetJsonAsync<JsonElement>(path, cancellationToken).ConfigureAwait(false);
         if (!TryBuildSessionSummary(updated, sessionId.Trim(), out var summary))
         {
             throw new InvalidOperationException("Opencode returned an unexpected payload while updating the session title.");
@@ -1525,7 +1840,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             throw new ArgumentException("sessionId is required.", nameof(sessionId));
         }
 
-        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}";
+        var path = $"/api/session/{Uri.EscapeDataString(sessionId.Trim())}";
         var raw = await DeleteRawAsync(path, cancellationToken).ConfigureAwait(false);
         return TryInterpretBooleanResponse(raw, true);
     }
@@ -1538,21 +1853,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         var body = new Dictionary<string, object?>();
-        if (!string.IsNullOrWhiteSpace(providerId))
-        {
-            var provider = providerId.Trim();
-            body["providerID"] = provider;
-            body["providerId"] = provider;
-        }
-
-        if (!string.IsNullOrWhiteSpace(modelId))
-        {
-            var model = modelId.Trim();
-            body["modelID"] = model;
-            body["modelId"] = model;
-        }
-
-        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}/summarize";
+        var path = $"/api/session/{Uri.EscapeDataString(sessionId.Trim())}/compact";
         var raw = await PostJsonRawAsync(path, body, cancellationToken).ConfigureAwait(false);
         return TryInterpretBooleanResponse(raw, true);
     }
@@ -1564,21 +1865,30 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             throw new ArgumentException("sessionId is required.", nameof(sessionId));
         }
 
-        var path = $"/session/{Uri.EscapeDataString(sessionId.Trim())}/abort";
+        var path = $"/api/session/{Uri.EscapeDataString(sessionId.Trim())}/interrupt";
         var raw = await PostJsonRawAsync(path, new { }, cancellationToken).ConfigureAwait(false);
         return TryInterpretBooleanResponse(raw, true);
     }
 
     public IReadOnlyList<HarnessProjectSummary> ListProjects(CancellationToken cancellationToken)
     {
-        var root = GetJsonAsync<JsonElement>("/project", cancellationToken).GetAwaiter().GetResult();
+        var root = GetJsonAsync<JsonElement>("/api/project", cancellationToken).GetAwaiter().GetResult();
         return ParseProjectList(root);
     }
 
     public HarnessProjectSummary? GetCurrentProject(CancellationToken cancellationToken)
     {
-        var root = GetJsonAsync<JsonElement>("/project/current", cancellationToken).GetAwaiter().GetResult();
-        return TryBuildProjectSummary(root, null, out var project) ? project : null;
+        var location = GetJsonAsync<JsonElement>("/api/location", cancellationToken).GetAwaiter().GetResult();
+        if (location.ValueKind == JsonValueKind.Object
+            && location.TryGetProperty("project", out var projectElement)
+            && TryBuildProjectSummary(projectElement, null, out var projectFromLocation)
+            && projectFromLocation != null)
+        {
+            return projectFromLocation with { Current = true };
+        }
+
+        var projects = ListProjects(cancellationToken);
+        return projects.FirstOrDefault();
     }
 
     private static IEnumerable<string> EnumerateProviderDefaultModelIds(OpencodeProviderEntry provider)
@@ -1673,9 +1983,33 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             return false;
         }
 
-        var id = TryGetStringPropertyAny(element, out var parsedId, "id", "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedId)
-            ? parsedId!.Trim()
-            : fallbackId?.Trim();
+        // OpenCode v2 frequently wraps session payloads in event/data envelopes.
+        if (element.TryGetProperty("data", out var dataElement)
+            && dataElement.ValueKind == JsonValueKind.Object
+            && TryBuildSessionSummary(dataElement, fallbackId, out summary))
+        {
+            return true;
+        }
+
+        if (element.TryGetProperty("session", out var sessionElement)
+            && sessionElement.ValueKind == JsonValueKind.Object
+            && TryBuildSessionSummary(sessionElement, fallbackId, out summary))
+        {
+            return true;
+        }
+
+        // Prefer explicit session identifiers before generic "id" fields (event IDs, etc.).
+        var id = TryGetStringPropertyAny(element, out var parsedSessionId, "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedSessionId)
+            ? parsedSessionId!.Trim()
+            : null;
+        if (string.IsNullOrWhiteSpace(id)
+            && TryGetStringPropertyAny(element, out var parsedId, "id")
+            && !string.IsNullOrWhiteSpace(parsedId))
+        {
+            id = parsedId!.Trim();
+        }
+
+        id ??= fallbackId?.Trim();
         if (string.IsNullOrWhiteSpace(id))
         {
             return false;
@@ -1852,7 +2186,10 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 foreach (var property in element.EnumerateObject())
                 {
                     string? nextProvider = inheritedProvider;
-                    if ((property.NameEquals("provider") || property.NameEquals("providerId") || property.NameEquals("provider_id"))
+                    if ((property.NameEquals("provider")
+                        || property.NameEquals("providerID")
+                        || property.NameEquals("providerId")
+                        || property.NameEquals("provider_id"))
                         && property.Value.ValueKind == JsonValueKind.String)
                     {
                         nextProvider = property.Value.GetString();
@@ -1901,7 +2238,8 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
     private static bool TryBuildModelSummary(JsonElement element, string? inheritedProvider, out HarnessModelSummary? summary)
     {
         summary = null;
-        if (!TryGetStringProperty(element, "id", out var id) || string.IsNullOrWhiteSpace(id))
+        if (!TryGetStringPropertyAny(element, out var id, "id", "modelID", "modelId", "model_id")
+            || string.IsNullOrWhiteSpace(id))
         {
             return false;
         }
@@ -1913,9 +2251,17 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             : idValue;
 
         string? provider = null;
-        if (TryGetStringProperty(element, "provider", out var parsedProvider) && !string.IsNullOrWhiteSpace(parsedProvider))
+        if (TryGetStringPropertyAny(element, out var parsedProvider, "provider", "providerID", "providerId", "provider_id")
+            && !string.IsNullOrWhiteSpace(parsedProvider))
         {
             provider = parsedProvider.Trim();
+        }
+        else if (element.ValueKind == JsonValueKind.Object
+            && element.TryGetProperty("settings", out var settings)
+            && TryGetStringPropertyAny(settings, out var settingsProvider, "provider", "providerID", "providerId", "provider_id")
+            && !string.IsNullOrWhiteSpace(settingsProvider))
+        {
+            provider = settingsProvider.Trim();
         }
         else if (!string.IsNullOrWhiteSpace(inheritedProvider))
         {
@@ -1985,63 +2331,58 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         var body = BuildSessionCreateBody(title, options?.ModelId, null);
         Console.WriteLine($"[opencode] POST /session payload: {JsonSerializer.Serialize(body, _jsonOptions)}");
-        var created = await PostJsonAsync<OpencodeSessionInfo>("/session", body, cancellationToken).ConfigureAwait(false);
-        if (created == null || string.IsNullOrWhiteSpace(created.Id))
+        var created = await PostJsonAsync<JsonElement>("/api/session", body, cancellationToken).ConfigureAwait(false);
+        if (!TryBuildSessionSummary(created, null, out var createdSummary) || string.IsNullOrWhiteSpace(createdSummary?.Id))
         {
             throw new InvalidOperationException("Opencode server created a session without an ID.");
         }
 
-        var sessionId = _sessionIds.GetOrAdd(conversationKey, created.Id);
+        var sessionId = _sessionIds.GetOrAdd(conversationKey, createdSummary!.Id);
         TrackRequestedSessionModel(sessionId, options?.ModelId);
         return sessionId;
     }
 
     private async Task<HarnessChatReply> SendToSessionAsync(string sessionId, string message, HarnessSendOptions? options, CancellationToken cancellationToken)
     {
+        var startedAt = DateTimeOffset.UtcNow;
         var outboundMessage = BuildOutboundMessage(message, options?.ThinkingLevel, options?.SystemPrompt);
         var body = new Dictionary<string, object?>
         {
-            ["parts"] = new[]
-            {
-                new
-                {
-                    type = "text",
-                    text = outboundMessage
-                }
-            }
+            ["text"] = outboundMessage,
+            ["resume"] = true,
+            ["delivery"] = "queue"
         };
 
-        if (TryParseProviderAndModel(options?.ModelId, out var providerId, out var modelLeaf))
+        var promptPath = $"/api/session/{Uri.EscapeDataString(sessionId)}/prompt";
+        _ = await PostJsonRawAsync(promptPath, body, cancellationToken).ConfigureAwait(false);
+
+        var waitPath = $"/api/experimental/session/{Uri.EscapeDataString(sessionId)}/wait";
+        _ = await PostJsonRawAsync(waitPath, new { }, cancellationToken).ConfigureAwait(false);
+
+        var messagesPath = $"/api/session/{Uri.EscapeDataString(sessionId)}/message?order=desc&limit=40";
+        var messagesRoot = await GetJsonAsync<JsonElement>(messagesPath, cancellationToken).ConfigureAwait(false);
+        var hasAssistantReply = TryExtractLatestAssistantReply(messagesRoot, out var text, out var usage);
+        var isNonTextReplyPlaceholder = hasAssistantReply && IsNonTextReplyPlaceholder(text);
+        if (!hasAssistantReply || isNonTextReplyPlaceholder)
         {
-            body["model"] = new Dictionary<string, object?>
+            if (TryTakeRecentExecutionFailure(sessionId, startedAt, out var failureMessage))
             {
-                ["providerID"] = providerId,
-                ["modelID"] = modelLeaf,
-            };
-            Console.WriteLine($"[opencode] POST /session/{sessionId}/message model pin model.providerID={providerId} model.modelID={modelLeaf}");
-        }
-
-        var rawReply = await PostJsonRawAsync($"/session/{sessionId}/message", body, cancellationToken).ConfigureAwait(false);
-        var reply = DeserializeStrictChatReply(rawReply, $"/session/{sessionId}/message");
-
-        var usage = ExtractUsage(reply);
-        if (usage != null)
-        {
-            Console.WriteLine($"[opencode:usage] session={sessionId} cost={usage.Cost?.ToString() ?? "n/a"} input={usage.InputTokens?.ToString() ?? "n/a"} output={usage.OutputTokens?.ToString() ?? "n/a"} reasoning={usage.ReasoningTokens?.ToString() ?? "n/a"} cacheRead={usage.CacheReadTokens?.ToString() ?? "n/a"} cacheWrite={usage.CacheWriteTokens?.ToString() ?? "n/a"}");
-        }
-
-        var text = ExtractReplyText(reply, rawReply, out var hasUsableText);
-        if (TryGetEmbeddedError(rawReply, out var embeddedError))
-        {
-            if (hasUsableText)
-            {
-                // Some Opencode backends include non-fatal tool errors alongside final assistant text.
-                Console.WriteLine($"[opencode] embedded API warning ({embeddedError.StatusCode?.ToString() ?? "n/a"}): {embeddedError.Message}");
+                text = $"OpenCode failed to execute this request: {failureMessage}";
             }
             else
             {
-                throw new OpencodeEmbeddedErrorException(embeddedError.Message, embeddedError.StatusCode);
+                text = hasAssistantReply
+                    ? "(OpenCode completed this turn without a text reply.)"
+                    : "(No reply text was returned by Opencode.)";
+                if (!hasAssistantReply)
+                {
+                    usage = null;
+                }
             }
+        }
+        else
+        {
+            _lastExecutionFailureBySession.TryRemove(sessionId.Trim(), out _);
         }
 
         var isConfirmationPrompt = IsLikelyConfirmationPrompt(text);
@@ -2062,13 +2403,12 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         if (TryParseProviderAndModel(configuredModelId, out var providerId, out var modelLeaf))
         {
-            var canonicalModelId = configuredModelId!.Trim();
             body["model"] = new Dictionary<string, object?>
             {
                 ["id"] = modelLeaf,
                 ["providerID"] = providerId,
             };
-            Console.WriteLine($"[opencode] creating session with model.id={modelLeaf} model.providerID={providerId} (canonical={canonicalModelId})");
+            Console.WriteLine($"[opencode] creating session with model.id={modelLeaf} model.providerID={providerId}");
         }
 
         return body;
@@ -2506,6 +2846,22 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
     private static string? BuildPermissionDescription(JsonElement element)
     {
+        var action = TryGetStringPropertyAny(element, out var parsedAction, "action")
+            && !string.IsNullOrWhiteSpace(parsedAction)
+            ? parsedAction!.Trim()
+            : null;
+
+        var requestedResources = new List<string>();
+        AddStringOrStringArrayPropertyValues(element, "resources", requestedResources);
+        AddStringOrStringArrayPropertyValues(element, "resource", requestedResources);
+        AddStringOrStringArrayPropertyValues(element, "paths", requestedResources);
+        AddStringOrStringArrayPropertyValues(element, "path", requestedResources);
+        requestedResources = requestedResources
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         var patterns = new List<string>();
         AddStringOrStringArrayPropertyValues(element, "patterns", patterns);
         AddStringOrStringArrayPropertyValues(element, "pattern", patterns);
@@ -2538,6 +2894,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         var alwaysPatterns = new List<string>();
         AddStringOrStringArrayPropertyValues(element, "always", alwaysPatterns);
+        AddStringOrStringArrayPropertyValues(element, "save", alwaysPatterns);
         alwaysPatterns = alwaysPatterns
             .Where(v => !string.IsNullOrWhiteSpace(v))
             .Select(v => v.Trim())
@@ -2548,6 +2905,62 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             && !string.IsNullOrWhiteSpace(parsedScope)
             ? parsedScope!.Trim()
             : null;
+
+        if (requestedResources.Count > 0 || !string.IsNullOrWhiteSpace(action))
+        {
+            var detailLines = new List<string>();
+            if (!string.IsNullOrWhiteSpace(action))
+            {
+                detailLines.Add($"Action: {action}");
+            }
+
+            if (requestedResources.Count > 0)
+            {
+                detailLines.Add("Requested resource(s):");
+                foreach (var resource in requestedResources.Take(10))
+                {
+                    detailLines.Add("- " + resource);
+                }
+
+                if (requestedResources.Count > 10)
+                {
+                    detailLines.Add($"- ...and {requestedResources.Count - 10} more");
+                }
+            }
+
+            if (alwaysPatterns.Count > 0)
+            {
+                detailLines.Add("Remembered pattern(s) if approved always:");
+                foreach (var alwaysPattern in alwaysPatterns.Take(10))
+                {
+                    detailLines.Add("- " + alwaysPattern);
+                }
+
+                if (alwaysPatterns.Count > 10)
+                {
+                    detailLines.Add($"- ...and {alwaysPatterns.Count - 10} more");
+                }
+            }
+
+            if (element.TryGetProperty("source", out var sourceElement)
+                && sourceElement.ValueKind == JsonValueKind.Object)
+            {
+                var sourceType = TryGetStringPropertyAny(sourceElement, out var parsedSourceType, "type")
+                    && !string.IsNullOrWhiteSpace(parsedSourceType)
+                    ? parsedSourceType!.Trim()
+                    : "unknown";
+                var sourceId = TryGetStringPropertyAny(sourceElement, out var parsedSourceId, "id")
+                    && !string.IsNullOrWhiteSpace(parsedSourceId)
+                    ? parsedSourceId!.Trim()
+                    : null;
+
+                detailLines.Add(sourceId == null
+                    ? $"Source: {sourceType}"
+                    : $"Source: {sourceType} ({sourceId})");
+            }
+
+            return string.Join('\n', detailLines);
+        }
 
         if (patterns.Count == 0)
         {
@@ -2634,6 +3047,76 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
     }
 
+    private static IReadOnlyList<HarnessPendingQuestion> ParsePendingQuestionsFromForms(JsonElement root)
+    {
+        var found = new List<HarnessPendingQuestion>();
+        var forms = TryGetArrayPropertyAny(root, out var wrappedArray, "data", "items", "forms") ? wrappedArray : root;
+        if (forms.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<HarnessPendingQuestion>();
+        }
+
+        foreach (var form in forms.EnumerateArray())
+        {
+            if (!TryGetStringPropertyAny(form, out var formId, "id") || string.IsNullOrWhiteSpace(formId))
+            {
+                continue;
+            }
+
+            var sessionId = TryGetStringPropertyAny(form, out var parsedSessionId, "sessionID", "sessionId") && !string.IsNullOrWhiteSpace(parsedSessionId)
+                ? parsedSessionId!.Trim()
+                : string.Empty;
+            var header = TryGetStringPropertyAny(form, out var parsedTitle, "title", "name") && !string.IsNullOrWhiteSpace(parsedTitle)
+                ? parsedTitle!.Trim()
+                : formId!.Trim();
+            var prompt = header;
+            var options = new List<string>();
+            bool? allowsMultiple = null;
+            bool? allowsCustom = null;
+
+            if (form.TryGetProperty("fields", out var fields) && fields.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var field in fields.EnumerateArray())
+                {
+                    if (TryGetStringProperty(field, "type", out var fieldType)
+                        && string.Equals(fieldType, "multiselect", StringComparison.OrdinalIgnoreCase))
+                    {
+                        allowsMultiple = true;
+                    }
+
+                    if (field.TryGetProperty("custom", out var customElement)
+                        && customElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    {
+                        allowsCustom = customElement.GetBoolean();
+                    }
+
+                    if (field.TryGetProperty("options", out var fieldOptions) && fieldOptions.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var option in fieldOptions.EnumerateArray())
+                        {
+                            if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
+                            {
+                                options.Add(label.Trim());
+                            }
+                            else if (TryGetStringProperty(option, "value", out var value) && !string.IsNullOrWhiteSpace(value))
+                            {
+                                options.Add(value.Trim());
+                            }
+                        }
+                    }
+                }
+            }
+
+            found.Add(new HarnessPendingQuestion(formId!.Trim(), sessionId, header, prompt, options, allowsMultiple, allowsCustom));
+        }
+
+        return found
+            .GroupBy(q => q.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(q => q.Header, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static IReadOnlyList<HarnessPendingQuestion> ParsePendingQuestions(JsonElement root)
     {
         var found = new List<HarnessPendingQuestion>();
@@ -2683,9 +3166,13 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             return false;
         }
 
+        var hasQuestionsArray = TryGetArrayPropertyAny(element, out var questionsArray, "questions");
+        var hasFieldsArray = element.TryGetProperty("fields", out var fieldsArray)
+            && fieldsArray.ValueKind == JsonValueKind.Array;
         var hasRequestShape = TryGetStringProperty(element, "id", out var parsedId)
             && !string.IsNullOrWhiteSpace(parsedId)
-            && (TryGetArrayPropertyAny(element, out _, "questions")
+            && (hasQuestionsArray
+                || hasFieldsArray
                 || TryGetStringPropertyAny(element, out _, "question", "header"));
         if (!hasRequestShape)
         {
@@ -2693,15 +3180,15 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         var id = parsedId!.Trim();
-        if (!id.StartsWith("que", StringComparison.OrdinalIgnoreCase))
+        var isQuestionRequest = id.StartsWith("que", StringComparison.OrdinalIgnoreCase);
+        var isFormRequest = id.StartsWith("frm", StringComparison.OrdinalIgnoreCase);
+        if (!isQuestionRequest && !isFormRequest)
         {
             return false;
         }
 
-        // Only accept canonical question request records here; do not infer prompts from
-        // generic event envelopes that merely happen to carry a question-like field.
-        var hasCanonicalQuestionId = id.StartsWith("que", StringComparison.OrdinalIgnoreCase);
-        if (!hasCanonicalQuestionId)
+        // Guard against generic event envelopes.
+        if (isFormRequest && !hasFieldsArray)
         {
             return false;
         }
@@ -2716,9 +3203,9 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         bool? custom = null;
         var options = new List<string>();
 
-        if (element.TryGetProperty("questions", out var questions) && questions.ValueKind == JsonValueKind.Array)
+        if (hasQuestionsArray && questionsArray.ValueKind == JsonValueKind.Array)
         {
-            var first = questions.EnumerateArray().FirstOrDefault();
+            var first = questionsArray.EnumerateArray().FirstOrDefault();
             if (first.ValueKind == JsonValueKind.Object)
             {
                 header = TryGetStringProperty(first, "header", out var parsedHeader) && !string.IsNullOrWhiteSpace(parsedHeader)
@@ -2751,6 +3238,83 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 }
             }
         }
+        else if (hasFieldsArray && fieldsArray.ValueKind == JsonValueKind.Array)
+        {
+            header = TryGetStringPropertyAny(element, out var parsedTitle, "title", "name") && !string.IsNullOrWhiteSpace(parsedTitle)
+                ? parsedTitle!.Trim()
+                : id;
+            prompt = TryGetStringPropertyAny(element, out var parsedPrompt, "question", "prompt", "description") && !string.IsNullOrWhiteSpace(parsedPrompt)
+                ? parsedPrompt!.Trim()
+                : header;
+
+            var firstField = fieldsArray.EnumerateArray().FirstOrDefault();
+            if (firstField.ValueKind == JsonValueKind.Object)
+            {
+                if ((string.IsNullOrWhiteSpace(header) || header.Equals("Questions", StringComparison.OrdinalIgnoreCase))
+                    && TryGetStringPropertyAny(firstField, out var fieldHeader, "title", "label")
+                    && !string.IsNullOrWhiteSpace(fieldHeader))
+                {
+                    header = fieldHeader!.Trim();
+                }
+
+                if ((string.IsNullOrWhiteSpace(prompt) || prompt.Equals(header, StringComparison.OrdinalIgnoreCase))
+                    && TryGetStringPropertyAny(firstField, out var fieldPrompt, "description", "question", "prompt")
+                    && !string.IsNullOrWhiteSpace(fieldPrompt))
+                {
+                    prompt = fieldPrompt!.Trim();
+                }
+            }
+
+            foreach (var field in fieldsArray.EnumerateArray())
+            {
+                if (field.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                if (TryGetStringProperty(field, "type", out var fieldType)
+                    && string.Equals(fieldType, "multiselect", StringComparison.OrdinalIgnoreCase))
+                {
+                    multiple = true;
+                }
+
+                if (field.TryGetProperty("custom", out var customElement)
+                    && customElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    custom = customElement.GetBoolean();
+                }
+
+                if (field.TryGetProperty("options", out var optionElements) && optionElements.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var option in optionElements.EnumerateArray())
+                    {
+                        if (option.ValueKind == JsonValueKind.String)
+                        {
+                            var rawOption = option.GetString();
+                            if (!string.IsNullOrWhiteSpace(rawOption))
+                            {
+                                options.Add(rawOption.Trim());
+                            }
+                            continue;
+                        }
+
+                        if (option.ValueKind != JsonValueKind.Object)
+                        {
+                            continue;
+                        }
+
+                        if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
+                        {
+                            options.Add(label.Trim());
+                        }
+                        else if (TryGetStringProperty(option, "value", out var value) && !string.IsNullOrWhiteSpace(value))
+                        {
+                            options.Add(value.Trim());
+                        }
+                    }
+                }
+            }
+        }
 
         if (string.IsNullOrWhiteSpace(header))
         {
@@ -2771,7 +3335,16 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         var payloads = new List<Dictionary<string, object?>>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        void Add(string reply)
+        void AddPayload(Dictionary<string, object?> payload)
+        {
+            var serialized = JsonSerializer.Serialize(payload);
+            if (seen.Add(serialized))
+            {
+                payloads.Add(payload);
+            }
+        }
+
+        void AddLegacyReply(string reply)
         {
             var payload = new Dictionary<string, object?>
             {
@@ -2782,26 +3355,54 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 payload["message"] = "remember";
             }
 
-            var serialized = JsonSerializer.Serialize(payload);
-            if (seen.Add(serialized))
+            AddPayload(payload);
+        }
+
+        void AddDecision(string decision, bool? rememberDecision = null)
+        {
+            var payload = new Dictionary<string, object?>
             {
-                payloads.Add(payload);
+                ["decision"] = decision
+            };
+
+            // Some server builds expect remember as a sibling flag, others encode it in decision text.
+            if (rememberDecision.HasValue)
+            {
+                payload["remember"] = rememberDecision.Value;
             }
+
+            AddPayload(payload);
         }
 
         if (normalizedResponse is "allow" or "approve" or "accept" or "yes" or "y")
         {
-            Add(remember ? "always" : "once");
+            AddDecision("yes", remember ? true : null);
+            AddDecision("allow", remember ? true : null);
+            AddDecision("approve", remember ? true : null);
+            AddDecision(remember ? "yes_always" : "yes");
+            AddDecision(remember ? "allow_always" : "allow");
+            AddDecision(remember ? "always" : "once");
+
+            // Backward-compatible payload shape used by earlier bridges.
+            AddLegacyReply(remember ? "always" : "once");
             return payloads;
         }
 
         if (normalizedResponse is "reject" or "deny" or "no" or "n")
         {
-            Add("reject");
+            AddDecision("no", remember ? true : null);
+            AddDecision("deny", remember ? true : null);
+            AddDecision("reject", remember ? true : null);
+            AddDecision(remember ? "no_always" : "no");
+            AddDecision(remember ? "deny_always" : "deny");
+
+            // Backward-compatible payload shape used by earlier bridges.
+            AddLegacyReply("reject");
             return payloads;
         }
 
-        Add(normalizedResponse);
+        AddDecision(normalizedResponse);
+        AddLegacyReply(normalizedResponse);
         return payloads;
     }
 
@@ -3058,6 +3659,215 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         return element.GetRawText();
     }
 
+    private async Task<List<OpencodeProviderInfo>> GetProviderInfoListAsync(CancellationToken cancellationToken)
+    {
+        var root = await GetJsonAsync<JsonElement>("/api/provider", cancellationToken).ConfigureAwait(false);
+        var providers = new List<OpencodeProviderInfo>();
+        var data = TryGetArrayPropertyAny(root, out var wrapped, "data", "all", "providers", "items") ? wrapped : root;
+        if (data.ValueKind != JsonValueKind.Array)
+        {
+            return providers;
+        }
+
+        foreach (var item in data.EnumerateArray())
+        {
+            if (!TryGetStringPropertyAny(item, out var id, "id") || string.IsNullOrWhiteSpace(id))
+            {
+                continue;
+            }
+
+            var name = TryGetStringPropertyAny(item, out var parsedName, "name") && !string.IsNullOrWhiteSpace(parsedName)
+                ? parsedName!.Trim()
+                : id!.Trim();
+            var integrationId = TryGetStringPropertyAny(item, out var parsedIntegrationId, "integrationID", "integrationId") && !string.IsNullOrWhiteSpace(parsedIntegrationId)
+                ? parsedIntegrationId!.Trim()
+                : null;
+            var activation = TryGetStringPropertyAny(item, out var parsedActivation, "activation") && !string.IsNullOrWhiteSpace(parsedActivation)
+                ? parsedActivation!.Trim()
+                : null;
+            providers.Add(new OpencodeProviderInfo(id!.Trim(), name, integrationId, activation));
+        }
+
+        return providers;
+    }
+
+    private async Task<string> ResolveProviderIntegrationIdAsync(string providerId, CancellationToken cancellationToken)
+    {
+        var providers = await GetProviderInfoListAsync(cancellationToken).ConfigureAwait(false);
+        var match = providers.FirstOrDefault(p => p.Id.Equals(providerId, StringComparison.OrdinalIgnoreCase));
+        if (match == null || string.IsNullOrWhiteSpace(match.IntegrationId))
+        {
+            throw new InvalidOperationException($"Provider '{providerId}' does not expose an integrationID in the OpenCode v2 API.");
+        }
+
+        return match.IntegrationId!;
+    }
+
+    private async Task<Dictionary<string, List<OpencodeIntegrationMethod>>> GetIntegrationInfoListAsync(CancellationToken cancellationToken)
+    {
+        var root = await GetJsonAsync<JsonElement>("/api/integration", cancellationToken).ConfigureAwait(false);
+        var map = new Dictionary<string, List<OpencodeIntegrationMethod>>(StringComparer.OrdinalIgnoreCase);
+        var data = TryGetArrayPropertyAny(root, out var wrapped, "data", "all", "items") ? wrapped : root;
+        if (data.ValueKind != JsonValueKind.Array)
+        {
+            return map;
+        }
+
+        foreach (var integration in data.EnumerateArray())
+        {
+            if (!TryGetStringPropertyAny(integration, out var integrationId, "id") || string.IsNullOrWhiteSpace(integrationId))
+            {
+                continue;
+            }
+
+            var methods = new List<OpencodeIntegrationMethod>();
+            if (integration.TryGetProperty("methods", out var methodArray) && methodArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var method in methodArray.EnumerateArray())
+                {
+                    var id = TryGetStringPropertyAny(method, out var methodId, "id") && !string.IsNullOrWhiteSpace(methodId)
+                        ? methodId!.Trim()
+                        : string.Empty;
+                    var type = TryGetStringPropertyAny(method, out var methodType, "type") && !string.IsNullOrWhiteSpace(methodType)
+                        ? methodType!.Trim()
+                        : "unknown";
+                    var label = TryGetStringPropertyAny(method, out var methodLabel, "label") && !string.IsNullOrWhiteSpace(methodLabel)
+                        ? methodLabel!.Trim()
+                        : type;
+                    methods.Add(new OpencodeIntegrationMethod(id, type, label));
+                }
+            }
+
+            map[integrationId!.Trim()] = methods;
+        }
+
+        return map;
+    }
+
+    private async Task<OpencodeIntegrationMethod> ResolveIntegrationMethodAsync(string integrationId, int methodIndex, CancellationToken cancellationToken)
+    {
+        var integrations = await GetIntegrationInfoListAsync(cancellationToken).ConfigureAwait(false);
+        if (!integrations.TryGetValue(integrationId, out var methods) || methods.Count == 0)
+        {
+            throw new InvalidOperationException($"Integration '{integrationId}' exposes no auth methods.");
+        }
+
+        if (methodIndex < 0 || methodIndex >= methods.Count)
+        {
+            throw new InvalidOperationException($"Integration '{integrationId}' method index {methodIndex} is out of range.");
+        }
+
+        return methods[methodIndex];
+    }
+
+    private static bool TryExtractLatestAssistantReply(JsonElement root, out string text, out HarnessUsageSummary? usage)
+    {
+        text = string.Empty;
+        usage = null;
+
+        var data = TryGetArrayPropertyAny(root, out var wrapped, "data", "messages", "items") ? wrapped : root;
+        if (data.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var entry in data.EnumerateArray())
+        {
+            if (TryGetStringPropertyAny(entry, out var entryType, "type")
+                && string.Equals(entryType, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                // Message list is requested in descending order, so hitting a newer user
+                // turn before any assistant reply means this prompt has no assistant output.
+                return false;
+            }
+
+            if (!TryGetStringPropertyAny(entry, out var type, "type")
+                || !string.Equals(type, "assistant", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var parts = new List<string>();
+            if (entry.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var part in content.EnumerateArray())
+                {
+                    if (TryGetStringProperty(part, "type", out var partType)
+                        && string.Equals(partType, "text", StringComparison.OrdinalIgnoreCase)
+                        && TryGetStringProperty(part, "text", out var partText)
+                        && !string.IsNullOrWhiteSpace(partText))
+                    {
+                        parts.Add(partText!.Trim());
+                    }
+                }
+            }
+
+            if (parts.Count > 0)
+            {
+                text = string.Join(Environment.NewLine, parts);
+            }
+            else
+            {
+                text = "(Opencode returned a non-text reply payload.)";
+            }
+
+            usage = BuildUsageSummaryFromAssistantEntry(entry);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static HarnessUsageSummary? BuildUsageSummaryFromAssistantEntry(JsonElement entry)
+    {
+        var cost = entry.TryGetProperty("cost", out var costElement) && costElement.ValueKind == JsonValueKind.Number
+            ? costElement.GetDouble()
+            : (double?)null;
+
+        int? input = null;
+        int? output = null;
+        int? reasoning = null;
+        int? cacheRead = null;
+        int? cacheWrite = null;
+        if (entry.TryGetProperty("tokens", out var tokens) && tokens.ValueKind == JsonValueKind.Object)
+        {
+            if (tokens.TryGetProperty("input", out var inputElement) && inputElement.ValueKind == JsonValueKind.Number && inputElement.TryGetInt32(out var parsedInput))
+            {
+                input = parsedInput;
+            }
+
+            if (tokens.TryGetProperty("output", out var outputElement) && outputElement.ValueKind == JsonValueKind.Number && outputElement.TryGetInt32(out var parsedOutput))
+            {
+                output = parsedOutput;
+            }
+
+            if (tokens.TryGetProperty("reasoning", out var reasoningElement) && reasoningElement.ValueKind == JsonValueKind.Number && reasoningElement.TryGetInt32(out var parsedReasoning))
+            {
+                reasoning = parsedReasoning;
+            }
+
+            if (tokens.TryGetProperty("cache", out var cacheElement) && cacheElement.ValueKind == JsonValueKind.Object)
+            {
+                if (cacheElement.TryGetProperty("read", out var readElement) && readElement.ValueKind == JsonValueKind.Number && readElement.TryGetInt32(out var parsedRead))
+                {
+                    cacheRead = parsedRead;
+                }
+
+                if (cacheElement.TryGetProperty("write", out var writeElement) && writeElement.ValueKind == JsonValueKind.Number && writeElement.TryGetInt32(out var parsedWrite))
+                {
+                    cacheWrite = parsedWrite;
+                }
+            }
+        }
+
+        if (cost == null && input == null && output == null && reasoning == null && cacheRead == null && cacheWrite == null)
+        {
+            return null;
+        }
+
+        return new HarnessUsageSummary(cost, input, output, reasoning, cacheRead, cacheWrite);
+    }
+
     private void TrackSessionStatusEvent(HarnessSessionStatusEvent statusEvent)
     {
         if (string.IsNullOrWhiteSpace(statusEvent.SessionId))
@@ -3066,6 +3876,38 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
 
         _lastSessionStatusBySession[statusEvent.SessionId.Trim()] = statusEvent;
+    }
+
+    private void TrackSessionExecutionFailure(string sessionId, string message)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        _lastExecutionFailureBySession[sessionId.Trim()] = new SessionExecutionFailureSnapshot(
+            string.IsNullOrWhiteSpace(message) ? "Session execution failed." : message.Trim(),
+            DateTimeOffset.UtcNow);
+    }
+
+    private bool TryTakeRecentExecutionFailure(string sessionId, DateTimeOffset startedAt, out string message)
+    {
+        message = string.Empty;
+        if (string.IsNullOrWhiteSpace(sessionId)
+            || !_lastExecutionFailureBySession.TryGetValue(sessionId.Trim(), out var snapshot))
+        {
+            return false;
+        }
+
+        // Allow slight clock skew/race between prompt enqueue and event observer.
+        if (snapshot.ObservedAt < startedAt.AddSeconds(-1))
+        {
+            return false;
+        }
+
+        _lastExecutionFailureBySession.TryRemove(sessionId.Trim(), out _);
+        message = snapshot.Message;
+        return true;
     }
 
     private IReadOnlyDictionary<string, string> BuildSessionStatusSnapshotFromEvents()
@@ -3096,6 +3938,12 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         return normalized.Contains("yes/no", StringComparison.Ordinal)
             || normalized.Contains("y/n", StringComparison.Ordinal)
             || (normalized.Contains("confirm", StringComparison.Ordinal) && normalized.Contains('?'));
+    }
+
+    private static bool IsNonTextReplyPlaceholder(string text)
+    {
+        return !string.IsNullOrWhiteSpace(text)
+            && text.Trim().Equals("(Opencode returned a non-text reply payload.)", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string TruncateForLog(string value, int maxLength)
@@ -3257,21 +4105,9 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
     private async Task<bool> IsProviderConfiguredAsync(string providerId, CancellationToken cancellationToken)
     {
-        var available = await ListAvailableProvidersAsync(cancellationToken).ConfigureAwait(false);
-        var availableMatch = available.FirstOrDefault(p => p.Id.Equals(providerId, StringComparison.OrdinalIgnoreCase));
-        if (availableMatch != null && availableMatch.Connected == true)
-        {
-            return true;
-        }
-
-        var configured = await ListProvidersAsync(cancellationToken).ConfigureAwait(false);
-        if (configured.Any(p => p.Id.Equals(providerId, StringComparison.OrdinalIgnoreCase)))
-        {
-            return true;
-        }
-
-        var models = await ListModelsAsync(providerId, cancellationToken).ConfigureAwait(false);
-        return models.Count > 0;
+        var providers = await GetProviderInfoListAsync(cancellationToken).ConfigureAwait(false);
+        var match = providers.FirstOrDefault(p => p.Id.Equals(providerId, StringComparison.OrdinalIgnoreCase));
+        return match != null && !string.Equals(match.Activation, "disabled", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildOAuthStateKey(string providerId, int methodIndex)
@@ -3281,7 +4117,9 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
     private static OpencodeOAuthPendingState ParseOAuthPendingState(
         string providerId,
+        string integrationId,
         int methodIndex,
+        string? methodId,
         string raw,
         OpencodeOAuthAuthorizeResponse parsed)
     {
@@ -3323,10 +4161,13 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
         return new OpencodeOAuthPendingState(
             providerId,
+            integrationId,
             methodIndex,
+            methodId,
             parsed.Url,
             parsed.Method,
             parsed.Instructions,
+            parsed.AttemptId,
             code,
             userCode,
             deviceCode);
@@ -3353,7 +4194,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         {
             AddPayload(new Dictionary<string, object?>
             {
-                ["method"] = methodIndex,
                 ["code"] = explicitCode.Trim()
             });
         }
@@ -3378,28 +4218,22 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         {
             AddPayload(new Dictionary<string, object?>
             {
-                ["method"] = methodIndex,
                 ["code"] = candidate
             });
 
             AddPayload(new Dictionary<string, object?>
             {
-                ["method"] = methodIndex,
                 ["deviceCode"] = candidate
             });
 
             AddPayload(new Dictionary<string, object?>
             {
-                ["method"] = methodIndex,
                 ["device_code"] = candidate
             });
         }
 
         // Final fallback for callback endpoints that track state server-side.
-        AddPayload(new Dictionary<string, object?>
-        {
-            ["method"] = methodIndex
-        });
+        AddPayload(new Dictionary<string, object?>());
 
         return payloads;
     }
@@ -3503,6 +4337,8 @@ internal sealed class OpencodeModelCatalogEntry
 
 internal sealed class OpencodeOAuthAuthorizeResponse
 {
+    [JsonPropertyName("attemptID")]
+    public string? AttemptId { get; set; }
     public string? Url { get; set; }
     public string? Method { get; set; }
     public string? Instructions { get; set; }
@@ -3515,13 +4351,27 @@ internal sealed class OpencodeRuntimeConfig
 
 internal sealed record OpencodeOAuthPendingState(
     string ProviderId,
+    string IntegrationId,
     int MethodIndex,
+    string? MethodId,
     string? Url,
     string? Method,
     string? Instructions,
+    string? AttemptId,
     string? Code,
     string? UserCode,
     string? DeviceCode);
+
+internal sealed record OpencodeProviderInfo(
+    string Id,
+    string Name,
+    string? IntegrationId,
+    string? Activation);
+
+internal sealed record OpencodeIntegrationMethod(
+    string Id,
+    string Type,
+    string? Label);
 
 internal sealed record OpencodeSessionInfo(string Id);
 
@@ -3561,4 +4411,7 @@ internal sealed class OpencodeEmbeddedErrorException : Exception
 }
 
 internal readonly record struct EmbeddedOpencodeError(string Message, int? StatusCode);
+internal sealed record FormFieldBinding(string Key, bool IsMulti);
+internal sealed record SessionExecutionFailedEvent(string SessionId, string Message);
+internal sealed record SessionExecutionFailureSnapshot(string Message, DateTimeOffset ObservedAt);
 internal sealed record HarnessProjectSummary(string Id, string Name, string? Path, bool? Current);

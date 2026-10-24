@@ -119,8 +119,7 @@ docker run --rm \
 - `OPENCODE_SCHEME` (`http` or `https`, default: `http`)
 - `OPENCODE_HOST` (default: `opensim-opencode`)
 - `OPENCODE_PORT` (default: `8998`)
-- `OPENCODE_SERVER_USERNAME` (optional Basic auth username)
-- `OPENCODE_SERVER_PASSWORD` (optional Basic auth password)
+- `OPENCODE_SERVER_PASSWORD` (optional Basic auth password; bridge uses Basic username `opencode`)
 - `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `1800`)
 
 ### Voice routing (Piper + grid voice)

@@ -41,7 +41,6 @@ internal sealed class AppOptions
     public string OpencodeScheme { get; set; } = "http";
     public string OpencodeHost { get; set; } = "opensim-opencode";
     public int OpencodePort { get; set; } = 8998;
-    public string? OpencodeUsername { get; set; }
     public string? OpencodePassword { get; set; }
     public string? OpencodeInitialProvider { get; set; }
     public string? OpencodeInitialModel { get; set; }
