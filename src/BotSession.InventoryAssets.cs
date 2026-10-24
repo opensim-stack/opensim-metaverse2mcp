@@ -4190,7 +4190,13 @@ internal sealed partial class BotSession
                 return AssetDownloadResult.FailResult($"Unable to download asset {assetUuid} as type {parsedAssetType}.");
             }
 
-            var payload = await BuildDownloadPayloadAsync(_options.ResolveWorkspaceDir(), asset.AssetData, mode, fileNameHint, parsedAssetType, token).ConfigureAwait(false);
+            var workspaceDir = _options.ResolveWorkspaceDir();
+            if (string.IsNullOrWhiteSpace(workspaceDir))
+            {
+                return AssetDownloadResult.FailResult("Workspace directory is not configured.");
+            }
+
+            var payload = await BuildDownloadPayloadAsync(workspaceDir, asset.AssetData, mode, fileNameHint, parsedAssetType, token).ConfigureAwait(false);
             return AssetDownloadResult.OkResult(
                 payload.Base64,
                 payload.FilePath,
@@ -4225,7 +4231,13 @@ internal sealed partial class BotSession
                 return AssetDownloadResult.FailResult($"Unable to download texture {textureUuid}.");
             }
 
-            var payload = await BuildDownloadPayloadAsync(_options.ResolveWorkspaceDir(),texture.AssetData, mode, fileNameHint, AssetType.Texture, token).ConfigureAwait(false);
+            var workspaceDir = _options.ResolveWorkspaceDir();
+            if (string.IsNullOrWhiteSpace(workspaceDir))
+            {
+                return AssetDownloadResult.FailResult("Workspace directory is not configured.");
+            }
+
+            var payload = await BuildDownloadPayloadAsync(workspaceDir, texture.AssetData, mode, fileNameHint, AssetType.Texture, token).ConfigureAwait(false);
             return AssetDownloadResult.OkResult(
                 payload.Base64,
                 payload.FilePath,

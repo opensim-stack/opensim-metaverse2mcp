@@ -1819,7 +1819,7 @@ internal sealed partial class BotSession
         var sequenceId = Random.Shared.Next(1, int.MaxValue);
         var tcs = new TaskCompletionSource<ParcelAccessListReplyEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         var requestedScope = flags & AccessList.Both;
-        var mergedEntries = new List<ParcelManager.ParcelAccessEntry>();
+        var mergedEntries = new List<ParcelAccessEntry>();
         var sawAccessReply = false;
         var sawBanReply = false;
         var isCompleted = false;
@@ -1856,7 +1856,7 @@ internal sealed partial class BotSession
                 sawAccessReply = true;
                 foreach (var entry in e.AccessList)
                 {
-                    mergedEntries.Add(new ParcelManager.ParcelAccessEntry
+                    mergedEntries.Add(new ParcelAccessEntry
                     {
                         AgentID = entry.AgentID,
                         Time = entry.Time,
@@ -1870,7 +1870,7 @@ internal sealed partial class BotSession
                 sawBanReply = true;
                 foreach (var entry in e.AccessList)
                 {
-                    mergedEntries.Add(new ParcelManager.ParcelAccessEntry
+                    mergedEntries.Add(new ParcelAccessEntry
                     {
                         AgentID = entry.AgentID,
                         Time = entry.Time,
@@ -1882,7 +1882,7 @@ internal sealed partial class BotSession
             if (IsComplete())
             {
                 isCompleted = true;
-                tcs.TrySetResult(new ParcelAccessListReplyEventArgs(e.Simulator, e.SequenceID, e.LocalID, (uint)requestedScope, new List<ParcelManager.ParcelAccessEntry>(mergedEntries)));
+                tcs.TrySetResult(new ParcelAccessListReplyEventArgs(e.Simulator, e.SequenceID, e.LocalID, (uint)requestedScope, new List<ParcelAccessEntry>(mergedEntries)));
             }
         }
 
@@ -1909,7 +1909,7 @@ internal sealed partial class BotSession
         }
     }
 
-    private static async Task<List<ParcelManager.ParcelAccessEntry>?> RequestParcelAccessEntriesAsync(
+    private static async Task<List<ParcelAccessEntry>?> RequestParcelAccessEntriesAsync(
         GridClient client,
         Simulator sim,
         int localId,
@@ -2011,9 +2011,9 @@ internal sealed partial class BotSession
         return packet;
     }
 
-    private static List<ParcelManager.ParcelAccessEntry> DeduplicateAccessEntries(List<ParcelManager.ParcelAccessEntry> entries)
+    private static List<ParcelAccessEntry> DeduplicateAccessEntries(List<ParcelAccessEntry> entries)
     {
-        var unique = new List<ParcelManager.ParcelAccessEntry>(entries.Count);
+        var unique = new List<ParcelAccessEntry>(entries.Count);
         var seen = new HashSet<(UUID AgentId, AccessList Scope)>();
         foreach (var entry in entries)
         {
@@ -2051,13 +2051,13 @@ internal sealed partial class BotSession
         return false;
     }
 
-    private static bool IsPlaceholderAccessEntry(ParcelManager.ParcelAccessEntry entry)
+    private static bool IsPlaceholderAccessEntry(ParcelAccessEntry entry)
     {
         // OpenSim can send placeholder records for empty allow/ban lists.
         return entry.AgentID == UUID.Zero;
     }
 
-    private static bool EntryMatchesScope(ParcelManager.ParcelAccessEntry entry, AccessList scope)
+    private static bool EntryMatchesScope(ParcelAccessEntry entry, AccessList scope)
     {
         return (entry.Flags & scope) == scope;
     }
