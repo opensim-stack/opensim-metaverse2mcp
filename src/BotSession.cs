@@ -152,6 +152,7 @@ internal sealed partial class BotSession : IDisposable
     private readonly ConcurrentDictionary<string, UUID> _conversationAgentByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _conversationNameByKey = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightRequestCtsByConversation = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _restoredSessionPreflightByConversation = new(StringComparer.Ordinal);
     private readonly AsyncLocal<string?> _ambientConversationKey = new();
     private readonly string _handlerConfigPath;
     private readonly string? _parentFullName;
@@ -438,6 +439,8 @@ internal sealed partial class BotSession : IDisposable
             await EnsureVoiceBackendOnLoginAsync(client, cancellationToken).ConfigureAwait(false);
 
             TryLoadOpencodeSessionStateFromFile();
+            // A reconnect can restore session IDs from disk; reset request gates so first IM is not blocked as overlapping.
+            _inFlightRequestCtsByConversation.Clear();
 
             await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
             

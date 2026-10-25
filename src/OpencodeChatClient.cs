@@ -1556,7 +1556,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         }
         catch
         {
-            // Fall back to legacy answer key payloads when form lookup fails.
+            // Best effort only; callers still submit a strict v2 answer object fallback.
         }
 
         return Array.Empty<FormFieldBinding>();
@@ -1567,13 +1567,8 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         var payloads = new List<Dictionary<string, object?>>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        void Add(Dictionary<string, object?> answer)
+        void Add(Dictionary<string, object?> payload)
         {
-            var payload = new Dictionary<string, object?>
-            {
-                ["answer"] = answer
-            };
-
             var signature = JsonSerializer.Serialize(payload);
             if (seen.Add(signature))
             {
@@ -1581,6 +1576,18 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             }
         }
 
+        void AddFieldPayload(string fieldKey, object? value)
+        {
+            Add(new Dictionary<string, object?>
+            {
+                ["answer"] = new Dictionary<string, object?>
+                {
+                    [fieldKey] = value
+                }
+            });
+        }
+
+        var emittedBoundFieldPayload = false;
         if (fieldBindings != null)
         {
             foreach (var binding in fieldBindings)
@@ -1597,36 +1604,16 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     typedValue = new[] { singleValue };
                 }
 
-                Add(new Dictionary<string, object?>
-                {
-                    [key] = typedValue
-                });
-
-                if (binding.IsMulti && answerValue is string scalarValue)
-                {
-                    Add(new Dictionary<string, object?>
-                    {
-                        [key] = scalarValue
-                    });
-                }
+                AddFieldPayload(key, typedValue);
+                emittedBoundFieldPayload = true;
             }
         }
 
-        // Race-safe fallback when form listing lags behind event delivery.
-        Add(new Dictionary<string, object?>
+        if (!emittedBoundFieldPayload)
         {
-            ["q0"] = answerValue is string single ? new[] { single } : answerValue
-        });
-        Add(new Dictionary<string, object?>
-        {
-            ["q0"] = answerValue
-        });
-
-        // Legacy fallback used by earlier question payloads.
-        Add(new Dictionary<string, object?>
-        {
-            ["answer"] = answerValue
-        });
+            // Strict v2 fallback when field bindings are temporarily unavailable.
+            AddFieldPayload("q0", answerValue);
+        }
 
         return payloads;
     }
@@ -3094,13 +3081,13 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                     {
                         foreach (var option in fieldOptions.EnumerateArray())
                         {
-                            if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
-                            {
-                                options.Add(label.Trim());
-                            }
-                            else if (TryGetStringProperty(option, "value", out var value) && !string.IsNullOrWhiteSpace(value))
+                            if (TryGetStringProperty(option, "value", out var value) && !string.IsNullOrWhiteSpace(value))
                             {
                                 options.Add(value.Trim());
+                            }
+                            else if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
+                            {
+                                options.Add(label.Trim());
                             }
                         }
                     }
@@ -3230,7 +3217,11 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 {
                     foreach (var option in optionElements.EnumerateArray())
                     {
-                        if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
+                        if (TryGetStringProperty(option, "value", out var value) && !string.IsNullOrWhiteSpace(value))
+                        {
+                            options.Add(value.Trim());
+                        }
+                        else if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
                         {
                             options.Add(label.Trim());
                         }
@@ -3303,13 +3294,13 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                             continue;
                         }
 
-                        if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
-                        {
-                            options.Add(label.Trim());
-                        }
-                        else if (TryGetStringProperty(option, "value", out var value) && !string.IsNullOrWhiteSpace(value))
+                        if (TryGetStringProperty(option, "value", out var value) && !string.IsNullOrWhiteSpace(value))
                         {
                             options.Add(value.Trim());
+                        }
+                        else if (TryGetStringProperty(option, "label", out var label) && !string.IsNullOrWhiteSpace(label))
+                        {
+                            options.Add(label.Trim());
                         }
                     }
                 }
@@ -3344,65 +3335,116 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             }
         }
 
-        void AddLegacyReply(string reply)
+        void AddDecisionObject(string action, bool rememberDecision)
         {
-            var payload = new Dictionary<string, object?>
-            {
-                ["reply"] = reply
-            };
-            if (remember)
-            {
-                payload["message"] = "remember";
-            }
+            var scope = rememberDecision ? "always" : "once";
 
-            AddPayload(payload);
+            // OpenCode v2 expects a structured Permission.Reply object under decision.
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = new Dictionary<string, object?>
+                {
+                    ["action"] = action,
+                    ["scope"] = scope
+                }
+            });
+
+            // Keep a second v2-shaped variant used by some runtimes.
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = new Dictionary<string, object?>
+                {
+                    ["action"] = action,
+                    ["remember"] = rememberDecision
+                }
+            });
+
+            // Additional variants observed across OpenCode v2 builds.
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = new Dictionary<string, object?>
+                {
+                    ["type"] = action,
+                    ["scope"] = scope
+                }
+            });
+
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = new Dictionary<string, object?>
+                {
+                    ["reply"] = action,
+                    ["remember"] = rememberDecision
+                }
+            });
+
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = action
+            });
+
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["response"] = action,
+                ["remember"] = rememberDecision
+            });
+
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["reply"] = action,
+                ["remember"] = rememberDecision
+            });
         }
 
-        void AddDecision(string decision, bool? rememberDecision = null)
+        static string CompactToken(string value)
         {
-            var payload = new Dictionary<string, object?>
-            {
-                ["decision"] = decision
-            };
-
-            // Some server builds expect remember as a sibling flag, others encode it in decision text.
-            if (rememberDecision.HasValue)
-            {
-                payload["remember"] = rememberDecision.Value;
-            }
-
-            AddPayload(payload);
+            var lowered = (value ?? string.Empty).Trim().ToLowerInvariant()
+                .Replace('_', ' ')
+                .Replace('-', ' ');
+            return string.Join(" ", lowered.Split(' ', StringSplitOptions.RemoveEmptyEntries));
         }
 
-        if (normalizedResponse is "allow" or "approve" or "accept" or "yes" or "y")
-        {
-            AddDecision("yes", remember ? true : null);
-            AddDecision("allow", remember ? true : null);
-            AddDecision("approve", remember ? true : null);
-            AddDecision(remember ? "yes_always" : "yes");
-            AddDecision(remember ? "allow_always" : "allow");
-            AddDecision(remember ? "always" : "once");
+        var compact = CompactToken(normalizedResponse);
+        var rememberByToken = compact.Contains(" always", StringComparison.Ordinal)
+            || compact.StartsWith("always ", StringComparison.Ordinal)
+            || compact.Contains(" remember", StringComparison.Ordinal)
+            || compact.EndsWith(" remember", StringComparison.Ordinal);
+        var effectiveRemember = remember || rememberByToken;
 
-            // Backward-compatible payload shape used by earlier bridges.
-            AddLegacyReply(remember ? "always" : "once");
+        if (compact is "allow" or "approve" or "accept" or "yes" or "y" or "always" or "once" or "yes always" or "allow always" or "always yes" or "yes remember")
+        {
+            AddDecisionObject("allow", effectiveRemember);
+
+            // Permission.Reply is sometimes a token string instead of an object.
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = effectiveRemember ? "always" : "once"
+            });
+
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = "allow"
+            });
             return payloads;
         }
 
-        if (normalizedResponse is "reject" or "deny" or "no" or "n")
+        if (compact is "reject" or "deny" or "no" or "n" or "no always" or "deny always" or "always no" or "no remember")
         {
-            AddDecision("no", remember ? true : null);
-            AddDecision("deny", remember ? true : null);
-            AddDecision("reject", remember ? true : null);
-            AddDecision(remember ? "no_always" : "no");
-            AddDecision(remember ? "deny_always" : "deny");
+            AddDecisionObject("reject", effectiveRemember);
 
-            // Backward-compatible payload shape used by earlier bridges.
-            AddLegacyReply("reject");
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = effectiveRemember ? "deny-always" : "deny"
+            });
+
+            AddPayload(new Dictionary<string, object?>
+            {
+                ["decision"] = "reject"
+            });
             return payloads;
         }
 
-        AddDecision(normalizedResponse);
-        AddLegacyReply(normalizedResponse);
+        AddDecisionObject(compact, effectiveRemember);
         return payloads;
     }
 
@@ -4220,20 +4262,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             {
                 ["code"] = candidate
             });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["deviceCode"] = candidate
-            });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["device_code"] = candidate
-            });
         }
-
-        // Final fallback for callback endpoints that track state server-side.
-        AddPayload(new Dictionary<string, object?>());
 
         return payloads;
     }

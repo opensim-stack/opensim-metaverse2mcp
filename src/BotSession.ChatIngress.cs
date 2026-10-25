@@ -266,6 +266,7 @@ internal sealed partial class BotSession
             globalGateHeld = !routedText.StartsWith('*');
 
             TryBindRestoredOpencodeSessionToConversation(conversationKey);
+            await EnsureRestoredSessionPreflightAsync(conversationKey).ConfigureAwait(false);
             var sendOptions = await BuildSendOptions(conversationKey, senderAgentId, from).ConfigureAwait(false);
             using var requestCts = new CancellationTokenSource();
             inFlightRequestCts = requestCts;

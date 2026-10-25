@@ -544,6 +544,19 @@ internal sealed class TextChatUserResponse : IUserResponseHandler
             return false;
         }
 
+        if (IsPromptDismissText(text))
+        {
+            _pendingTextPromptReplyByConversation.TryRemove(conversationKey, out _);
+            ClearPendingPromptActive(conversationKey, state.RequestId);
+            _sendImText(
+                client,
+                agentId,
+                from,
+                "Prompt reply cancelled for now. Use *permission list (or *question list) to revisit pending prompts.",
+                conversationKey);
+            return true;
+        }
+
         if (state.Kind == PendingPromptKind.Permission)
         {
             if (!TryParseSimplePermissionResponse(text, out var response, out var remember))
@@ -736,6 +749,22 @@ internal sealed class TextChatUserResponse : IUserResponseHandler
         }
 
         return false;
+    }
+
+    private static bool IsPromptDismissText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var compact = string.Join(" ", text
+            .Trim()
+            .ToLowerInvariant()
+            .Replace(',', ' ')
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+        return compact is "cancel" or "abort" or "skip" or "dismiss" or "nevermind" or "never mind";
     }
 
     private static bool TryResolveQuestionAnswer(HarnessPendingQuestion question, string text, out string answer)
