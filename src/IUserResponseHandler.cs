@@ -39,4 +39,11 @@ internal interface IUserResponseHandler : IDisposable
         string from,
         string conversationKey,
         string questionId);
+
+    /// <summary>
+    /// Clears locally captured text prompt state for a conversation
+    /// (for example when *cancel aborts a running backend step).
+    /// Returns true when local prompt capture state was cleared.
+    /// </summary>
+    bool CancelPendingPromptCapture(string conversationKey);
 }

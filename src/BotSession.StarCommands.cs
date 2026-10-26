@@ -550,12 +550,22 @@ internal sealed partial class BotSession
     private async Task HandleCancelCommandAsync(GridClient client, UUID agentId, string from, string conversationKey)
     {
         var locallyCanceled = TryCancelLocalInFlightRequest(conversationKey);
+        var promptCaptureCleared = _userResponseHandler.CancelPendingPromptCapture(conversationKey);
+
+        if (promptCaptureCleared)
+        {
+            Console.WriteLine($"[prompt] cleared pending prompt capture for {conversationKey} via *cancel.");
+        }
 
         if (_harnessClient == null)
         {
             SendImText(client, agentId, from, locallyCanceled
-                ? "Canceled the current local request. AI chat is disabled by configuration, so no backend abort was sent."
-                : "AI chat is currently disabled by configuration.");
+                ? (promptCaptureCleared
+                    ? "Canceled the current local request and cleared pending prompt mode. AI chat is disabled by configuration, so no backend abort was sent."
+                    : "Canceled the current local request. AI chat is disabled by configuration, so no backend abort was sent.")
+                : (promptCaptureCleared
+                    ? "Cleared pending prompt mode. AI chat is currently disabled by configuration."
+                    : "AI chat is currently disabled by configuration."));
             return;
         }
 
@@ -563,8 +573,12 @@ internal sealed partial class BotSession
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             SendImText(client, agentId, from, locallyCanceled
-                ? "Canceled the current local request. No active Opencode session id is known yet for backend abort."
-                : "There is no active Opencode session for this IM yet, so there is nothing to cancel.");
+                ? (promptCaptureCleared
+                    ? "Canceled the current local request and cleared pending prompt mode. No active Opencode session id is known yet for backend abort."
+                    : "Canceled the current local request. No active Opencode session id is known yet for backend abort.")
+                : (promptCaptureCleared
+                    ? "Cleared pending prompt mode. There is no active Opencode session for this IM yet, so there is nothing to cancel."
+                    : "There is no active Opencode session for this IM yet, so there is nothing to cancel."));
             return;
         }
 
@@ -572,14 +586,22 @@ internal sealed partial class BotSession
         if (ok == true)
         {
             SendImText(client, agentId, from, locallyCanceled
-                ? $"Canceled locally and requested backend abort for session {sessionId}."
-                : $"Abort requested for the in-flight session: {sessionId}");
+                ? (promptCaptureCleared
+                    ? $"Canceled locally, cleared pending prompt mode, and requested backend abort for session {sessionId}."
+                    : $"Canceled locally and requested backend abort for session {sessionId}.")
+                : (promptCaptureCleared
+                    ? $"Cleared pending prompt mode and requested backend abort for the in-flight session: {sessionId}"
+                    : $"Abort requested for the in-flight session: {sessionId}"));
             return;
         }
 
         SendImText(client, agentId, from, locallyCanceled
-            ? $"Canceled locally. Backend abort for session {sessionId} did not return an explicit success flag."
-            : $"Abort request sent for session {sessionId}, but Opencode did not return an explicit success flag.");
+            ? (promptCaptureCleared
+                ? $"Canceled locally and cleared pending prompt mode. Backend abort for session {sessionId} did not return an explicit success flag."
+                : $"Canceled locally. Backend abort for session {sessionId} did not return an explicit success flag.")
+            : (promptCaptureCleared
+                ? $"Cleared pending prompt mode. Abort request sent for session {sessionId}, but Opencode did not return an explicit success flag."
+                : $"Abort request sent for session {sessionId}, but Opencode did not return an explicit success flag."));
     }
 
     private bool TryCancelLocalInFlightRequest(string conversationKey)

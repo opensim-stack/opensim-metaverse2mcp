@@ -1357,6 +1357,7 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
         var payloads = BuildPermissionResponsePayloads(normalizedResponse, remember);
         Exception? lastClientError = null;
         Exception? firstDecisionPayloadError = null;
+        string? firstDecisionPayloadJson = null;
         var path = $"/api/session/{Uri.EscapeDataString(sessionKey)}/permission/{Uri.EscapeDataString(permissionKey)}/reply";
         foreach (var payload in payloads)
         {
@@ -1386,12 +1387,20 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
                 if (firstDecisionPayloadError == null && payload.ContainsKey("decision"))
                 {
                     firstDecisionPayloadError = ex;
+                    firstDecisionPayloadJson = JsonSerializer.Serialize(payload);
                 }
                 lastClientError = ex;
             }
         }
 
-        throw firstDecisionPayloadError ?? lastClientError ?? new InvalidOperationException("Permission response request failed.");
+        if (firstDecisionPayloadError != null)
+        {
+            throw new InvalidOperationException(
+                $"Permission response rejected for payload {firstDecisionPayloadJson ?? "<unknown>"}.",
+                firstDecisionPayloadError);
+        }
+
+        throw lastClientError ?? new InvalidOperationException("Permission response request failed.");
     }
 
     public async Task<IReadOnlyList<HarnessPendingQuestion>> ListPendingQuestionsAsync(string sessionId, CancellationToken cancellationToken)
@@ -3323,79 +3332,6 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
 
     private static IReadOnlyList<Dictionary<string, object?>> BuildPermissionResponsePayloads(string normalizedResponse, bool remember)
     {
-        var payloads = new List<Dictionary<string, object?>>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-
-        void AddPayload(Dictionary<string, object?> payload)
-        {
-            var serialized = JsonSerializer.Serialize(payload);
-            if (seen.Add(serialized))
-            {
-                payloads.Add(payload);
-            }
-        }
-
-        void AddDecisionObject(string action, bool rememberDecision)
-        {
-            var scope = rememberDecision ? "always" : "once";
-
-            // OpenCode v2 expects a structured Permission.Reply object under decision.
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = new Dictionary<string, object?>
-                {
-                    ["action"] = action,
-                    ["scope"] = scope
-                }
-            });
-
-            // Keep a second v2-shaped variant used by some runtimes.
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = new Dictionary<string, object?>
-                {
-                    ["action"] = action,
-                    ["remember"] = rememberDecision
-                }
-            });
-
-            // Additional variants observed across OpenCode v2 builds.
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = new Dictionary<string, object?>
-                {
-                    ["type"] = action,
-                    ["scope"] = scope
-                }
-            });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = new Dictionary<string, object?>
-                {
-                    ["reply"] = action,
-                    ["remember"] = rememberDecision
-                }
-            });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = action
-            });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["response"] = action,
-                ["remember"] = rememberDecision
-            });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["reply"] = action,
-                ["remember"] = rememberDecision
-            });
-        }
-
         static string CompactToken(string value)
         {
             var lowered = (value ?? string.Empty).Trim().ToLowerInvariant()
@@ -3411,41 +3347,20 @@ internal sealed class OpencodeChatClient : IHarnessClient, IDisposable
             || compact.EndsWith(" remember", StringComparison.Ordinal);
         var effectiveRemember = remember || rememberByToken;
 
-        if (compact is "allow" or "approve" or "accept" or "yes" or "y" or "always" or "once" or "yes always" or "allow always" or "always yes" or "yes remember")
+        var decision = compact switch
         {
-            AddDecisionObject("allow", effectiveRemember);
+            "reject" or "deny" or "no" or "n" or "no always" or "deny always" or "always no" or "no remember" => "reject",
+            "always" or "allow always" or "yes always" or "always yes" or "yes remember" or "allow remember" => "always",
+            "once" or "allow" or "approve" or "accept" or "yes" or "y" => effectiveRemember ? "always" : "once",
+            _ => throw new InvalidOperationException($"Unsupported permission response token '{normalizedResponse}'.")
+        };
 
-            // Permission.Reply is sometimes a token string instead of an object.
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = effectiveRemember ? "always" : "once"
-            });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = "allow"
-            });
-            return payloads;
-        }
-
-        if (compact is "reject" or "deny" or "no" or "n" or "no always" or "deny always" or "always no" or "no remember")
+        var payload = new Dictionary<string, object?>
         {
-            AddDecisionObject("reject", effectiveRemember);
+            ["decision"] = decision
+        };
 
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = effectiveRemember ? "deny-always" : "deny"
-            });
-
-            AddPayload(new Dictionary<string, object?>
-            {
-                ["decision"] = "reject"
-            });
-            return payloads;
-        }
-
-        AddDecisionObject(compact, effectiveRemember);
-        return payloads;
+        return new[] { payload };
     }
 
     private static bool TryGetEmbeddedError(string? rawReply, out EmbeddedOpencodeError error)

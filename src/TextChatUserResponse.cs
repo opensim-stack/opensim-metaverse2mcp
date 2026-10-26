@@ -133,6 +133,25 @@ internal sealed class TextChatUserResponse : IUserResponseHandler
         ScheduleDrainPendingPrompts(client, senderAgentId, from, conversationKey);
     }
 
+    public bool CancelPendingPromptCapture(string conversationKey)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return false;
+        }
+
+        var clearedActive = false;
+        if (_pendingTextPromptReplyByConversation.TryRemove(conversationKey, out var existing))
+        {
+            clearedActive = true;
+            ClearPendingPromptActive(conversationKey, existing.RequestId);
+        }
+
+        // Aborting a run should also drop queued text fallback prompts for that conversation.
+        var clearedQueued = ClearQueuedPromptEntries(conversationKey);
+        return clearedActive || clearedQueued;
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -248,6 +267,30 @@ internal sealed class TextChatUserResponse : IUserResponseHandler
             state.ActiveRequestId = requestId.Trim();
             state.EnqueuedRequestIds.Remove(state.ActiveRequestId);
         }
+    }
+
+    private bool ClearQueuedPromptEntries(string conversationKey)
+    {
+        if (string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return false;
+        }
+
+        if (!_pendingPromptQueuesByConversation.TryGetValue(conversationKey, out var state))
+        {
+            return false;
+        }
+
+        var hadEntries = false;
+        lock (state.SyncRoot)
+        {
+            hadEntries = state.Queue.Count > 0 || state.EnqueuedRequestIds.Count > 0 || !string.IsNullOrWhiteSpace(state.ActiveRequestId);
+            state.Queue.Clear();
+            state.EnqueuedRequestIds.Clear();
+            state.ActiveRequestId = null;
+        }
+
+        return hadEntries;
     }
 
     private void ClearPendingPromptActive(string conversationKey, string requestId)
