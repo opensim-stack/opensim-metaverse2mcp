@@ -384,23 +384,6 @@ internal sealed partial class BotSession : IDisposable
             var success = await client.Network.LoginAsync(login, cancellationToken).ConfigureAwait(false);
             _lastLoginMessage = client.Network.LoginMessage ?? string.Empty;
 
-            if (!success && ShouldRetryLongPasswordLogin(_options.BotPassword, client.Network.LoginErrorKey, _lastLoginMessage))
-            {
-                var fallbackLogin = client.Network.DefaultLoginParams(
-                    _options.BotFirstName!,
-                    _options.BotLastName!,
-                    HashPasswordWithoutLegacyLengthLimit(_options.BotPassword!),
-                    "opensim-metaverse2mcp",
-                    "0.1.0");
-
-                fallbackLogin.URI = _options.BotLoginUri;
-                fallbackLogin.Start = _options.BotStartLocation;
-
-                Console.WriteLine("[bot] Retrying login with full-length password hash compatibility mode.");
-                success = await client.Network.LoginAsync(fallbackLogin, cancellationToken).ConfigureAwait(false);
-                _lastLoginMessage = client.Network.LoginMessage ?? string.Empty;
-            }
-
             if (!success)
             {
                 EmitRuntimeEvent(
@@ -589,36 +572,6 @@ internal sealed partial class BotSession : IDisposable
 
     private static string DescribeSimulator(Simulator? sim)
         => sim == null ? "(null)" : $"{sim.Name} ({sim.Handle})";
-
-    private static bool ShouldRetryLongPasswordLogin(string? password, string? loginErrorKey, string? loginMessage)
-    {
-        if (string.IsNullOrEmpty(password)
-            || password.Length <= LoginRequest.MaxPasswordLength
-            || password.StartsWith("$1$", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        var key = (loginErrorKey ?? string.Empty).Trim().ToLowerInvariant();
-        var message = (loginMessage ?? string.Empty).Trim().ToLowerInvariant();
-
-        if (key == "no connection"
-            || message.Contains("timed out", StringComparison.Ordinal)
-            || message.Contains("unable to establish a udp connection", StringComparison.Ordinal)
-            || message.Contains("did not return a simulator address", StringComparison.Ordinal)
-            || message.Contains("empty or corrupt login response", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    private static string HashPasswordWithoutLegacyLengthLimit(string password)
-    {
-        var hashed = Utils.MD5(password ?? string.Empty);
-        return hashed.StartsWith("$1$", StringComparison.Ordinal) ? hashed : "$1$" + hashed;
-    }
         
         
     public void Dispose()
