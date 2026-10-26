@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.IO;
+using System.Linq;
 using LibreMetaverse;
 using LibreMetaverse.Packets;
 
@@ -9,6 +10,7 @@ internal sealed partial class BotSession
 {
     private const float MinimumTerrainCoverageForMutation = 0.999f;
     private static readonly TimeSpan ParcelReplyTimeout = TimeSpan.FromSeconds(5);
+    private EstateRegionDefaultsSnapshot? _lastEstateRegionDefaults;
 
     public async Task<DataToolResult> ParcelGetCurrentAsync(bool includeAccessLists, bool forceRefresh, CancellationToken cancellationToken)
     {
@@ -1412,16 +1414,98 @@ internal sealed partial class BotSession
                 return DataToolResult.FailResult("Timed out waiting for estate info reply.");
             }
 
+            var sim = client.Network.CurrentSim;
+            var resolvedMaturity = ResolveMaturityName(sim?.Access, _lastEstateRegionDefaults?.MaturityName);
+            var resolvedBlockFlyOver = _lastEstateRegionDefaults?.BlockFlyOver;
+            var resolvedAgentLimit = _lastEstateRegionDefaults?.AgentLimit;
+            var resolvedObjectBonus = _lastEstateRegionDefaults?.ObjectBonus;
+
             var payload = new
             {
                 estateName = reply.EstateName,
                 estateOwner = reply.EstateOwner.ToString(),
                 estateId = reply.EstateID,
-                flags = reply.Flags.ToString(),
-                sunHour = reply.SunHour
+                flags = GetRegionFlagNames(reply.Flags),
+                flagsRaw = (ulong)reply.Flags,
+                sunHour = reply.SunHour,
+                regionDefaults = new
+                {
+                    blockTerraform = reply.Flags.HasFlag(RegionFlags.BlockTerraform),
+                    blockFly = reply.Flags.HasFlag(RegionFlags.NoFly),
+                    blockFlyOver = resolvedBlockFlyOver,
+                    allowDamage = reply.Flags.HasFlag(RegionFlags.AllowDamage),
+                    allowLandResell = !reply.Flags.HasFlag(RegionFlags.BlockLandResell),
+                    restrictPushing = reply.Flags.HasFlag(RegionFlags.RestrictPushObject),
+                    allowParcelJoinDivide = reply.Flags.HasFlag(RegionFlags.AllowParcelChanges),
+                    agentLimit = resolvedAgentLimit,
+                    objectBonus = resolvedObjectBonus,
+                    blockParcelSearch = reply.Flags.HasFlag(RegionFlags.BlockParcelSearch),
+                    maturity = resolvedMaturity,
+                    maturityRaw = sim?.Access.ToString(),
+                    source = BuildEstateRegionDefaultsSourceTag(_lastEstateRegionDefaults)
+                }
             };
 
             return DataToolResult.OkResult("Retrieved estate info.", JsonSerializer.Serialize(payload, JsonOptions));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> EstateSetInfoAsync(
+        bool blockTerraform,
+        bool blockFly,
+        bool blockFlyOver,
+        bool allowDamage,
+        bool allowLandResell,
+        bool restrictPushing,
+        bool allowParcelJoinDivide,
+        float agentLimit,
+        float objectBonus,
+        bool blockParcelSearch,
+        string maturity,
+        CancellationToken cancellationToken)
+    {
+        if (!float.IsFinite(agentLimit) || agentLimit <= 0f)
+        {
+            return BotToolResult.Fail("agentLimit must be a finite value greater than 0.");
+        }
+
+        if (!float.IsFinite(objectBonus) || objectBonus <= 0f)
+        {
+            return BotToolResult.Fail("objectBonus must be a finite value greater than 0.");
+        }
+
+        if (!TryParseEstateMaturity(maturity, out var regionMaturity, out var normalizedMaturityName, out var maturityError))
+        {
+            return BotToolResult.Fail(maturityError);
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+
+            await client.Estate.SetRegionInfoAsync(
+                    blockTerraform,
+                    blockFly,
+                    blockFlyOver,
+                    allowDamage,
+                    allowLandResell,
+                    restrictPushing,
+                    allowParcelJoinDivide,
+                    agentLimit,
+                    objectBonus,
+                    blockParcelSearch,
+                    regionMaturity)
+                .ConfigureAwait(false);
+
+            _lastEstateRegionDefaults = new EstateRegionDefaultsSnapshot(
+                blockFlyOver,
+                agentLimit,
+                objectBonus,
+                normalizedMaturityName,
+                DateTimeOffset.UtcNow);
+
+            return BotToolResult.OkResult(
+                $"Estate region defaults submitted (maturity={normalizedMaturityName}, blockTerraform={blockTerraform}, blockFly={blockFly}, blockFlyOver={blockFlyOver}, allowDamage={allowDamage}, allowLandResell={allowLandResell}, restrictPushing={restrictPushing}, allowParcelJoinDivide={allowParcelJoinDivide}, agentLimit={agentLimit:0.###}, objectBonus={objectBonus:0.###}, blockParcelSearch={blockParcelSearch}).");
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -2172,6 +2256,78 @@ internal sealed partial class BotSession
         return true;
     }
 
+    private static bool TryParseEstateMaturity(
+        string maturity,
+        out EstateTools.RegionMaturity regionMaturity,
+        out string normalizedName,
+        out string error)
+    {
+        regionMaturity = EstateTools.RegionMaturity.PG;
+        normalizedName = "General";
+        error = string.Empty;
+
+        var normalized = (maturity ?? string.Empty).Trim().ToLowerInvariant();
+        switch (normalized)
+        {
+            case "general":
+            case "pg":
+                regionMaturity = EstateTools.RegionMaturity.PG;
+                normalizedName = "General";
+                return true;
+            case "moderate":
+            case "mature":
+                regionMaturity = EstateTools.RegionMaturity.Mature;
+                normalizedName = "Moderate";
+                return true;
+            case "adult":
+                regionMaturity = EstateTools.RegionMaturity.Adult;
+                normalizedName = "Adult";
+                return true;
+            default:
+                error = "maturity must be one of: General, Moderate, Adult (aliases: PG, Mature).";
+                return false;
+        }
+    }
+
+    private static string ResolveMaturityName(SimAccess? access, string? fallback)
+    {
+        if (access.HasValue)
+        {
+            return access.Value switch
+            {
+                SimAccess.PG => "General",
+                SimAccess.Mature => "Moderate",
+                SimAccess.Adult => "Adult",
+                _ => string.IsNullOrWhiteSpace(fallback) ? "Unknown" : fallback
+            };
+        }
+
+        return string.IsNullOrWhiteSpace(fallback) ? "Unknown" : fallback;
+    }
+
+    private static string[] GetRegionFlagNames(RegionFlags flags)
+    {
+        if (flags == RegionFlags.None)
+        {
+            return Array.Empty<string>();
+        }
+
+        return Enum.GetValues<RegionFlags>()
+            .Where(flag => flag != RegionFlags.None && flags.HasFlag(flag))
+            .Select(flag => flag.ToString())
+            .ToArray();
+    }
+
+    private static string BuildEstateRegionDefaultsSourceTag(EstateRegionDefaultsSnapshot? snapshot)
+    {
+        if (snapshot == null)
+        {
+            return "simulator-flags";
+        }
+
+        return $"simulator-flags+estate_set_info_cache@{snapshot.CapturedAtUtc:O}";
+    }
+
     private static async Task<EstateUpdateInfoReplyEventArgs?> WaitForEstateUpdateInfoReplyAsync(GridClient client, CancellationToken cancellationToken)
     {
         var tcs = new TaskCompletionSource<EstateUpdateInfoReplyEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2606,3 +2762,10 @@ internal sealed record TerrainHeightSample(int X, int Y, float Height);
 internal sealed record TerrainPatchDeltaSample(int X, int Y, float Before, float After, float Delta);
 
 internal readonly record struct ParcelBounds(float West, float South, float East, float North);
+
+internal sealed record EstateRegionDefaultsSnapshot(
+    bool BlockFlyOver,
+    float AgentLimit,
+    float ObjectBonus,
+    string MaturityName,
+    DateTimeOffset CapturedAtUtc);

@@ -859,6 +859,37 @@ internal sealed class BotMcpTools
         return _bot.EstateGetInfoAsync(cancellationToken);
     }
 
+    [McpServerTool, Description("Set estate region defaults (Region/Estate tab settings) for the current region.")]
+    public Task<BotToolResult> EstateSetInfo(
+        [Description("True to block terrain editing.")] bool blockTerraform,
+        [Description("True to disable flying.")] bool blockFly,
+        [Description("True to block fly-over entry.")] bool blockFlyOver,
+        [Description("True to allow damage.")] bool allowDamage,
+        [Description("True to allow land resell.")] bool allowLandResell,
+        [Description("True to restrict push object.")] bool restrictPushing,
+        [Description("True to allow parcel join/divide.")] bool allowParcelJoinDivide,
+        [Description("Agent limit for the region.")] float agentLimit,
+        [Description("Object/prim bonus multiplier.")] float objectBonus,
+        [Description("True to block parcel search.")] bool blockParcelSearch,
+        [Description("Maturity rating: General, Moderate, Adult (aliases: PG, Mature).")]
+        string maturity,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.EstateSetInfoAsync(
+            blockTerraform,
+            blockFly,
+            blockFlyOver,
+            allowDamage,
+            allowLandResell,
+            restrictPushing,
+            allowParcelJoinDivide,
+            agentLimit,
+            objectBonus,
+            blockParcelSearch,
+            maturity,
+            cancellationToken);
+    }
+
     [McpServerTool, Description("Fetch estate covenant metadata (covenant asset ID, owner, timestamp).")]
     public Task<DataToolResult> EstateGetCovenant(CancellationToken cancellationToken)
     {
@@ -1071,6 +1102,14 @@ internal sealed class BotMcpTools
         }
 
         return LocateAgentByUuidAsync(targetId, null, null, cancellationToken);
+    }
+
+    [McpServerTool, Description("Return true only when the target agent is in the same region, the current region access is Adult, and both the bot and target profile flags indicate adult/mature eligibility.")]
+    public Task<bool> IsAdultInteractionAllowed(
+        [Description("Target agent UUID.")] string agentId,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.IsAdultInteractionAllowedAsync(agentId, cancellationToken);
     }
 
     private async Task<DataToolResult> LocateAgentByUuidAsync(

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using LibreMetaverse;
 
@@ -78,6 +79,55 @@ internal sealed partial class BotSession
                           $"UDP profile={(udpReply.PropertiesReceived ? "yes" : "no")}, interests={(udpReply.InterestsReceived ? "yes" : "no")}, capability={(capSuccess ? "yes" : "no")}.";
             return DataToolResult.OkResult(message, JsonSerializer.Serialize(payload, JsonOptions));
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> IsAdultInteractionAllowedAsync(string agentId, CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(agentId, out var targetAgentId) || targetAgentId == UUID.Zero)
+        {
+            return false;
+        }
+
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            var token = cancellationToken;
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return false;
+            }
+
+            if (sim.Access != SimAccess.Adult)
+            {
+                return false;
+            }
+
+            var inSameRegion = targetAgentId == client.Self.AgentID
+                || sim.ObjectsAvatars.Values.Any(avatar => avatar != null && avatar.ID == targetAgentId);
+            if (!inSameRegion)
+            {
+                return false;
+            }
+
+            var timeout = TimeSpan.FromSeconds(8);
+            var selfSignalsTask = GetAvatarProfileSignalsAsync(client, client.Self.AgentID, timeout, token);
+            var targetSignalsTask = GetAvatarProfileSignalsAsync(client, targetAgentId, timeout, token);
+
+            var selfSignals = await selfSignalsTask.ConfigureAwait(false);
+            var targetSignals = await targetSignalsTask.ConfigureAwait(false);
+
+            return selfSignals.IsAdultOrMature && targetSignals.IsAdultOrMature;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
     }
 
     public async Task<DataToolResult> AvatarPicksListAsync(
@@ -306,6 +356,10 @@ internal sealed partial class BotSession
 
     private static object ToAvatarProfilePayload(Avatar.AvatarProperties profile)
     {
+        var ageVerified = profile.Flags.HasFlag(ProfileFlags.AgeVerified);
+        var hasPaymentInfoOnFile = profile.Identified || profile.Transacted;
+        var isAdultOrMature = profile.MaturePublish || ageVerified;
+
         return new
         {
             firstLifeText = profile.FirstLifeText,
@@ -319,10 +373,35 @@ internal sealed partial class BotSession
             flags = profile.Flags.ToString(),
             allowPublish = profile.AllowPublish,
             maturePublish = profile.MaturePublish,
+            ageVerified,
             identified = profile.Identified,
             transacted = profile.Transacted,
+            hasPaymentInfoOnFile,
+            isAdultOrMature,
             online = profile.Online
         };
+    }
+
+    private static async Task<AvatarProfileSignals> GetAvatarProfileSignalsAsync(
+        GridClient client,
+        UUID avatarId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var udpReplyTask = WaitForAvatarProfileUdpReplyAsync(client, avatarId, timeout, cancellationToken);
+        client.Avatars.RequestAvatarProperties(avatarId);
+        var udpReply = await udpReplyTask.ConfigureAwait(false);
+
+        if (!udpReply.PropertiesReceived || !udpReply.Properties.HasValue)
+        {
+            return new AvatarProfileSignals(IsAdultOrMature: false, HasPaymentInfoOnFile: false);
+        }
+
+        var profile = udpReply.Properties.Value;
+        var ageVerified = profile.Flags.HasFlag(ProfileFlags.AgeVerified);
+        return new AvatarProfileSignals(
+            IsAdultOrMature: profile.MaturePublish || ageVerified,
+            HasPaymentInfoOnFile: profile.Identified || profile.Transacted);
     }
 
     private static object ToAvatarInterestsPayload(Avatar.Interests interests)
@@ -518,4 +597,6 @@ internal sealed partial class BotSession
         Avatar.AvatarProperties? Properties,
         bool InterestsReceived,
         Avatar.Interests? Interests);
+
+    private readonly record struct AvatarProfileSignals(bool IsAdultOrMature, bool HasPaymentInfoOnFile);
 }
