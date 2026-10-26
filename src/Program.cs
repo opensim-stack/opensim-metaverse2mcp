@@ -71,7 +71,8 @@ builder.Services
         });
     })
     .WithTools<BotMcpTools>()
-    .WithTools<RLVMcpTools>();
+    .WithTools<RLVMcpTools>()
+    .WithPrompts<BotMcpPrompts>();
 
 var app = builder.Build();
 
