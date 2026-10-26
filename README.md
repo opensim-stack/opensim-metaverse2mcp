@@ -110,8 +110,18 @@ docker run --rm \
 - `METAVERSE_MCP_HTTP_BEARER_TOKEN` (optional)
 - `METAVERSE_MCP_HTTP_DISALLOW_DELETE` (`true`/`false`, default: `false`)
 - `METAVERSE_MCP_DIAGNOSTICS` (`true`/`false`, default: `false`)
+- `MCP_ALLOW_TOOL` (optional, comma/space/semicolon/pipe separated tool names)
+- `MCP_DENY_TOOL` (optional, comma/space/semicolon/pipe separated tool names)
 - `INVENTORY_OFFER_POLICY_FILE` (optional JSON file path)
 - `INVENTORY_OFFER_POLICY_AUTOSAVE` (`true`/`false`, default: `true`)
+
+Tool filtering rules:
+- If both `MCP_ALLOW_TOOL` and `MCP_DENY_TOOL` are unset, all tools are available.
+- If only `MCP_ALLOW_TOOL` is set, only listed tools are available.
+- If only `MCP_DENY_TOOL` is set, all tools except listed tools are available.
+- If both are set, a tool must be in allow list and not in deny list.
+
+Filtered tools are removed from `tools/list` responses and rejected on `tools/call`.
 
 ### Opencode chat bridge
 

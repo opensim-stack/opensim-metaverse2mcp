@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
+using System.Collections;
 using System.Text.Json;
 using Opensim.Metaverse2Mcp;
 
@@ -21,6 +22,7 @@ if (options == null)
 
 using var botSession = new BotSession(options);
 using var loginTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(options.BotLoginTimeoutSeconds));
+var toolAccessPolicy = McpToolAccessPolicy.FromEnvironment();
 
 try
 {
@@ -54,11 +56,44 @@ builder.Services
     .WithHttpTransport(_ => { })
     .WithRequestFilters(filters =>
     {
+        filters.AddListToolsFilter(next => async ValueTask<ListToolsResult> (request, cancellationToken) =>
+        {
+            if (request == null)
+            {
+                throw new McpException("Invalid tools/list request.");
+            }
+
+            var result = await next(request, cancellationToken).ConfigureAwait(false);
+            if (result == null)
+            {
+                throw new McpException("Tools/list request returned no result.");
+            }
+
+            if (toolAccessPolicy.IsAllowAll)
+            {
+                return result;
+            }
+
+            FilterListToolsResultInPlace(result, toolAccessPolicy);
+            return result;
+        });
+
         filters.AddCallToolFilter(next => async ValueTask<CallToolResult> (request, cancellationToken) =>
         {
             try
             {
-                return await next(request, cancellationToken).ConfigureAwait(false);
+                if (request == null)
+                {
+                    throw new McpException("Invalid tools/call request.");
+                }
+
+                var toolName = request.Params?.Name;
+                if (!toolAccessPolicy.IsAllowed(toolName))
+                {
+                    throw new McpException($"Tool '{toolName ?? "<unknown>"}' is disabled by MCP tool policy.");
+                }
+
+                return await next(request!, cancellationToken).ConfigureAwait(false);
             }
             catch (ArgumentException ex)
             {
@@ -73,6 +108,11 @@ builder.Services
     .WithTools<BotMcpTools>()
     .WithTools<RLVMcpTools>()
     .WithPrompts<BotMcpPrompts>();
+
+if (!toolAccessPolicy.IsAllowAll)
+{
+    Console.WriteLine($"[mcp] tool policy active: allow={toolAccessPolicy.AllowLabel} deny={toolAccessPolicy.DenyLabel}");
+}
 
 var app = builder.Build();
 
@@ -203,4 +243,102 @@ static string BuildCallToolArgumentErrorMessage(
         : string.Join(", ", arguments.Keys.OrderBy(static key => key, StringComparer.OrdinalIgnoreCase));
 
     return $"Tool '{normalizedToolName}' argument error: {normalizedCause} Provided arguments: {providedKeys}. Check tools/list for required and optional parameter names.";
+}
+
+static void FilterListToolsResultInPlace(ListToolsResult result, McpToolAccessPolicy policy)
+{
+    var toolsProperty = result.GetType().GetProperty("Tools");
+    var toolsValue = toolsProperty?.GetValue(result);
+    if (toolsValue is not IEnumerable toolsEnumerable)
+    {
+        return;
+    }
+
+    var filtered = new List<object?>();
+    foreach (var tool in toolsEnumerable)
+    {
+        if (tool == null)
+        {
+            continue;
+        }
+
+        var nameProperty = tool.GetType().GetProperty("Name");
+        var nameValue = nameProperty?.GetValue(tool) as string;
+        if (policy.IsAllowed(nameValue))
+        {
+            filtered.Add(tool);
+        }
+    }
+
+    if (toolsProperty?.CanWrite == true)
+    {
+        toolsProperty.SetValue(result, filtered);
+        return;
+    }
+
+    if (toolsValue is IList toolsList)
+    {
+        toolsList.Clear();
+        foreach (var tool in filtered)
+        {
+            toolsList.Add(tool);
+        }
+    }
+}
+
+internal sealed class McpToolAccessPolicy
+{
+    private readonly HashSet<string>? _allow;
+    private readonly HashSet<string>? _deny;
+
+    private McpToolAccessPolicy(HashSet<string>? allow, HashSet<string>? deny)
+    {
+        _allow = allow;
+        _deny = deny;
+    }
+
+    public bool IsAllowAll => _allow == null && _deny == null;
+
+    public string AllowLabel => _allow == null ? "*" : string.Join(',', _allow.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase));
+
+    public string DenyLabel => _deny == null ? "(none)" : string.Join(',', _deny.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase));
+
+    public static McpToolAccessPolicy FromEnvironment()
+    {
+        var allow = ParseToolList(Environment.GetEnvironmentVariable("MCP_ALLOW_TOOL"));
+        var deny = ParseToolList(Environment.GetEnvironmentVariable("MCP_DENY_TOOL"));
+        return new McpToolAccessPolicy(allow, deny);
+    }
+
+    public bool IsAllowed(string? toolName)
+    {
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+            return false;
+        }
+
+        var normalized = toolName.Trim();
+        var allowMatch = _allow == null || _allow.Contains(normalized);
+        if (!allowMatch)
+        {
+            return false;
+        }
+
+        return _deny == null || !_deny.Contains(normalized);
+    }
+
+    private static HashSet<string>? ParseToolList(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var values = raw
+            .Split([',', ';', '|', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return values.Count == 0 ? null : values;
+    }
 }
