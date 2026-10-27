@@ -1551,7 +1551,7 @@ internal sealed partial class BotSession {
     }
 
     private bool IsFollowDiagnosticsEnabled()
-        => true;
+        => false;
 
     private static Vector3 ResolveFollowWaypointFromRegionHandle(
         Simulator botSim,
