@@ -7,6 +7,7 @@ internal sealed class SpawnerClient : IDisposable
 {
     private const string BotApiBasePath = "/api/bot";
     private const string AgentApiBasePath = "/api/agent";
+    private const string UserApiBasePath = "/api/user";
 
     private readonly HttpClient _http;
     private readonly string? _token;
@@ -185,6 +186,45 @@ internal sealed class SpawnerClient : IDisposable
             request,
             $"Located agent {uuid.Trim()} via spawner.",
             cancellationToken);
+    }
+
+    public Task<DataToolResult> SetPartnerAsync(
+        string userFirst,
+        string userLast,
+        string? partnerFirst,
+        string? partnerLast,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(userFirst) || string.IsNullOrWhiteSpace(userLast))
+        {
+            return Task.FromResult(DataToolResult.FailResult("userFirst and userLast are required."));
+        }
+
+        var hasPartnerFirst = !string.IsNullOrWhiteSpace(partnerFirst);
+        var hasPartnerLast = !string.IsNullOrWhiteSpace(partnerLast);
+        if (hasPartnerFirst ^ hasPartnerLast)
+        {
+            return Task.FromResult(DataToolResult.FailResult("partnerFirst and partnerLast must both be provided, or both omitted to clear partner."));
+        }
+
+        var escapedFirst = Uri.EscapeDataString(userFirst.Trim());
+        var escapedLast = Uri.EscapeDataString(userLast.Trim());
+        var path = $"{UserApiBasePath}/{escapedFirst}/{escapedLast}/partner";
+        var request = CreateRequest(HttpMethod.Patch, path);
+
+        var form = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (hasPartnerFirst && hasPartnerLast)
+        {
+            form["partnerFirst"] = partnerFirst!.Trim();
+            form["partnerLast"] = partnerLast!.Trim();
+        }
+
+        request.Content = new FormUrlEncodedContent(form);
+        var successMessage = hasPartnerFirst
+            ? $"Set partner for {userFirst.Trim()} {userLast.Trim()} to {partnerFirst!.Trim()} {partnerLast!.Trim()} via spawner."
+            : $"Cleared partner for {userFirst.Trim()} {userLast.Trim()} via spawner.";
+
+        return SendAsync(request, successMessage, cancellationToken);
     }
 
     public Task<DataToolResult> ImportIarUrlAsync(

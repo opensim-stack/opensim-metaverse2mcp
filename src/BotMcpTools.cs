@@ -258,6 +258,17 @@ internal sealed class BotMcpTools
         return ChangeBotRunningStateAsync(first, last, "restart", cancellationToken);
     }
 
+    [McpServerTool, Description("Set or clear local-user partnership via opensim-spawner. Both users must exist locally in the grid database. Provide partnerFirst and partnerLast to set both sides; omit both to clear only this user's partner (divorcing both users requires two calls).")]
+    public Task<DataToolResult> SetPartner(
+        [Description("Primary local user's first name.")] string userFirst,
+        [Description("Primary local user's last name.")] string userLast,
+        [Description("Optional partner's local first name. Must be provided with partnerLast.")] string? partnerFirst = null,
+        [Description("Optional partner's local last name. Must be provided with partnerFirst.")] string? partnerLast = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _spawnerClient.SetPartnerAsync(userFirst, userLast, partnerFirst, partnerLast, cancellationToken);
+    }
+
     private async Task<DataToolResult> ChangeBotRunningStateAsync(
         string first,
         string last,

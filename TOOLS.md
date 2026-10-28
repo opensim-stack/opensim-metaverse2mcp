@@ -14,6 +14,7 @@ The server publishes tools including:
 - `BotStop`
 - `BotRestart`
 - `BotDelete`
+- `SetPartner`
 - `Sit`
 - `SitOnPrim`
 - `SitOnPrimByName`
@@ -195,6 +196,9 @@ Social/friends notes:
 - `FriendSetRights` controls the three viewer switches: see online, locate on map, and edit/delete/take objects.
 - `FriendRightsGet` reports both sides of rights (`myRights` and `theirRights`) for one friend UUID.
 - Accepting a friendship offer from a configured handler auto-enables all three rights by default.
+- `SetPartner` updates local profile partnership data in the grid database (`userprofile.profilePartner`) for local users.
+- `SetPartner` with `partnerFirst` + `partnerLast` sets both sides in one call when both local users exist.
+- `SetPartner` with no partner parameters clears only the target user's partner; divorcing both users requires two calls.
 - Incoming group invitations emit runtime event `groups.invite.received` on channel `friends`; use `groupId` (+ optional `sessionId`) with `GroupInviteRespond` to accept/decline.
 - Incoming scripted object dialogs emit runtime event `script.dialog.received` on channel `general`; use `pendingDialogHandle` with `ScriptDialogChoice` (`buttonIndex=-1` cancels without responding).
 - Scripted text-box prompts (for example `llTextBox`) can be answered with `ScriptDialogTextInput(pendingDialogHandle, text)` using the same pending dialog handle.
