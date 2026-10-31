@@ -86,19 +86,32 @@ internal sealed partial class BotSession
                     .ConfigureAwait(false))
                 .Select(a =>
                 {
-                    if (!TryFindAttachedObjectForInventoryItem(client, a.Key, out var objectId, out var localId))
+                    var itemName = TryResolveInventoryItemName(client.Inventory.Store, a.Key);
+                    if (!TryFindAttachedObjectSnapshotForInventoryItem(client, a.Key, out var objectId, out var localId, out var objectAttachmentPoint))
                     {
                         unresolvedLiveAttachmentObjects++;
                         return new AttachmentInfo(
                             a.Key.ToString(),
+                            itemName,
                             a.Value.ToString(),
+                            (int)a.Value,
+                            null,
+                            null,
                             null,
                             null);
                     }
 
+                    var effectiveAttachmentPoint = a.Value == AttachmentPoint.Default && objectAttachmentPoint != AttachmentPoint.Default
+                        ? objectAttachmentPoint
+                        : a.Value;
+
                     return new AttachmentInfo(
                         a.Key.ToString(),
-                        a.Value.ToString(),
+                        itemName,
+                        effectiveAttachmentPoint.ToString(),
+                        (int)effectiveAttachmentPoint,
+                        objectAttachmentPoint.ToString(),
+                        (int)objectAttachmentPoint,
                         objectId.ToString(),
                         localId);
                 })
@@ -5901,6 +5914,7 @@ internal sealed partial class BotSession
             {
                 AddWearable(new WearableInfo(
                     wearable.ItemID.ToString(),
+                    TryResolveInventoryItemName(client.Inventory.Store, wearable.ItemID),
                     wearable.AssetID.ToString(),
                     wearable.WearableType.ToString(),
                     wearable.AssetType.ToString(),
@@ -5925,6 +5939,7 @@ internal sealed partial class BotSession
                     {
                         AddWearable(new WearableInfo(
                             wearable.UUID.ToString(),
+                            wearable.Name,
                             wearable.AssetUUID.ToString(),
                             wearable.WearableType.ToString(),
                             wearable.AssetType.ToString(),
@@ -5939,6 +5954,7 @@ internal sealed partial class BotSession
 
                     AddWearable(new WearableInfo(
                         link.ResolvedItemID.ToString(),
+                        link.Name,
                         string.Empty,
                         "unknown",
                         "unknown",
@@ -6092,14 +6108,26 @@ internal sealed partial class BotSession
         return item;
     }
 
-    private static bool TryFindAttachedObjectForInventoryItem(
+    private static string? TryResolveInventoryItemName(Inventory? store, UUID itemId)
+    {
+        if (itemId == UUID.Zero || store == null || !store.TryGetValue(itemId, out var entry) || entry is not InventoryItem item)
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(item.Name) ? null : item.Name;
+    }
+
+    private static bool TryFindAttachedObjectSnapshotForInventoryItem(
         GridClient client,
         UUID inventoryItemId,
         out UUID attachedObjectId,
-        out uint attachedLocalId)
+        out uint attachedLocalId,
+        out AttachmentPoint attachedAttachmentPoint)
     {
         attachedObjectId = UUID.Zero;
         attachedLocalId = 0;
+        attachedAttachmentPoint = AttachmentPoint.Default;
 
         var sim = client.Network.CurrentSim;
         if (sim == null)
@@ -6128,12 +6156,27 @@ internal sealed partial class BotSession
                 {
                     attachedObjectId = prim.ID;
                     attachedLocalId = prim.LocalID;
+                    attachedAttachmentPoint = prim.PrimData.AttachmentPoint;
                     return true;
                 }
             }
         }
 
         return false;
+    }
+
+    private static bool TryFindAttachedObjectForInventoryItem(
+        GridClient client,
+        UUID inventoryItemId,
+        out UUID attachedObjectId,
+        out uint attachedLocalId)
+    {
+        return TryFindAttachedObjectSnapshotForInventoryItem(
+            client,
+            inventoryItemId,
+            out attachedObjectId,
+            out attachedLocalId,
+            out _);
     }
 
     public async Task<AvatarAppearanceStateResult> AvatarAppearanceListWornAsync(
@@ -7053,9 +7096,17 @@ internal sealed record InventoryOfferHistoryResult(bool Ok, string Message, IRea
         => new(false, message, Array.Empty<InventoryOfferEventInfo>());
 }
 
-internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType, string Source);
+internal sealed record WearableInfo(string ItemId, string? ItemName, string AssetId, string WearableType, string AssetType, string Source);
 
-internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint, string? ObjectId, uint? ObjectLocalId);
+internal sealed record AttachmentInfo(
+    string ItemId,
+    string? ItemName,
+    string AttachmentPoint,
+    int AttachmentPointRaw,
+    string? ObjectAttachmentPoint,
+    int? ObjectAttachmentPointRaw,
+    string? ObjectId,
+    uint? ObjectLocalId);
 
 internal sealed record AvatarAttachmentInfo(string AttachmentPoint, string ObjectId, uint? ObjectLocalId);
 

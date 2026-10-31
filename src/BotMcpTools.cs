@@ -3090,10 +3090,10 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("List currently worn wearables and attachments.")]
     public Task<AppearanceStateResult> AppearanceListWorn(
-        [Description("Include runtime appearance snapshot sources (`GetWearables` / `GetAttachmentsByItemId`).")]
-        bool includeAttachmentsAndWearables = true,
-        [Description("Include Current Outfit Folder (COF) link sources.")]
+        [Description("Include Current Outfit Folder (COF) link sources (preferred).")]
         bool includeCurrentOutfit = true,
+        [Description("Include runtime appearance snapshot sources (`GetWearables` / `GetAttachmentsByItemId`).")]
+        bool includeAttachmentsAndWearables = false,
         CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceListWornAsync(includeAttachmentsAndWearables, includeCurrentOutfit, cancellationToken);
