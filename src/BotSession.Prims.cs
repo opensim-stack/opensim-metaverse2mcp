@@ -727,6 +727,24 @@ internal sealed partial class BotSession
         }
     }
 
+    private static PrimFaceTextureInfo BuildFaceTextureInfo(int faceIndex, Primitive.TextureEntryFace face)
+    {
+        return new PrimFaceTextureInfo(
+            faceIndex,
+            face.TextureID.ToString(),
+            face.RepeatU,
+            face.RepeatV,
+            face.OffsetU,
+            face.OffsetV,
+            face.Rotation,
+            face.RGBA.R,
+            face.RGBA.G,
+            face.RGBA.B,
+            face.RGBA.A,
+            face.Glow,
+            face.Fullbright);
+    }
+
     private PrimInfo BuildPrimInfo(
         Primitive prim,
         bool includeFaceTextures,
@@ -744,6 +762,13 @@ internal sealed partial class BotSession
 
         if (includeFaceTextures && prim.Textures != null)
         {
+            // Face -1 carries the default texture entry (UV/colour included) so a
+            // renderer can draw faces that have no explicit override.
+            if (prim.Textures.DefaultTexture != null)
+            {
+                faceTextures.Add(BuildFaceTextureInfo(-1, prim.Textures.DefaultTexture));
+            }
+
             for (var i = 0; i < Primitive.TextureEntry.MAX_FACES; i++)
             {
                 var face = prim.Textures.FaceTextures[i];
@@ -752,7 +777,7 @@ internal sealed partial class BotSession
                     continue;
                 }
 
-                faceTextures.Add(new PrimFaceTextureInfo(i, face.TextureID.ToString()));
+                faceTextures.Add(BuildFaceTextureInfo(i, face));
             }
         }
 
@@ -1502,7 +1527,20 @@ internal sealed record PrimCreateResult(bool Ok, string Message, uint LocalId)
     public static PrimCreateResult FailResult(string message) => new(false, message, 0);
 }
 
-internal sealed record PrimFaceTextureInfo(int FaceIndex, string TextureId);
+internal sealed record PrimFaceTextureInfo(
+    int FaceIndex,
+    string TextureId,
+    float RepeatU,
+    float RepeatV,
+    float OffsetU,
+    float OffsetV,
+    float RotationRadians,
+    float ColorR,
+    float ColorG,
+    float ColorB,
+    float Alpha,
+    float Glow,
+    bool Fullbright);
 
 internal sealed record PrimSummary(
     uint LocalId,
