@@ -258,7 +258,7 @@ internal sealed class BotMcpTools
         return ChangeBotRunningStateAsync(first, last, "restart", cancellationToken);
     }
 
-    [McpServerTool, Description("Set or clear local-user partnership via opensim-spawner. Both users must exist locally in the grid database. Provide partnerFirst and partnerLast to set both sides; omit both to clear only this user's partner (divorcing both users requires two calls).")]
+    [McpServerTool, Description("Set or clear local-user partnership via opensim-spawner. Both users must exist locally in the grid database. Provide partnerFirst and partnerLast to set both sides; omit both to clear only this user's partner (divorcing both users requires two calls). Partner status can be retrieved in the agent profile, although actual status may lag due to caching (assume status returned here is correct)")]
     public Task<DataToolResult> SetPartner(
         [Description("Primary local user's first name.")] string userFirst,
         [Description("Primary local user's last name.")] string userLast,
@@ -1115,8 +1115,8 @@ internal sealed class BotMcpTools
         return LocateAgentByUuidAsync(targetId, null, null, cancellationToken);
     }
 
-    [McpServerTool, Description("Return true only when the target agent is in the same region, the current region access is Adult, and both the bot and target profile flags indicate adult/mature eligibility.")]
-    public Task<bool> IsAdultInteractionAllowed(
+    [McpServerTool, Description("Return adult-interaction eligibility plus denial reason details (if denied).")]
+    public Task<BotSession.AdultInteractionAllowanceResult> IsAdultInteractionAllowed(
         [Description("Target agent UUID.")] string agentId,
         CancellationToken cancellationToken = default)
     {

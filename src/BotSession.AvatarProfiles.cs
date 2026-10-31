@@ -81,11 +81,13 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool> IsAdultInteractionAllowedAsync(string agentId, CancellationToken cancellationToken)
+    public async Task<AdultInteractionAllowanceResult> IsAdultInteractionAllowedAsync(string agentId, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(agentId, out var targetAgentId) || targetAgentId == UUID.Zero)
         {
-            return false;
+            return AdultInteractionAllowanceResult.Denied(
+                AdultInteractionDeniedReason.InvalidTargetAgentId,
+                "agentId must be a valid non-zero UUID.");
         }
 
         await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -96,19 +98,27 @@ internal sealed partial class BotSession
             var sim = client.Network.CurrentSim;
             if (sim == null)
             {
-                return false;
+                return AdultInteractionAllowanceResult.Denied(
+                    AdultInteractionDeniedReason.NotInRegion,
+                    "Bot is not currently in any region.");
             }
 
             if (sim.Access != SimAccess.Adult)
             {
-                return false;
+                Console.WriteLine($"Current region {sim.Name} is not Adult, so adult interaction is not allowed.");
+                return AdultInteractionAllowanceResult.Denied(
+                    AdultInteractionDeniedReason.CurrentRegionNotAdult,
+                    $"Current region '{sim.Name}' access is {sim.Access}, not Adult.");
             }
 
             var inSameRegion = targetAgentId == client.Self.AgentID
                 || sim.ObjectsAvatars.Values.Any(avatar => avatar != null && avatar.ID == targetAgentId);
             if (!inSameRegion)
             {
-                return false;
+                Console.WriteLine($"Target avatar {targetAgentId} is not in the same region {sim.Name}, so adult interaction is not allowed.");
+                return AdultInteractionAllowanceResult.Denied(
+                    AdultInteractionDeniedReason.TargetNotInSameRegion,
+                    $"Target avatar {targetAgentId} is not in current region '{sim.Name}'.");
             }
 
             var timeout = TimeSpan.FromSeconds(8);
@@ -118,11 +128,56 @@ internal sealed partial class BotSession
             var selfSignals = await selfSignalsTask.ConfigureAwait(false);
             var targetSignals = await targetSignalsTask.ConfigureAwait(false);
 
-            return selfSignals.IsAdultOrMature && targetSignals.IsAdultOrMature;
+            if (!selfSignals.HasProfileData)
+            {
+                return AdultInteractionAllowanceResult.Denied(
+                    AdultInteractionDeniedReason.SelfProfileUnavailable,
+                    "Could not retrieve bot profile flags in time.");
+            }
+
+            if (!targetSignals.HasProfileData)
+            {
+                return AdultInteractionAllowanceResult.Denied(
+                    AdultInteractionDeniedReason.TargetProfileUnavailable,
+                    "Could not retrieve target avatar profile flags in time.",
+                    selfSignals.IsAdultOrMature,
+                    null);
+            }
+            
+            Console.WriteLine($"Self avatar adult/mature={selfSignals.IsAdultOrMature}, target avatar adult/mature={targetSignals.IsAdultOrMature}.");
+
+            if (!selfSignals.IsAdultOrMature)
+            {
+                return AdultInteractionAllowanceResult.Denied(
+                    AdultInteractionDeniedReason.SelfNotAdultOrMature,
+                    "Bot profile flags do not indicate Adult/Mature eligibility.",
+                    selfSignals.IsAdultOrMature,
+                    targetSignals.IsAdultOrMature);
+            }
+
+            if (!targetSignals.IsAdultOrMature)
+            {
+                return AdultInteractionAllowanceResult.Denied(
+                    AdultInteractionDeniedReason.TargetNotAdultOrMature,
+                    "Target profile flags do not indicate Adult/Mature eligibility.",
+                    selfSignals.IsAdultOrMature,
+                    targetSignals.IsAdultOrMature);
+            }
+
+            return AdultInteractionAllowanceResult.CreateAllowed(selfSignals.IsAdultOrMature, targetSignals.IsAdultOrMature);
+        }
+        catch (OperationCanceledException)
+        {
+            return AdultInteractionAllowanceResult.Denied(
+                AdultInteractionDeniedReason.OperationCanceled,
+                "Operation canceled.");
         }
         catch
         {
-            return false;
+            Console.WriteLine($"Failed to determine adult interaction allowance for target avatar {agentId}.");
+            return AdultInteractionAllowanceResult.Denied(
+                AdultInteractionDeniedReason.EvaluationFailed,
+                $"Failed to determine adult interaction allowance for target avatar {agentId}.");
         }
         finally
         {
@@ -394,12 +449,13 @@ internal sealed partial class BotSession
 
         if (!udpReply.PropertiesReceived || !udpReply.Properties.HasValue)
         {
-            return new AvatarProfileSignals(IsAdultOrMature: false, HasPaymentInfoOnFile: false);
+            return new AvatarProfileSignals(HasProfileData: false, IsAdultOrMature: false, HasPaymentInfoOnFile: false);
         }
 
         var profile = udpReply.Properties.Value;
         var ageVerified = profile.Flags.HasFlag(ProfileFlags.AgeVerified);
         return new AvatarProfileSignals(
+            HasProfileData: true,
             IsAdultOrMature: profile.MaturePublish || ageVerified,
             HasPaymentInfoOnFile: profile.Identified || profile.Transacted);
     }
@@ -598,5 +654,48 @@ internal sealed partial class BotSession
         bool InterestsReceived,
         Avatar.Interests? Interests);
 
-    private readonly record struct AvatarProfileSignals(bool IsAdultOrMature, bool HasPaymentInfoOnFile);
+    public enum AdultInteractionDeniedReason
+    {
+        None = 0,
+        InvalidTargetAgentId,
+        NotInRegion,
+        CurrentRegionNotAdult,
+        TargetNotInSameRegion,
+        SelfProfileUnavailable,
+        TargetProfileUnavailable,
+        SelfNotAdultOrMature,
+        TargetNotAdultOrMature,
+        OperationCanceled,
+        EvaluationFailed
+    }
+
+    public readonly record struct AdultInteractionAllowanceResult(
+        bool Allowed,
+        AdultInteractionDeniedReason Reason,
+        string Message,
+        bool? SelfIsAdultOrMature = null,
+        bool? TargetIsAdultOrMature = null)
+    {
+        public static AdultInteractionAllowanceResult CreateAllowed(bool selfIsAdultOrMature, bool targetIsAdultOrMature)
+            => new(
+                Allowed: true,
+                Reason: AdultInteractionDeniedReason.None,
+                Message: "Adult interaction is allowed.",
+                SelfIsAdultOrMature: selfIsAdultOrMature,
+                TargetIsAdultOrMature: targetIsAdultOrMature);
+
+        public static AdultInteractionAllowanceResult Denied(
+            AdultInteractionDeniedReason reason,
+            string message,
+            bool? selfIsAdultOrMature = null,
+            bool? targetIsAdultOrMature = null)
+            => new(
+                Allowed: false,
+                Reason: reason,
+                Message: message,
+                SelfIsAdultOrMature: selfIsAdultOrMature,
+                TargetIsAdultOrMature: targetIsAdultOrMature);
+    }
+
+    private readonly record struct AvatarProfileSignals(bool HasProfileData, bool IsAdultOrMature, bool HasPaymentInfoOnFile);
 }
