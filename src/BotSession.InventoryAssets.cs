@@ -2897,7 +2897,6 @@ internal sealed partial class BotSession
                 }
 
                 Console.WriteLine($"[inventory-list] folder found in local store folder={folderUuid} name='{folder.Name}'");
-                entries.Add(folder);
 
                 if (recursive)
                 {
@@ -2922,11 +2921,18 @@ internal sealed partial class BotSession
                         Console.WriteLine($"[inventory-list] local cache read failed for folder={folderUuid}: {ex.GetType().Name}: {ex.Message}");
                     }
 
-                    var shouldFetchFromServer = cachedContents == null || (cachedContents.Count == 0 && folder.DescendentCount > 0);
+                    var cachedDirectChildren = cachedContents?
+                        .Where(entry => entry.ParentUUID == folderUuid && entry.UUID != folderUuid)
+                        .ToList();
+
+                    var shouldFetchFromServer = cachedContents == null
+                        || ((cachedDirectChildren == null || cachedDirectChildren.Count == 0) && folder.DescendentCount > 0);
+
                     if (!shouldFetchFromServer)
                     {
-                        entries.AddRange(cachedContents!);
-                        Console.WriteLine($"[inventory-list] using local cache children={cachedContents!.Count} descendentCountHint={folder.DescendentCount} totalEntries={entries.Count}");
+                        entries.AddRange(cachedDirectChildren!);
+                        Console.WriteLine(
+                            $"[inventory-list] using local cache rawChildren={cachedContents!.Count} directChildren={cachedDirectChildren!.Count} descendentCountHint={folder.DescendentCount} totalEntries={entries.Count}");
                     }
                     else
                     {
@@ -2947,8 +2953,13 @@ internal sealed partial class BotSession
                                 $"Timed out waiting for folder contents for {folderUuid}. The simulator did not answer within 90 seconds.");
                         }
 
-                        entries.AddRange(contents);
-                        Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
+                        var directChildren = contents
+                            .Where(entry => entry.ParentUUID == folderUuid && entry.UUID != folderUuid)
+                            .ToList();
+
+                        entries.AddRange(directChildren);
+                        Console.WriteLine(
+                            $"[inventory-list] folder contents fetch completed rawChildren={contents.Count} directChildren={directChildren.Count} totalEntries={entries.Count}");
                     }
                 }
 
