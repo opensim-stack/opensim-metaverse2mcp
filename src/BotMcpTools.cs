@@ -2288,7 +2288,7 @@ internal sealed class BotMcpTools
         return _bot.PayAsync(targetType, targetId, amount, description, cancellationToken);
     }
 
-    [McpServerTool, Description("Start listing inventory entries under a folder UUID/path (or root if omitted). This queues a background BotTask because large inventories, especially recursive queries, may take time. The completion event returns a deterministic resultHandle for InventoryListRetrieve and InventoryListClear, which also enables rudimentary caching by folder path plus recursion mode.")]
+    [McpServerTool, Description("Start listing inventory entries under a folder UUID/path (or root if omitted). This queues a background BotTask because large inventories, especially recursive queries, may take time. The returned BotTaskHandle includes resultHandle immediately, and completion events also include it for InventoryListRetrieve and InventoryListClear.")]
     public Task<BotTaskHandle> InventoryList(
         [Description("True to recurse into subfolders.")] bool recursive = false,
         [Description("Optional inventory folder UUID or slash-separated path (e.g. 'My Folder/Sub Folder'). Leave empty for inventory root.")] string? folderIdOrPath = null,

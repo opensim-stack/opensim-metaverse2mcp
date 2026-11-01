@@ -2556,7 +2556,7 @@ internal sealed partial class BotSession
             
         Console.WriteLine($"[inventory-list] start handle='{resultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
 
-        return Task.FromResult(StartBotTask(
+        var taskHandle = StartBotTask(
             description,
             async (taskHandle, taskCancellationToken) =>
             {
@@ -2600,7 +2600,10 @@ internal sealed partial class BotSession
                     Console.WriteLine($"[inventory-list] retrieval failed for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}: {ex.GetType().Name}: {ex.Message}");
                     EmitInventoryListCompleteEvent(taskHandle.Handle, resultHandle, false, $"Inventory list task failed: {ex.Message}");
                 }
-            }));
+            });
+
+        taskHandle.ResultHandle = resultHandle;
+        return Task.FromResult(taskHandle);
     }
 
     public Task<InventoryQueryResult> InventoryListRetrieveAsync(
@@ -2663,6 +2666,12 @@ internal sealed partial class BotSession
 
             if (!TryGetInventoryListResult(normalizedResultHandle, out var storedResult, out var storeError))
             {
+                if (TryDescribePendingInventoryListResult(normalizedResultHandle, out var pendingMessage))
+                {
+                    Console.WriteLine($"[inventory-list-retrieve] pending handle='{normalizedResultHandle}': {pendingMessage}");
+                    return Task.FromResult(InventoryQueryResult.FailResult(pendingMessage));
+                }
+
                 Console.WriteLine($"[inventory-list-retrieve] lookup failed handle='{normalizedResultHandle}': {storeError}");
                 return Task.FromResult(InventoryQueryResult.FailResult(storeError));
             }
@@ -3075,6 +3084,31 @@ internal sealed partial class BotSession
 
             return true;
         }
+    }
+
+    private bool TryDescribePendingInventoryListResult(string handle, out string message)
+    {
+        lock (_inventoryListResultLock)
+        {
+            if (_inventoryListResultHandleByTaskHandle.TryGetValue(handle, out var canonicalByTask)
+                && !_inventoryListResultsByHandle.ContainsKey(canonicalByTask))
+            {
+                message = $"Inventory list task '{handle}' is still running. Retry with resultHandle '{canonicalByTask}' after receiving inventory.list.complete.";
+                return true;
+            }
+
+            var matchingTask = _inventoryListResultHandleByTaskHandle
+                .FirstOrDefault(pair => string.Equals(pair.Value, handle, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(matchingTask.Key)
+                && !_inventoryListResultsByHandle.ContainsKey(handle))
+            {
+                message = $"Inventory list result '{handle}' is not materialized yet (task '{matchingTask.Key}' still in progress).";
+                return true;
+            }
+        }
+
+        message = string.Empty;
+        return false;
     }
 
     private static string BuildInventoryListResultHandle(string? folderIdOrPath, bool recursive)
