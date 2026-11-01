@@ -2925,8 +2925,11 @@ internal sealed partial class BotSession
                         .Where(entry => entry.ParentUUID == folderUuid && entry.UUID != folderUuid)
                         .ToList();
 
+                    // DescendentCount can be stale/zero before a folder has been explicitly hydrated,
+                    // so treat an empty direct-child cache as incomplete and refresh from server.
                     var shouldFetchFromServer = cachedContents == null
-                        || ((cachedDirectChildren == null || cachedDirectChildren.Count == 0) && folder.DescendentCount > 0);
+                        || cachedDirectChildren == null
+                        || cachedDirectChildren.Count == 0;
 
                     if (!shouldFetchFromServer)
                     {
