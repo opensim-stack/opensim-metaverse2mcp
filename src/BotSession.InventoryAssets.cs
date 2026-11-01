@@ -2549,17 +2549,17 @@ internal sealed partial class BotSession
         bool recursive,
         CancellationToken cancellationToken)
     {
-        var resultHandle = BuildInventoryListResultHandle(folderIdOrPath, recursive);
         var description = recursive
             ? $"Inventory list folder '{folderIdOrPath ?? "<root>"}' recursively."
             : $"Inventory list folder '{folderIdOrPath ?? "<root>"}'.";
-            
-        Console.WriteLine($"[inventory-list] start handle='{resultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
 
         var taskHandle = StartBotTask(
             description,
             async (taskHandle, taskCancellationToken) =>
             {
+                var resultHandle = BuildInventoryListResultHandleForTask(taskHandle.Handle);
+                taskHandle.ResultHandle = resultHandle;
+
                 try
                 {
                     RegisterInventoryListTaskHandle(taskHandle.Handle, resultHandle);
@@ -2602,7 +2602,8 @@ internal sealed partial class BotSession
                 }
             });
 
-        taskHandle.ResultHandle = resultHandle;
+        taskHandle.ResultHandle = BuildInventoryListResultHandleForTask(taskHandle.Handle);
+        Console.WriteLine($"[inventory-list] start taskHandle='{taskHandle.Handle}' resultHandle='{taskHandle.ResultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
         return Task.FromResult(taskHandle);
     }
 
@@ -2869,7 +2870,7 @@ internal sealed partial class BotSession
             return await ExecuteLockedAsync(async (client, token) =>
             {
                 var lockStopwatch = Stopwatch.StartNew();
-                Console.WriteLine("[inventory-list] execute-locked begin");
+                Console.WriteLine($"[inventory-list] execute-locked begin waitMs={overallStopwatch.ElapsedMilliseconds}");
 
                 var store = client.Inventory.Store;
                 var root = store?.RootFolder;
@@ -2911,11 +2912,44 @@ internal sealed partial class BotSession
                 else
                 {
                     Console.WriteLine($"[inventory-list] performing non-recursive inventory fetch for folder={folderUuid}");
-                    var contents = await client.Inventory
-                        .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, token)
-                        .ConfigureAwait(false);
-                    entries.AddRange(contents);
-                    Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
+                    List<InventoryBase>? cachedContents = null;
+                    try
+                    {
+                        cachedContents = store.GetContents(folderUuid);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[inventory-list] local cache read failed for folder={folderUuid}: {ex.GetType().Name}: {ex.Message}");
+                    }
+
+                    var shouldFetchFromServer = cachedContents == null || (cachedContents.Count == 0 && folder.DescendentCount > 0);
+                    if (!shouldFetchFromServer)
+                    {
+                        entries.AddRange(cachedContents!);
+                        Console.WriteLine($"[inventory-list] using local cache children={cachedContents!.Count} descendentCountHint={folder.DescendentCount} totalEntries={entries.Count}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[inventory-list] local cache appears incomplete for folder={folderUuid}; requesting server refresh");
+                        using var nonRecursiveTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        nonRecursiveTimeoutCts.CancelAfter(TimeSpan.FromSeconds(90));
+
+                        IReadOnlyList<InventoryBase> contents;
+                        try
+                        {
+                            contents = await client.Inventory
+                                .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, nonRecursiveTimeoutCts.Token)
+                                .ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                        {
+                            return InventoryQueryResult.FailResult(
+                                $"Timed out waiting for folder contents for {folderUuid}. The simulator did not answer within 90 seconds.");
+                        }
+
+                        entries.AddRange(contents);
+                        Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
+                    }
                 }
 
                 var materialized = new List<InventoryEntry>(entries.Count);
@@ -3111,13 +3145,9 @@ internal sealed partial class BotSession
         return false;
     }
 
-    private static string BuildInventoryListResultHandle(string? folderIdOrPath, bool recursive)
+    private static string BuildInventoryListResultHandleForTask(string taskHandle)
     {
-        var normalizedFolder = string.IsNullOrWhiteSpace(folderIdOrPath)
-            ? "<root>"
-            : folderIdOrPath.Trim().Replace('\\', '/');
-
-        var signature = $"{normalizedFolder}|recursive={recursive.ToString().ToLowerInvariant()}";
+        var signature = $"task={taskHandle.Trim()}";
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(signature));
         return $"inventory-list:{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
