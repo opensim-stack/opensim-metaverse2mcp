@@ -269,6 +269,15 @@ internal sealed class BotMcpTools
         return _spawnerClient.SetPartnerAsync(userFirst, userLast, partnerFirst, partnerLast, cancellationToken);
     }
 
+    [McpServerTool, Description("Set the bot avatar's own display name using AgentManager.SetDisplayNameAsync. oldDisplayName is optional and defaults to the bot's current known name.")]
+    public Task<BotToolResult> SetDisplayName(
+        [Description("Requested new display name for this bot avatar.")] string newDisplayName,
+        [Description("Current display name expected by the simulator; optional but may be required by some grids.")] string? oldDisplayName = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SetDisplayNameAsync(newDisplayName, oldDisplayName, cancellationToken);
+    }
+
     private async Task<DataToolResult> ChangeBotRunningStateAsync(
         string first,
         string last,
@@ -2300,8 +2309,8 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Retrieve materialized results using the InventoryList completion resultHandle. Call InventoryListClear when finished searching to release cached results.")]
     public Task<InventoryQueryResult> InventoryListRetrieve(
         [Description("InventoryList resultHandle returned by the completion event.")] string resultHandle,
-        [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults = 25,
-        [Description("Page size for this response (1..500).") ] int pageSize = 25,
+        [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults = 50,
+        [Description("Page size for this response (1..500).") ] int pageSize = 50,
         [Description("Optional case-insensitive substring filter applied to entry names.")] string? nameContains = null,
         [Description("Optional type filter (matches kind/assetType/inventoryType, case-insensitive).") ] string? type = null,
         [Description("Optional lower-bound creation timestamp (ISO-8601 UTC).") ] string? createdAfterUtc = null,

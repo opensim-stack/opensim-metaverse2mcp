@@ -7,6 +7,45 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
+    public async Task<BotToolResult> SetDisplayNameAsync(
+        string newDisplayName,
+        string? oldDisplayName,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(newDisplayName))
+        {
+            return BotToolResult.Fail("newDisplayName is required.");
+        }
+
+        var normalizedNewDisplayName = newDisplayName.Trim();
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var normalizedOldDisplayName = string.IsNullOrWhiteSpace(oldDisplayName)
+                ? client.Self.Name?.Trim() ?? string.Empty
+                : oldDisplayName.Trim();
+
+            if (string.IsNullOrWhiteSpace(normalizedOldDisplayName))
+            {
+                normalizedOldDisplayName = $"{_options.BotFirstName} {_options.BotLastName}".Trim();
+            }
+
+            if (string.IsNullOrWhiteSpace(normalizedOldDisplayName))
+            {
+                return BotToolResult.Fail("oldDisplayName is required when the current avatar name cannot be resolved.");
+            }
+
+           /* var setDisplayNameCap = client.Network.CurrentSim?.Caps?.CapabilityURI("SetDisplayName");
+            if (setDisplayNameCap == null)
+            {
+                return BotToolResult.Fail("Current simulator does not expose SetDisplayName capability.");
+            }*/
+
+            await client.Self.SetDisplayNameAsync(normalizedOldDisplayName, normalizedNewDisplayName, token).ConfigureAwait(false);
+            return BotToolResult.OkResult($"Requested display name update to '{normalizedNewDisplayName}'.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<DataToolResult> AvatarProfileGetAsync(
         string avatarId,
         bool includeAgentProfileCapability,
