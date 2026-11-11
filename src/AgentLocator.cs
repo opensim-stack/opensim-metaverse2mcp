@@ -310,6 +310,20 @@ internal sealed class AgentLocator
             return new AgentResolutionResult(false, UUID.Zero, "No connected client snapshot available for avatar name search.");
         }
 
+        // Fast-path & Hypergrid visitor support: visiting avatars on foreign Hypergrid sims are not in the
+        // foreign grid's user directory (AvatarPickerReply), and their scene names are rewritten as "First.Last @authority".
+        // Check nearby simulator avatars and known friends first.
+        if (TryResolveFromSceneOrFriends(connectedClient, normalizedQuery, out var localResolvedId, out var localResolvedName))
+        {
+            CacheResolvedIdentity(localResolvedId, localResolvedName);
+            if (!string.Equals(localResolvedName, normalizedQuery, StringComparison.OrdinalIgnoreCase))
+            {
+                CacheResolvedIdentity(localResolvedId, normalizedQuery);
+            }
+
+            return new AgentResolutionResult(true, localResolvedId, null);
+        }
+
         var queryId = UUID.Random();
         var reply = await WaitForAvatarPickerReplyAsync(connectedClient, normalizedQuery, queryId, AvatarNameSearchTimeout, cancellationToken)
             .ConfigureAwait(false);
@@ -326,7 +340,7 @@ internal sealed class AgentLocator
             }
 
             var candidateName = NormalizeAvatarName(candidate.Value);
-            if (string.Equals(candidateName, normalizedQuery, StringComparison.OrdinalIgnoreCase))
+            if (AvatarNameMatchesQuery(candidateName, normalizedQuery))
             {
                 CacheResolvedIdentity(candidate.Key, candidateName);
                 return new AgentResolutionResult(true, candidate.Key, null);
@@ -334,6 +348,70 @@ internal sealed class AgentLocator
         }
 
         return new AgentResolutionResult(false, UUID.Zero, $"Agent '{normalizedQuery}' could not be found.");
+    }
+
+    private static bool TryResolveFromSceneOrFriends(
+        GridClient client,
+        string normalizedQuery,
+        out UUID agentId,
+        out string matchedName)
+    {
+        agentId = UUID.Zero;
+        matchedName = string.Empty;
+
+        var sim = client.Network.CurrentSim;
+        if (sim != null)
+        {
+            foreach (var avatar in sim.ObjectsAvatars.Values)
+            {
+                if (avatar == null || avatar.ID == UUID.Zero)
+                {
+                    continue;
+                }
+
+                var name = NormalizeAvatarName(avatar.Name);
+                if (AvatarNameMatchesQuery(name, normalizedQuery))
+                {
+                    agentId = avatar.ID;
+                    matchedName = name;
+                    return true;
+                }
+            }
+        }
+
+        foreach (var friend in client.Friends.FriendList.Values)
+        {
+            if (friend == null || friend.UUID == UUID.Zero)
+            {
+                continue;
+            }
+
+            var name = NormalizeAvatarName(friend.Name);
+            if (AvatarNameMatchesQuery(name, normalizedQuery))
+            {
+                agentId = friend.UUID;
+                matchedName = name;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool AvatarNameMatchesQuery(string candidateName, string normalizedQuery)
+    {
+        if (string.IsNullOrWhiteSpace(candidateName) || string.IsNullOrWhiteSpace(normalizedQuery))
+        {
+            return false;
+        }
+
+        if (string.Equals(candidateName, normalizedQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return BotSession.TryExtractHypergridVisitorIdentity(candidateName, out var hgBaseName, out _)
+            && string.Equals(hgBaseName, normalizedQuery, StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<string?> ResolveAgentNameByIdAsync(

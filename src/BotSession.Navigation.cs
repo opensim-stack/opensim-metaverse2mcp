@@ -352,6 +352,18 @@ internal sealed partial class BotSession {
 
     public async Task<BotToolResult> TeleportToAsync(float x, float y, float z, string? regionName, CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrWhiteSpace(regionName) && LooksLikeHypergridOrUrlTarget(regionName))
+        {
+            if (!TryParseTeleportDestination(regionName, out var parsedUrl, out var parseError) || parsedUrl == null)
+            {
+                return BotToolResult.Fail(parseError);
+            }
+
+            return await ExecuteLockedAsync(
+                (client, token) => ExecuteParsedTeleportAsync(client, parsedUrl, x, y, z, token),
+                cancellationToken).ConfigureAwait(false);
+        }
+
         return await ExecuteLockedAsync(async (client, token) =>
         {
             var currentSim = client.Network.CurrentSim;
@@ -366,6 +378,15 @@ internal sealed partial class BotSession {
             bool ok;
             string destinationLabel;
             Vector3 target;
+            string? capturedAlert = null;
+            void AlertHandler(object? _, AlertMessageEventArgs e)
+            {
+                if (!string.IsNullOrWhiteSpace(e.Message))
+                {
+                    capturedAlert = e.Message.Trim();
+                }
+            }
+
             if (string.IsNullOrWhiteSpace(regionName) || string.Equals(regionName, currentSim.Name, StringComparison.OrdinalIgnoreCase))
             {
                 // Clamp against the destination region's actual size
@@ -374,16 +395,38 @@ internal sealed partial class BotSession {
                 destinationLabel = currentSim.Name;
                 
                 Console.WriteLine($"[teleport] Teleporting to {destinationLabel} at {FormatVector(target)} because regionName '{regionName}' was empty or matched current region {currentSim.Name}.");
-                
-                ok = await client.Self.TeleportAsync(currentSim.Name, target, token).ConfigureAwait(false);
+
+                client.Self.AlertMessage += AlertHandler;
+                try
+                {
+                    ok = await client.Self.TeleportAsync(currentSim.Handle, target, token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    client.Self.AlertMessage -= AlertHandler;
+                }
             }
             else
             {
                 var requestedRegionName = regionName.Trim();
-                var region = await client.Grid.GetGridRegionAsync(requestedRegionName, GridLayerType.Objects, token).ConfigureAwait(false);
+                await EnsureEventQueueReadyForTeleportAsync(client, token).ConfigureAwait(false);
+                PruneStaleNonNeighborSimulators(client, "pre-teleport-to");
+
+                var parsedDestination = new ParsedTeleportDestination(
+                    OriginalInput: requestedRegionName,
+                    IsHypergrid: false,
+                    Scheme: null,
+                    WireScheme: null,
+                    Host: null,
+                    Port: 0,
+                    RegionName: requestedRegionName,
+                    HasCoordinates: true,
+                    Position: new Vector3(x, y, z));
+
+                var (region, resolveError) = await ResolveDestinationRegionOnCurrentSimAsync(client, parsedDestination, token).ConfigureAwait(false);
                 if (region == null)
                 {
-                    var resolveMessage = $"Unable to resolve destination region '{requestedRegionName}'. It may not exist or map data is unavailable.";
+                    var resolveMessage = resolveError ?? $"Unable to resolve destination region '{requestedRegionName}'. It may not exist or map data is unavailable.";
                     EmitRuntimeEvent(
                         "teleport",
                         "teleport.failed",
@@ -400,17 +443,28 @@ internal sealed partial class BotSession {
                 // Destination region size is unknown pre-teleport; clamp against
                 // maximum varregion extent and let simulator-side routing resolve final landing.
                 target = ClampLocalPosition(new Vector3(x, y, z), MaxRegionExtent, MaxRegionExtent);
-                destinationLabel = $"{region.Value.Name} ({region.Value.RegionHandle})";
+                destinationLabel = $"{region.RegionName} ({region.RegionHandle})";
                 
                 Console.WriteLine($"[teleport] Teleporting to {destinationLabel} at {FormatVector(target)}.");
-                
-                ok = await client.Self.TeleportAsync(region.Value.RegionHandle, target, token).ConfigureAwait(false);
+
+                client.Self.AlertMessage += AlertHandler;
+                try
+                {
+                    ok = await client.Self.TeleportAsync(region.RegionHandle, target, token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    client.Self.AlertMessage -= AlertHandler;
+                }
             }
 
             if (!ok)
             {
-                Console.WriteLine($"[teleport] Teleport failed to {destinationLabel} at {FormatVector(target)}.");
-                var message = BuildTeleportFailureMessage(client.Self.TeleportMessage, destinationLabel);
+                var rawFailure = !string.IsNullOrWhiteSpace(capturedAlert)
+                    ? $"{client.Self.TeleportMessage} (simulator alert: {capturedAlert})".Trim()
+                    : client.Self.TeleportMessage;
+                var message = BuildTeleportFailureMessage(rawFailure, destinationLabel);
+                Console.WriteLine($"[teleport] Teleport failed to {destinationLabel} at {FormatVector(target)}: {message}");
                 EmitRuntimeEvent(
                     "teleport",
                     "teleport.failed",
@@ -419,12 +473,14 @@ internal sealed partial class BotSession {
                     new Dictionary<string, string?>
                     {
                         ["targetRegion"] = destinationLabel,
-                        ["targetPosition"] = FormatVector(target)
+                        ["targetPosition"] = FormatVector(target),
+                        ["alertMessage"] = capturedAlert
                     });
                 return BotToolResult.Fail(message);
             }
             
             var at = await ReadSettledTeleportPositionAsync(client, preTeleportSimHandle, preTeleportPosition, token).ConfigureAwait(false);
+            SchedulePostTeleportSimulatorCleanup(client, "post-teleport-to");
             Console.WriteLine($"[teleport] Teleport succeeded to {destinationLabel} at {FormatVector(at)}.");
 
             EmitRuntimeEvent(
@@ -453,17 +509,20 @@ internal sealed partial class BotSession {
             return BotToolResult.Fail("regionHandle must be an unsigned 64-bit integer.");
         }
 
-        var target = ClampLocalPosition(new Vector3(x, y, z));
+        var target = ClampLocalPosition(new Vector3(x, y, z), MaxRegionExtent, MaxRegionExtent);
         return await ExecuteLockedAsync(async (client, token) =>
         {
+            await EnsureEventQueueReadyForTeleportAsync(client, token).ConfigureAwait(false);
+            PruneStaleNonNeighborSimulators(client, "pre-teleport-handle");
+
             var preTeleportSimHandle = client.Network.CurrentSim?.Handle ?? 0UL;
             var preTeleportPosition = client.Self.SimPosition;
             Console.WriteLine($"[teleport] Teleporting to region handle {handle} at {FormatVector(target)}.");
             var ok = await client.Self.TeleportAsync(handle, target, token).ConfigureAwait(false);
             if (!ok)
             {
-                Console.WriteLine($"[teleport] Teleport failed to region handle {handle} at {FormatVector(target)}.");
                 var message = BuildTeleportFailureMessage(client.Self.TeleportMessage, $"region handle {handle}");
+                Console.WriteLine($"[teleport] Teleport failed to region handle {handle} at {FormatVector(target)}: {message}");
                 EmitRuntimeEvent(
                     "teleport",
                     "teleport.failed",
@@ -478,6 +537,7 @@ internal sealed partial class BotSession {
             }
             
             var settled = await ReadSettledTeleportPositionAsync(client, preTeleportSimHandle, preTeleportPosition, token).ConfigureAwait(false);
+            SchedulePostTeleportSimulatorCleanup(client, "post-teleport-handle");
             Console.WriteLine($"[teleport] Teleport succeeded to region handle {handle} at {FormatVector(settled)}.");
 
             EmitRuntimeEvent(
@@ -496,6 +556,11 @@ internal sealed partial class BotSession {
 
     public Task<BotToolResult> TeleportToLandingPointAsync(string? regionName, CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrWhiteSpace(regionName) && LooksLikeHypergridOrUrlTarget(regionName))
+        {
+            return TeleportToUrlAsync(regionName, null, null, null, cancellationToken);
+        }
+
         // Request default arrival behavior using region-center coordinates.
         // Parcel routing/telehubs can still redirect to landing points.
         return TeleportToAsync(DefaultLandingPointX, DefaultLandingPointY, DefaultLandingPointZ, regionName, cancellationToken);
@@ -526,6 +591,9 @@ internal sealed partial class BotSession {
                 return BotToolResult.Fail(resolveMessage);
             }
 
+            await EnsureEventQueueReadyForTeleportAsync(client, token).ConfigureAwait(false);
+            PruneStaleNonNeighborSimulators(client, "pre-teleport-landmark");
+
             var destinationLabel = resolved.DisplayName;
             Console.WriteLine($"[teleport] Teleporting to landmark {destinationLabel} (asset {resolved.AssetId}).");
 
@@ -536,6 +604,7 @@ internal sealed partial class BotSession {
             if (!ok)
             {
                 var message = BuildTeleportFailureMessage(client.Self.TeleportMessage, $"landmark {destinationLabel}");
+                Console.WriteLine($"[teleport] Teleport failed to landmark {destinationLabel}: {message}");
                 EmitRuntimeEvent(
                     "teleport",
                     "teleport.failed",
@@ -550,6 +619,8 @@ internal sealed partial class BotSession {
             }
 
             var at = await ReadSettledTeleportPositionAsync(client, preTeleportSimHandle, preTeleportPosition, token).ConfigureAwait(false);
+            SchedulePostTeleportSimulatorCleanup(client, "post-teleport-landmark");
+            Console.WriteLine($"[teleport] Teleport succeeded to landmark {destinationLabel} at {FormatVector(at)}.");
             EmitRuntimeEvent(
                 "teleport",
                 "teleport.succeeded",

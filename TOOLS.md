@@ -40,6 +40,8 @@ The server publishes tools including:
 - `FlyTo`
 - `TeleportTo`
 - `TeleportToLandingPoint`
+- `TeleportToUrl`
+- `TeleportHome`
 - `TeleportToRegionHandle`
 - `TeleportToLandmark`
 - `RegionUuid`
@@ -290,7 +292,10 @@ Movement notes:
 - `SitOnPrimByName` resolves nearest name match in current simulator cache, then performs the same object sit handshake.
 - `SitOnNearestSittablePrim` picks the nearest candidate prim in radius (prefers explicit sit targets by default ordering) and performs object sit handshake.
 - `WalkTo`/`FlyTo` use stepped autopilot waypoints for improved reliability over larger distances.
-- `TeleportTo` resolves named regions to handles before teleporting for stricter targeting.
+- `TeleportTo` resolves named regions on the active simulator before teleporting, and also accepts Hypergrid `hop://` URLs or `host:port:RegionName` destinations.
+- `TeleportToUrl(url, x?, y?, z?)` parses and hops to `hop://`, `hops://`, `hg://`, `x-grid-location-info://`, `secondlife://`, `http(s)://` region SLURLs, and OpenSim `host:port:RegionName` Hypergrid addresses (including default-region URLs like `hop://grid.example.com:8002/`). Coordinates in `/x/y/z` or `(x,y,z)` are used unless overridden.
+- `TeleportHome()` teleports the bot back to its home location on its home grid (works from both local regions and foreign Hypergrid sims via OpenSim `HGEntityTransferModule.TeleportHome`).
+- `TeleportOfferRespond(requesterAgentId, sessionId, accept)` ensures the simulator EventQueue is running when `accept=true`, awaits actual teleport completion or failure (`TeleportFinish` / `TeleportFailed` / `AgentAlertMessage`), and returns diagnostic details if a lure is rejected or ignored.
 - `RegionUuid(globalX, globalY)` converts global map coordinates to a region handle using `PositionHelper.RegionHandleFromGlobal`, and returns region origin plus derived local coordinates.
 - `Map(regionHandle="0", itemType="AgentLocations", layerType="Objects")` queries map items via `Grid.MapItemsAsync`; when `regionHandle=0` the current simulator region is used.
 - `Map` returns per-item typed JSON payload rows (for example `MapAgentLocation`, `MapLandForSale`, `MapPGEvent`) including shared coordinates and each subclass-specific fields.
@@ -299,8 +304,8 @@ Movement notes:
 - Optional external presence fallback is disabled by default; set `AGENT_MONITOR_EXTERNAL_FALLBACK=true` to probe spawner/friend-map (throttled) only when the target is otherwise lost.
 
 Agent lookup notes:
-- `AgentNameToUUID(first,last)` resolves avatar names via `AvatarManager.RequestAvatarNameSearch` (`AvatarPickerReply`) and returns the matched UUID.
-- `AgentFind(first,last)` uses the same AvatarPicker-based name resolution before running a short-lived monitor snapshot.
+- `AgentNameToUUID(first,last)` checks nearby simulator avatars (including Hypergrid visitor names rewritten as `First.Last @host:port`) and the friend list first, then falls back to `AvatarManager.RequestAvatarNameSearch` (`AvatarPickerReply`).
+- `AgentFind(first,last)` uses the same Hypergrid-aware name resolution before running a short-lived monitor snapshot.
 
 Animation notes:
 - `AnimationStart`/`AnimationStop` accept either a built-in animation name (e.g. `DANCE1`, `WAVE`, `CLAP`, `SIT`) or a raw animation UUID.

@@ -1214,7 +1214,7 @@ internal sealed class BotMcpTools
         return _bot.TeleportRequestsListAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("Accept or decline a pending teleport offer using requester and IM session IDs.")]
+    [McpServerTool, Description("Accept or decline a pending teleport offer (lure) using requester and IM session IDs. When accept=true, waits for the local or Hypergrid teleport to complete or fail and returns the outcome.")]
     public Task<BotToolResult> TeleportOfferRespond(
         [Description("Requester avatar UUID (sender of the offer)." )] string requesterAgentId,
         [Description("IM session UUID from the teleport offer message.")] string sessionId,
@@ -1603,23 +1603,40 @@ internal sealed class BotMcpTools
         return _bot.MoveToAsync(x, y, z, true, cancellationToken);
     }
 
-    [McpServerTool, Description("Teleport to a local position, optionally in a named region.")]
+    [McpServerTool, Description("Teleport to a local position, optionally in a named region or Hypergrid destination.")]
     public Task<BotToolResult> TeleportTo(
-        [Description("Local X coordinate (0..256).") ] float x,
-        [Description("Local Y coordinate (0..256).") ] float y,
+        [Description("Local X coordinate (0..256, or larger for varregions)." )] float x,
+        [Description("Local Y coordinate (0..256, or larger for varregions)." )] float y,
         [Description("Local Z coordinate.")] float z,
-        [Description("Optional destination region name. If omitted, current region is used.")] string? regionName = null,
+        [Description("Optional destination region name, hop:// URL, or host:port:RegionName Hypergrid address. If omitted, current region is used.")] string? regionName = null,
         CancellationToken cancellationToken = default)
     {
         return _bot.TeleportToAsync(x, y, z, regionName, cancellationToken);
     }
 
-    [McpServerTool, Description("Teleport to a region's default arrival/landing point without specifying XYZ coordinates.")]
+    [McpServerTool, Description("Teleport to a region's default arrival/landing point without specifying XYZ coordinates. Also accepts hop:// or Hypergrid region targets.")]
     public Task<BotToolResult> TeleportToLandingPoint(
-        [Description("Optional destination region name. If omitted, current region is used.")] string? regionName = null,
+        [Description("Optional destination region name, hop:// URL, or host:port:RegionName Hypergrid address. If omitted, current region is used.")] string? regionName = null,
         CancellationToken cancellationToken = default)
     {
         return _bot.TeleportToLandingPointAsync(regionName, cancellationToken);
+    }
+
+    [McpServerTool, Description("Teleport (hop) to a Hypergrid hop:// URL, x-grid-location-info:// URL, secondlife:// SLURL, hg:// URL, http(s):// region URL, or OpenSim host:port:RegionName address. Uses /x/y/z coordinates from the URL when present unless overridden.")]
+    public Task<BotToolResult> TeleportToUrl(
+        [Description("Destination URL or Hypergrid address (for example: hop://grid.example.com:8002/Region%20Name/128/128/25, hop://grid.example.com:8002/, secondlife://Region/128/128/25, or grid.example.com:8002:Region Name).")] string url,
+        [Description("Optional local X coordinate override.")] float? x = null,
+        [Description("Optional local Y coordinate override.")] float? y = null,
+        [Description("Optional local Z coordinate override.")] float? z = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.TeleportToUrlAsync(url, x, y, z, cancellationToken);
+    }
+
+    [McpServerTool, Description("Teleport back to the bot's configured home location on its home grid (works both locally and when visiting foreign Hypergrid regions).")]
+    public Task<BotToolResult> TeleportHome(CancellationToken cancellationToken = default)
+    {
+        return _bot.TeleportHomeAsync(cancellationToken);
     }
 
     [McpServerTool, Description("Teleport to a region handle and local position.")]

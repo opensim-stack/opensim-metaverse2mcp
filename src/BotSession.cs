@@ -357,8 +357,10 @@ internal sealed partial class BotSession : IDisposable
             client.Objects.TerseObjectUpdate += OnTerseWorldObjectUpdateForEventStream;
             client.Objects.AvatarUpdate += AvatarUpdateHandler;
             client.Grid.CoarseLocationUpdate += OnCoarseLocationUpdateForAgentLocator;
-
-            client.Network.RegisterCallback(PacketType.AlertMessage, AlertMessageHandler);
+            client.Self.AlertMessage += OnSelfAlertMessage;
+            client.Self.TeleportProgress += OnSelfTeleportProgress;
+            client.Network.RegisterCallback(PacketType.TeleportFailed, OnRawTeleportFailedPacket);
+            client.Network.RegisterEventCallback("TeleportFailed", OnRawTeleportFailedCapsEvent);
             
 
             // Assign the field-backed client early so event handlers that run during
@@ -426,6 +428,7 @@ internal sealed partial class BotSession : IDisposable
             _inFlightRequestCtsByConversation.Clear();
 
             await TryLoadInventoryOfferPoliciesFromConfiguredFileAsync(cancellationToken).ConfigureAwait(false);
+            StartHandlerIdentityWarmup();
             
             // TODO Might be interferering with crossing regions - and ... do we REALLY need to do this?
            // StartControlGroupBootstrap(client);
@@ -1390,20 +1393,55 @@ internal sealed partial class BotSession : IDisposable
         }
     }
 
-    private void AlertMessageHandler(object? sender, PacketReceivedEventArgs e)
+    private void OnSelfAlertMessage(object? sender, AlertMessageEventArgs e)
     {
-        Packet packet = e.Packet;
-
-        AlertMessagePacket alert = (AlertMessagePacket)packet;
-        if (alert.AlertInfo.Length > 0)
+        var text = e.Message?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
         {
-            EmitRuntimeEvent(
-                "general",
-                "alert.message",
-                "opensim",
-                Utils.BytesToString(alert.AlertInfo[0].Message),
-                new Dictionary<string, string?>());
+            return;
         }
+
+        Console.WriteLine($"[alert] simulator={DescribeSimulator(_client?.Network.CurrentSim)} message=\"{text}\"");
+        EmitRuntimeEvent(
+            "general",
+            "alert.message",
+            "opensim",
+            text,
+            new Dictionary<string, string?>
+            {
+                ["simulator"] = _client?.Network.CurrentSim?.Name,
+                ["notificationId"] = e.NotificationId
+            });
+    }
+
+    private void OnSelfTeleportProgress(object? sender, TeleportEventArgs e)
+    {
+        Console.WriteLine(
+            $"[teleport][event] status={e.Status} flags={e.Flags} simulator={DescribeSimulator(_client?.Network.CurrentSim)} message=\"{e.Message}\"");
+    }
+
+    private void OnRawTeleportFailedPacket(object? sender, PacketReceivedEventArgs e)
+    {
+        if (e.Packet is not TeleportFailedPacket failed)
+        {
+            return;
+        }
+
+        var reason = Utils.BytesToString(failed.Info.Reason)?.Trim() ?? string.Empty;
+        Console.WriteLine(
+            $"[teleport][failed-packet] simulator={DescribeSimulator(e.Simulator)} reason=\"{reason}\"");
+    }
+
+    private void OnRawTeleportFailedCapsEvent(string capsKey, LibreMetaverse.Interfaces.IMessage message, Simulator simulator)
+    {
+        if (message is not TeleportFailedMessage failed)
+        {
+            return;
+        }
+
+        var reason = failed.Reason?.Trim() ?? string.Empty;
+        Console.WriteLine(
+            $"[teleport][failed-caps] simulator={DescribeSimulator(simulator)} reason=\"{reason}\"");
     }
     
     private void AvatarUpdateHandler(object? sender, AvatarUpdateEventArgs e)
@@ -1512,7 +1550,10 @@ internal sealed partial class BotSession : IDisposable
 
     private void OnNetworkSimChanged(object? sender, LibreMetaverse.SimChangedEventArgs e)
     {
-        Console.WriteLine($"[sim-change] sim changed");
+        var newSim = _client?.Network.CurrentSim;
+        var seedHost = newSim?.Caps?.SeedCapsURI?.Authority ?? "(none)";
+        Console.WriteLine(
+            $"[sim-change] simulator transition: previous={DescribeSimulator(e.PreviousSimulator)} -> current={DescribeSimulator(newSim)} endpoint={(newSim?.IPEndPoint?.ToString() ?? "(none)")} seedHost={seedHost}");
         // Fire-and-forget: run the health-check on a background task so we don't block
         // the network event loop.
         _ = Task.Run(async () =>
@@ -1532,6 +1573,7 @@ internal sealed partial class BotSession : IDisposable
                 }
 
                 QueueStartupSetupProvisioning("sim-change");
+                SchedulePostTeleportSimulatorCleanup(client, "sim-changed");
 
                 Console.WriteLine("[sim-change] OnNetworkSimChanged: processing region transition.");
 
@@ -1695,8 +1737,10 @@ internal sealed partial class BotSession : IDisposable
         try { client.Objects.TerseObjectUpdate -= OnTerseWorldObjectUpdateForEventStream; } catch { }
         try { client.Objects.AvatarUpdate -= AvatarUpdateHandler; } catch { }
         try { client.Grid.CoarseLocationUpdate -= OnCoarseLocationUpdateForAgentLocator; } catch { }
-        
-        try { client.Network.UnregisterCallback(PacketType.AlertMessage, AlertMessageHandler); } catch { }
+        try { client.Self.AlertMessage -= OnSelfAlertMessage; } catch { }
+        try { client.Self.TeleportProgress -= OnSelfTeleportProgress; } catch { }
+        try { client.Network.UnregisterCallback(PacketType.TeleportFailed, OnRawTeleportFailedPacket); } catch { }
+        try { client.Network.UnregisterEventCallback("TeleportFailed", OnRawTeleportFailedCapsEvent); } catch { }
 
         lock (_socialImHookLock)
         {
