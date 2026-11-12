@@ -468,6 +468,17 @@ internal sealed partial class BotSession
                 await cofManager.AddToOutfitAsync(targetItems, replace: true, cancellationToken: token).ConfigureAwait(false);
                 Console.WriteLine($"[appearance-wear-outfit] AddToOutfitAsync completed targetCount={targetItems.Count} elapsedMs={addStopwatch.ElapsedMilliseconds}");
 
+                // COF relink updates can be observed by the simulator before attachment objects are fully rezzed.
+                // Explicitly issue a wear/apply request for this exact target set so first-pass outfit wear
+                // does not depend on eventual propagation from COF inventory changes alone.
+                var wearApplyStopwatch = Stopwatch.StartNew();
+                await client.Appearance
+                    .WearOutfitAsync(targetItems.Cast<InventoryBase>().ToList(), replaceItems: true)
+                    .ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                await client.Appearance.RequestSetAppearance(forceRebake: false).ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] immediate wear/apply request completed targetCount={targetItems.Count} elapsedMs={wearApplyStopwatch.ElapsedMilliseconds}");
+
                 var pruneStopwatch = Stopwatch.StartNew();
                 var linksBeforePrune = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
                 var folderLinks = linksBeforePrune.Where(IsCurrentOutfitFolderLink).ToList();
@@ -590,8 +601,8 @@ internal sealed partial class BotSession
                     wearableCandidateCount: targetItems.Count,
                     categoryResolutions: Array.Empty<OutfitCategoryResolutionInfo>(),
                     message: folderLinkConfirmed
-                        ? $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount})."
-                        : $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}). COF outfit folder-link create was requested but not confirmed yet." );
+                        ? $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links and requesting immediate wear/apply (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount})."
+                        : $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links and requesting immediate wear/apply (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}). COF outfit folder-link create was requested but not confirmed yet." );
             }, cancellationToken).ConfigureAwait(false);
 
             Console.WriteLine($"[appearance-wear-outfit] end ok={result.Ok} elapsedMs={overallStopwatch.ElapsedMilliseconds} message='{result.Message}'");
