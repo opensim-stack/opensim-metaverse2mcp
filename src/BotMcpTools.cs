@@ -278,6 +278,16 @@ internal sealed class BotMcpTools
         return _bot.SetDisplayNameAsync(newDisplayName, oldDisplayName, cancellationToken);
     }
 
+    [McpServerTool, Description("Set the logged-in bot avatar profile About Text. Use empty string to clear.")]
+    public Task<BotToolResult> SetAboutText(
+        [Description("New AboutText for this bot avatar profile. Use empty string to clear.")] string aboutText,
+        [Description("Seconds to wait for current profile properties before submitting the update (1..30).")]
+        int waitForReplySeconds = 10,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.AvatarProfileSetAboutTextAsync(aboutText, waitForReplySeconds, cancellationToken);
+    }
+
     private async Task<DataToolResult> ChangeBotRunningStateAsync(
         string first,
         string last,

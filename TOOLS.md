@@ -16,6 +16,7 @@ The server publishes tools including:
 - `BotDelete`
 - `SetPartner`
 - `SetDisplayName`
+- `AvatarProfileSetAboutText`
 - `Sit`
 - `SitOnPrim`
 - `SitOnPrimByName`
@@ -203,6 +204,7 @@ Social/friends notes:
 - `SetPartner` with `partnerFirst` + `partnerLast` sets both sides in one call when both local users exist.
 - `SetPartner` with no partner parameters clears only the target user's partner; divorcing both users requires two calls.
 - `SetDisplayName` requests a display-name update for the logged-in bot avatar via capability `SetDisplayName`; some grids require `oldDisplayName` to match current server state.
+- `AvatarProfileSetAboutText` updates the logged-in bot avatar's profile `AboutText` (use empty string to clear). It first reads current profile properties so the update preserves other profile fields.
 - Incoming group invitations emit runtime event `groups.invite.received` on channel `friends`; use `groupId` (+ optional `sessionId`) with `GroupInviteRespond` to accept/decline.
 - Incoming scripted object dialogs emit runtime event `script.dialog.received` on channel `general`; use `pendingDialogHandle` with `ScriptDialogChoice` (`buttonIndex=-1` cancels without responding).
 - Scripted text-box prompts (for example `llTextBox`) can be answered with `ScriptDialogTextInput(pendingDialogHandle, text)` using the same pending dialog handle.

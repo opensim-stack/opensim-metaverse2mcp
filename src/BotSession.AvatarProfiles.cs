@@ -120,6 +120,52 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<BotToolResult> AvatarProfileSetAboutTextAsync(
+        string aboutText,
+        int waitForReplySeconds,
+        CancellationToken cancellationToken)
+    {
+        if (aboutText == null)
+        {
+            return BotToolResult.Fail("aboutText is required (use empty string to clear).");
+        }
+
+        if (waitForReplySeconds < 1 || waitForReplySeconds > 30)
+        {
+            return BotToolResult.Fail("waitForReplySeconds must be in range 1..30.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var selfId = client.Self.AgentID;
+            var timeout = TimeSpan.FromSeconds(waitForReplySeconds);
+            var udpReplyTask = WaitForAvatarProfileUdpReplyAsync(client, selfId, timeout, token);
+            client.Avatars.RequestAvatarProperties(selfId);
+            var udpReply = await udpReplyTask.ConfigureAwait(false);
+
+            if (!udpReply.PropertiesReceived || !udpReply.Properties.HasValue)
+            {
+                return BotToolResult.Fail($"Timed out waiting for current profile properties for avatar {selfId}.");
+            }
+
+            var profile = udpReply.Properties.Value;
+            profile.AboutText = aboutText;
+
+            var hasAgentProfileCap = client.Network.CurrentSim?.Caps?.CapabilityURI("AgentProfile") != null;
+            if (hasAgentProfileCap)
+            {
+                await client.Self.UpdateProfileAsync(profile, token).ConfigureAwait(false);
+            }
+            else
+            {
+                client.Self.UpdateProfileUdp(profile);
+            }
+
+            return BotToolResult.OkResult(
+                $"Submitted AboutText profile update ({aboutText.Length} chars) for avatar {selfId} via {(hasAgentProfileCap ? "AgentProfile capability" : "LLUDP")}." );
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<AdultInteractionAllowanceResult> IsAdultInteractionAllowedAsync(string agentId, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(agentId, out var targetAgentId) || targetAgentId == UUID.Zero)
