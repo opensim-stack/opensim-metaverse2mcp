@@ -384,6 +384,9 @@ Appearance and script notes:
 - `ScriptUploadAgent`/`ScriptUploadTask` return compile status and compiler messages when the grid reports them.
 - `ScriptSetTaskRunning` can verify state by requesting `ScriptRunningReply` after sending the state change.
 
+Inventory notes:
+- `InventoryListRetrieve` returns `assetId` on item rows (folders return `null`), so you can pass that UUID directly to `AssetDownload`.
+
 ## Common workflows
 
 Use these as practical MCP call sequences when building assistants/agents on top of this server.

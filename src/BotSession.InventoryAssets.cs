@@ -6603,6 +6603,7 @@ internal sealed partial class BotSession
                 AssetType.Folder.ToString(),
                 InventoryType.Folder.ToString(),
                 null,
+                null,
                 null);
         }
 
@@ -6615,6 +6616,7 @@ internal sealed partial class BotSession
                 "item",
                 item.AssetType.ToString(),
                 item.InventoryType.ToString(),
+                item.AssetUUID == UUID.Zero ? null : item.AssetUUID.ToString(),
                 item.CreatorID == UUID.Zero ? null : item.CreatorID.ToString(),
                 item.CreationDate == default
                     ? null
@@ -6628,6 +6630,7 @@ internal sealed partial class BotSession
             "unknown",
             AssetType.Unknown.ToString(),
             InventoryType.Unknown.ToString(),
+            null,
             null,
             null);
     }
@@ -7076,6 +7079,7 @@ internal sealed record InventoryEntry(
     string Kind,
     string AssetType,
     string InventoryType,
+    string? AssetId,
     string? CreatorId,
     string? CreatedUtc);
 
