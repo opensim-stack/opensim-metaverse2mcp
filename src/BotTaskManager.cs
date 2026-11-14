@@ -34,6 +34,10 @@ internal sealed class BotTaskHandle
         set => Volatile.Write(ref _cancelled, value ? 1 : 0);
     }
 
+    // Optional deterministic result handle for async tools that materialize cached results.
+    [JsonPropertyName("resultHandle")]
+    public string? ResultHandle { get; set; }
+
     public void ReportCompletion(bool success, string? message)
     {
         lock (_completionLock)

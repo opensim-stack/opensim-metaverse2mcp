@@ -8,6 +8,7 @@ internal sealed partial class BotSession
 {
     private const int PendingScriptDialogCacheLimit = 200;
     private const int PendingScriptPermissionCacheLimit = 200;
+    private const string TextBoxSentinelButton = "!!llTextBox!!";
 
     private sealed record PendingScriptDialog(
         string Handle,
@@ -19,6 +20,7 @@ internal sealed partial class BotSession
         int Channel,
         string Message,
         IReadOnlyList<string> ButtonLabels,
+        string Type,
         DateTimeOffset ReceivedAtUtc);
 
     private sealed record PendingScriptPermissionRequest(
@@ -75,6 +77,7 @@ internal sealed partial class BotSession
                     imageId = dialog.ImageId.ToString(),
                     channel = dialog.Channel,
                     message = dialog.Message,
+                    type = dialog.Type,
                     buttonCount = dialog.ButtonLabels.Count,
                     buttons = dialog.ButtonLabels,
                     receivedAtUtc = dialog.ReceivedAtUtc
@@ -145,11 +148,6 @@ internal sealed partial class BotSession
             if (!_pendingScriptDialogsByHandle.TryGetValue(normalizedHandle, out var pendingDialog))
             {
                 return Task.FromResult(BotToolResult.Fail($"No pending script dialog found for handle '{normalizedHandle}'."));
-            }
-
-            if (pendingDialog.ButtonLabels.Count == 0)
-            {
-                return Task.FromResult(BotToolResult.Fail($"Pending script dialog '{normalizedHandle}' has no button metadata to anchor a text reply."));
             }
 
             // Text-box dialogs accept free-form input in the button label field of the dialog reply packet.
@@ -255,9 +253,20 @@ internal sealed partial class BotSession
 
     private void OnScriptDialogReceived(object? sender, ScriptDialogEventArgs e)
     {
-        var buttonLabels = (e.ButtonLabels ?? new List<string>())
+        
+        Console.WriteLine($"[ScriptDialog] Received from object '{e.ObjectName}' (ID: {e.ObjectID}) owned by '{e.FirstName} {e.LastName}' (ID: {e.OwnerID}) on channel {e.Channel}: {e.Message}");
+
+        var rawButtonLabels = (e.ButtonLabels ?? new List<string>())
             .Select(x => (x ?? string.Empty).Trim())
             .Where(x => !string.IsNullOrEmpty(x))
+            .ToList();
+
+        var isTextInput = rawButtonLabels.Any(x => string.Equals(x, TextBoxSentinelButton, StringComparison.OrdinalIgnoreCase));
+        var dialogType = isTextInput ? "textInput" : "buttonChoice";
+
+        // Hide llTextBox sentinel from surfaced choices so text input dialogs don't look like button menus.
+        var buttonLabels = rawButtonLabels
+            .Where(x => !string.Equals(x, TextBoxSentinelButton, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var ownerName = $"{e.FirstName} {e.LastName}".Trim();
@@ -277,6 +286,7 @@ internal sealed partial class BotSession
             e.Channel,
             (e.Message ?? string.Empty).Trim(),
             buttonLabels,
+            dialogType,
             DateTimeOffset.UtcNow);
 
         StorePendingScriptDialog(pending);
@@ -296,6 +306,7 @@ internal sealed partial class BotSession
                 ["imageId"] = pending.ImageId.ToString(),
                 ["channel"] = pending.Channel.ToString(),
                 ["message"] = pending.Message,
+                ["type"] = pending.Type,
                 ["buttons"] = string.Join("|", pending.ButtonLabels),
                 ["buttonCount"] = pending.ButtonLabels.Count.ToString()
             });

@@ -29,6 +29,7 @@ The server logs in the bot on startup (no separate login tool), then serves MCP 
   - `ModelContextProtocol.AspNetCore`
 - Supports config via environment variables and CLI args (CLI overrides env).
 - Gives the Bot a voice via Piper and WebRTC (Janus) - Other stack parts required
+- Implements the [SIGNALS](SIGNALS.md) API that allows bots to discover and communicate with in-world objects (kind of acts like a mini-MCP proxy). 
 
 ## Volumes
 
@@ -110,8 +111,18 @@ docker run --rm \
 - `METAVERSE_MCP_HTTP_BEARER_TOKEN` (optional)
 - `METAVERSE_MCP_HTTP_DISALLOW_DELETE` (`true`/`false`, default: `false`)
 - `METAVERSE_MCP_DIAGNOSTICS` (`true`/`false`, default: `false`)
+- `MCP_ALLOW_TOOL` (optional, comma/space/semicolon/pipe separated tool names)
+- `MCP_DENY_TOOL` (optional, comma/space/semicolon/pipe separated tool names)
 - `INVENTORY_OFFER_POLICY_FILE` (optional JSON file path)
 - `INVENTORY_OFFER_POLICY_AUTOSAVE` (`true`/`false`, default: `true`)
+
+Tool filtering rules:
+- If both `MCP_ALLOW_TOOL` and `MCP_DENY_TOOL` are unset, all tools are available.
+- If only `MCP_ALLOW_TOOL` is set, only listed tools are available.
+- If only `MCP_DENY_TOOL` is set, all tools except listed tools are available.
+- If both are set, a tool must be in allow list and not in deny list.
+
+Filtered tools are removed from `tools/list` responses and rejected on `tools/call`.
 
 ### Opencode chat bridge
 
@@ -119,8 +130,7 @@ docker run --rm \
 - `OPENCODE_SCHEME` (`http` or `https`, default: `http`)
 - `OPENCODE_HOST` (default: `opensim-opencode`)
 - `OPENCODE_PORT` (default: `8998`)
-- `OPENCODE_SERVER_USERNAME` (optional Basic auth username)
-- `OPENCODE_SERVER_PASSWORD` (optional Basic auth password)
+- `OPENCODE_SERVER_PASSWORD` (optional Basic auth password; bridge uses Basic username `opencode`)
 - `OPENCODE_REQUEST_TIMEOUT_SECONDS` (default: `1800`)
 
 ### Voice routing (Piper + grid voice)

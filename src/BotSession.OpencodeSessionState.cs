@@ -182,7 +182,55 @@ internal sealed partial class BotSession
         }
 
         _harnessClient.SetConversationSessionId(conversationKey, restoredSessionId);
+        _restoredSessionPreflightByConversation[conversationKey] = 1;
         Console.WriteLine($"[opencode] restored persisted session mapping for conversation '{conversationKey}' -> {restoredSessionId}");
+    }
+
+    private async Task EnsureRestoredSessionPreflightAsync(string conversationKey)
+    {
+        if (_harnessClient == null || string.IsNullOrWhiteSpace(conversationKey))
+        {
+            return;
+        }
+
+        if (!_restoredSessionPreflightByConversation.TryRemove(conversationKey, out _))
+        {
+            return;
+        }
+
+        var sessionId = _harnessClient.GetConversationSessionId(conversationKey);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        try
+        {
+            // A persisted session can still be marked busy after process restart.
+            // Retry abort briefly; if not confirmed, force a fresh conversation session.
+            var aborted = false;
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                aborted = await _harnessClient.AbortSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+                Console.WriteLine($"[opencode] restored-session preflight abort attempt {attempt}/3 for '{conversationKey}' ({sessionId}) result={(aborted ? "ok" : "no-confirm")}");
+                if (aborted)
+                {
+                    break;
+                }
+
+                await Task.Delay(250).ConfigureAwait(false);
+            }
+
+            if (!aborted)
+            {
+                _harnessClient.ResetConversation(conversationKey);
+                Console.WriteLine($"[opencode] restored-session preflight switched '{conversationKey}' to a fresh session after unconfirmed aborts.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[opencode] restored-session preflight abort failed for '{conversationKey}' ({sessionId}): {ex.Message}");
+        }
     }
 
     private ConversationConfig? GetPersistedDefaultConversationConfigSnapshot()

@@ -39,7 +39,6 @@ internal static class ConfigLoader
             OpencodeEnabled = ParseBool(Env("OPENCODE_ENABLED"), true),
             OpencodeHost = Env("OPENCODE_HOST") ?? "opensim-opencode",
             OpencodePort = ParseInt(Env("OPENCODE_PORT"), 8998),
-            OpencodeUsername = Env("OPENCODE_SERVER_USERNAME"),
             OpencodePassword = Env("OPENCODE_SERVER_PASSWORD"),
             OpencodeInitialProvider = Env("OPENCODE_INITIAL_PROVIDER"),
             OpencodeInitialModel = Env("OPENCODE_INITIAL_MODEL"),
@@ -127,7 +126,6 @@ internal static class ConfigLoader
             "  --opencode-scheme <http|https> Opencode URL scheme (env: OPENCODE_SCHEME, default: http)",
             "  --opencode-host <host>         Opencode server host (env: OPENCODE_HOST, default: opensim-opencode)",
             "  --opencode-port <port>         Opencode server port (env: OPENCODE_PORT, default: 8998)",
-            "  --opencode-username <value>    Optional Basic auth username (env: OPENCODE_SERVER_USERNAME, default: opencode when password set)",
             "  --opencode-password <value>    Optional Basic auth password (env: OPENCODE_SERVER_PASSWORD)",
             "  --opencode-initial-provider <id>",
             "                                Optional startup provider for IM conversations without runtime overrides",
@@ -296,9 +294,6 @@ internal static class ConfigLoader
                     break;
                 case "--opencode-port":
                     options.OpencodePort = ParseInt(RequireValue(args, ref i, arg), options.OpencodePort);
-                    break;
-                case "--opencode-username":
-                    options.OpencodeUsername = RequireValue(args, ref i, arg);
                     break;
                 case "--opencode-password":
                     options.OpencodePassword = RequireValue(args, ref i, arg);

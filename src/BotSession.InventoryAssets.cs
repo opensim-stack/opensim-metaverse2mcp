@@ -86,19 +86,32 @@ internal sealed partial class BotSession
                     .ConfigureAwait(false))
                 .Select(a =>
                 {
-                    if (!TryFindAttachedObjectForInventoryItem(client, a.Key, out var objectId, out var localId))
+                    var itemName = TryResolveInventoryItemName(client.Inventory.Store, a.Key);
+                    if (!TryFindAttachedObjectSnapshotForInventoryItem(client, a.Key, out var objectId, out var localId, out var objectAttachmentPoint))
                     {
                         unresolvedLiveAttachmentObjects++;
                         return new AttachmentInfo(
                             a.Key.ToString(),
+                            itemName,
                             a.Value.ToString(),
+                            (int)a.Value,
+                            null,
+                            null,
                             null,
                             null);
                     }
 
+                    var effectiveAttachmentPoint = a.Value == AttachmentPoint.Default && objectAttachmentPoint != AttachmentPoint.Default
+                        ? objectAttachmentPoint
+                        : a.Value;
+
                     return new AttachmentInfo(
                         a.Key.ToString(),
-                        a.Value.ToString(),
+                        itemName,
+                        effectiveAttachmentPoint.ToString(),
+                        (int)effectiveAttachmentPoint,
+                        objectAttachmentPoint.ToString(),
+                        (int)objectAttachmentPoint,
                         objectId.ToString(),
                         localId);
                 })
@@ -455,6 +468,17 @@ internal sealed partial class BotSession
                 await cofManager.AddToOutfitAsync(targetItems, replace: true, cancellationToken: token).ConfigureAwait(false);
                 Console.WriteLine($"[appearance-wear-outfit] AddToOutfitAsync completed targetCount={targetItems.Count} elapsedMs={addStopwatch.ElapsedMilliseconds}");
 
+                // COF relink updates can be observed by the simulator before attachment objects are fully rezzed.
+                // Explicitly issue a wear/apply request for this exact target set so first-pass outfit wear
+                // does not depend on eventual propagation from COF inventory changes alone.
+                var wearApplyStopwatch = Stopwatch.StartNew();
+                await client.Appearance
+                    .WearOutfitAsync(targetItems.Cast<InventoryBase>().ToList(), replaceItems: true)
+                    .ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                await client.Appearance.RequestSetAppearance(forceRebake: false).ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] immediate wear/apply request completed targetCount={targetItems.Count} elapsedMs={wearApplyStopwatch.ElapsedMilliseconds}");
+
                 var pruneStopwatch = Stopwatch.StartNew();
                 var linksBeforePrune = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
                 var folderLinks = linksBeforePrune.Where(IsCurrentOutfitFolderLink).ToList();
@@ -577,8 +601,8 @@ internal sealed partial class BotSession
                     wearableCandidateCount: targetItems.Count,
                     categoryResolutions: Array.Empty<OutfitCategoryResolutionInfo>(),
                     message: folderLinkConfirmed
-                        ? $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount})."
-                        : $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}). COF outfit folder-link create was requested but not confirmed yet." );
+                        ? $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links and requesting immediate wear/apply (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount})."
+                        : $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links and requesting immediate wear/apply (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}). COF outfit folder-link create was requested but not confirmed yet." );
             }, cancellationToken).ConfigureAwait(false);
 
             Console.WriteLine($"[appearance-wear-outfit] end ok={result.Ok} elapsedMs={overallStopwatch.ElapsedMilliseconds} message='{result.Message}'");
@@ -2536,17 +2560,17 @@ internal sealed partial class BotSession
         bool recursive,
         CancellationToken cancellationToken)
     {
-        var resultHandle = BuildInventoryListResultHandle(folderIdOrPath, recursive);
         var description = recursive
             ? $"Inventory list folder '{folderIdOrPath ?? "<root>"}' recursively."
             : $"Inventory list folder '{folderIdOrPath ?? "<root>"}'.";
-            
-        Console.WriteLine($"[inventory-list] start handle='{resultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
 
-        return Task.FromResult(StartBotTask(
+        var taskHandle = StartBotTask(
             description,
             async (taskHandle, taskCancellationToken) =>
             {
+                var resultHandle = BuildInventoryListResultHandleForTask(taskHandle.Handle);
+                taskHandle.ResultHandle = resultHandle;
+
                 try
                 {
                     RegisterInventoryListTaskHandle(taskHandle.Handle, resultHandle);
@@ -2587,7 +2611,11 @@ internal sealed partial class BotSession
                     Console.WriteLine($"[inventory-list] retrieval failed for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}: {ex.GetType().Name}: {ex.Message}");
                     EmitInventoryListCompleteEvent(taskHandle.Handle, resultHandle, false, $"Inventory list task failed: {ex.Message}");
                 }
-            }));
+            });
+
+        taskHandle.ResultHandle = BuildInventoryListResultHandleForTask(taskHandle.Handle);
+        Console.WriteLine($"[inventory-list] start taskHandle='{taskHandle.Handle}' resultHandle='{taskHandle.ResultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
+        return Task.FromResult(taskHandle);
     }
 
     public Task<InventoryQueryResult> InventoryListRetrieveAsync(
@@ -2650,6 +2678,12 @@ internal sealed partial class BotSession
 
             if (!TryGetInventoryListResult(normalizedResultHandle, out var storedResult, out var storeError))
             {
+                if (TryDescribePendingInventoryListResult(normalizedResultHandle, out var pendingMessage))
+                {
+                    Console.WriteLine($"[inventory-list-retrieve] pending handle='{normalizedResultHandle}': {pendingMessage}");
+                    return Task.FromResult(InventoryQueryResult.FailResult(pendingMessage));
+                }
+
                 Console.WriteLine($"[inventory-list-retrieve] lookup failed handle='{normalizedResultHandle}': {storeError}");
                 return Task.FromResult(InventoryQueryResult.FailResult(storeError));
             }
@@ -2847,7 +2881,7 @@ internal sealed partial class BotSession
             return await ExecuteLockedAsync(async (client, token) =>
             {
                 var lockStopwatch = Stopwatch.StartNew();
-                Console.WriteLine("[inventory-list] execute-locked begin");
+                Console.WriteLine($"[inventory-list] execute-locked begin waitMs={overallStopwatch.ElapsedMilliseconds}");
 
                 var store = client.Inventory.Store;
                 var root = store?.RootFolder;
@@ -2874,7 +2908,6 @@ internal sealed partial class BotSession
                 }
 
                 Console.WriteLine($"[inventory-list] folder found in local store folder={folderUuid} name='{folder.Name}'");
-                entries.Add(folder);
 
                 if (recursive)
                 {
@@ -2889,11 +2922,59 @@ internal sealed partial class BotSession
                 else
                 {
                     Console.WriteLine($"[inventory-list] performing non-recursive inventory fetch for folder={folderUuid}");
-                    var contents = await client.Inventory
-                        .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, token)
-                        .ConfigureAwait(false);
-                    entries.AddRange(contents);
-                    Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
+                    List<InventoryBase>? cachedContents = null;
+                    try
+                    {
+                        cachedContents = store.GetContents(folderUuid);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[inventory-list] local cache read failed for folder={folderUuid}: {ex.GetType().Name}: {ex.Message}");
+                    }
+
+                    var cachedDirectChildren = cachedContents?
+                        .Where(entry => entry.ParentUUID == folderUuid && entry.UUID != folderUuid)
+                        .ToList();
+
+                    // DescendentCount can be stale/zero before a folder has been explicitly hydrated,
+                    // so treat an empty direct-child cache as incomplete and refresh from server.
+                    var shouldFetchFromServer = cachedContents == null
+                        || cachedDirectChildren == null
+                        || cachedDirectChildren.Count == 0;
+
+                    if (!shouldFetchFromServer)
+                    {
+                        entries.AddRange(cachedDirectChildren!);
+                        Console.WriteLine(
+                            $"[inventory-list] using local cache rawChildren={cachedContents!.Count} directChildren={cachedDirectChildren!.Count} descendentCountHint={folder.DescendentCount} totalEntries={entries.Count}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[inventory-list] local cache appears incomplete for folder={folderUuid}; requesting server refresh");
+                        using var nonRecursiveTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        nonRecursiveTimeoutCts.CancelAfter(TimeSpan.FromSeconds(90));
+
+                        IReadOnlyList<InventoryBase> contents;
+                        try
+                        {
+                            contents = await client.Inventory
+                                .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, nonRecursiveTimeoutCts.Token)
+                                .ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                        {
+                            return InventoryQueryResult.FailResult(
+                                $"Timed out waiting for folder contents for {folderUuid}. The simulator did not answer within 90 seconds.");
+                        }
+
+                        var directChildren = contents
+                            .Where(entry => entry.ParentUUID == folderUuid && entry.UUID != folderUuid)
+                            .ToList();
+
+                        entries.AddRange(directChildren);
+                        Console.WriteLine(
+                            $"[inventory-list] folder contents fetch completed rawChildren={contents.Count} directChildren={directChildren.Count} totalEntries={entries.Count}");
+                    }
                 }
 
                 var materialized = new List<InventoryEntry>(entries.Count);
@@ -3064,13 +3145,34 @@ internal sealed partial class BotSession
         }
     }
 
-    private static string BuildInventoryListResultHandle(string? folderIdOrPath, bool recursive)
+    private bool TryDescribePendingInventoryListResult(string handle, out string message)
     {
-        var normalizedFolder = string.IsNullOrWhiteSpace(folderIdOrPath)
-            ? "<root>"
-            : folderIdOrPath.Trim().Replace('\\', '/');
+        lock (_inventoryListResultLock)
+        {
+            if (_inventoryListResultHandleByTaskHandle.TryGetValue(handle, out var canonicalByTask)
+                && !_inventoryListResultsByHandle.ContainsKey(canonicalByTask))
+            {
+                message = $"Inventory list task '{handle}' is still running. Retry with resultHandle '{canonicalByTask}' after receiving inventory.list.complete.";
+                return true;
+            }
 
-        var signature = $"{normalizedFolder}|recursive={recursive.ToString().ToLowerInvariant()}";
+            var matchingTask = _inventoryListResultHandleByTaskHandle
+                .FirstOrDefault(pair => string.Equals(pair.Value, handle, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(matchingTask.Key)
+                && !_inventoryListResultsByHandle.ContainsKey(handle))
+            {
+                message = $"Inventory list result '{handle}' is not materialized yet (task '{matchingTask.Key}' still in progress).";
+                return true;
+            }
+        }
+
+        message = string.Empty;
+        return false;
+    }
+
+    private static string BuildInventoryListResultHandleForTask(string taskHandle)
+    {
+        var signature = $"task={taskHandle.Trim()}";
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(signature));
         return $"inventory-list:{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
@@ -4190,7 +4292,13 @@ internal sealed partial class BotSession
                 return AssetDownloadResult.FailResult($"Unable to download asset {assetUuid} as type {parsedAssetType}.");
             }
 
-            var payload = await BuildDownloadPayloadAsync(_options.ResolveWorkspaceDir(), asset.AssetData, mode, fileNameHint, parsedAssetType, token).ConfigureAwait(false);
+            var workspaceDir = _options.ResolveWorkspaceDir();
+            if (string.IsNullOrWhiteSpace(workspaceDir))
+            {
+                return AssetDownloadResult.FailResult("Workspace directory is not configured.");
+            }
+
+            var payload = await BuildDownloadPayloadAsync(workspaceDir, asset.AssetData, mode, fileNameHint, parsedAssetType, token).ConfigureAwait(false);
             return AssetDownloadResult.OkResult(
                 payload.Base64,
                 payload.FilePath,
@@ -4225,7 +4333,13 @@ internal sealed partial class BotSession
                 return AssetDownloadResult.FailResult($"Unable to download texture {textureUuid}.");
             }
 
-            var payload = await BuildDownloadPayloadAsync(_options.ResolveWorkspaceDir(),texture.AssetData, mode, fileNameHint, AssetType.Texture, token).ConfigureAwait(false);
+            var workspaceDir = _options.ResolveWorkspaceDir();
+            if (string.IsNullOrWhiteSpace(workspaceDir))
+            {
+                return AssetDownloadResult.FailResult("Workspace directory is not configured.");
+            }
+
+            var payload = await BuildDownloadPayloadAsync(workspaceDir, texture.AssetData, mode, fileNameHint, AssetType.Texture, token).ConfigureAwait(false);
             return AssetDownloadResult.OkResult(
                 payload.Base64,
                 payload.FilePath,
@@ -4590,6 +4704,46 @@ internal sealed partial class BotSession
         catch (Exception ex)
         {
             return AppearanceStateResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AvatarAppearanceStateResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AvatarAppearanceStateResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AvatarAppearanceStateResult.FailResult(ex.Message);
+        }
+        finally
+        {
+            _actionGate.Release();
+        }
+    }
+
+    private async Task<AvatarCacheListResult> ExecuteLockedAsync(
+        Func<GridClient, CancellationToken, Task<AvatarCacheListResult>> action,
+        CancellationToken cancellationToken)
+    {
+        await _actionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = EnsureClient();
+            return await action(client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return AvatarCacheListResult.FailResult(ex.Message);
         }
         finally
         {
@@ -5849,6 +6003,7 @@ internal sealed partial class BotSession
             {
                 AddWearable(new WearableInfo(
                     wearable.ItemID.ToString(),
+                    TryResolveInventoryItemName(client.Inventory.Store, wearable.ItemID),
                     wearable.AssetID.ToString(),
                     wearable.WearableType.ToString(),
                     wearable.AssetType.ToString(),
@@ -5873,6 +6028,7 @@ internal sealed partial class BotSession
                     {
                         AddWearable(new WearableInfo(
                             wearable.UUID.ToString(),
+                            wearable.Name,
                             wearable.AssetUUID.ToString(),
                             wearable.WearableType.ToString(),
                             wearable.AssetType.ToString(),
@@ -5887,6 +6043,7 @@ internal sealed partial class BotSession
 
                     AddWearable(new WearableInfo(
                         link.ResolvedItemID.ToString(),
+                        link.Name,
                         string.Empty,
                         "unknown",
                         "unknown",
@@ -6040,14 +6197,26 @@ internal sealed partial class BotSession
         return item;
     }
 
-    private static bool TryFindAttachedObjectForInventoryItem(
+    private static string? TryResolveInventoryItemName(Inventory? store, UUID itemId)
+    {
+        if (itemId == UUID.Zero || store == null || !store.TryGetValue(itemId, out var entry) || entry is not InventoryItem item)
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(item.Name) ? null : item.Name;
+    }
+
+    private static bool TryFindAttachedObjectSnapshotForInventoryItem(
         GridClient client,
         UUID inventoryItemId,
         out UUID attachedObjectId,
-        out uint attachedLocalId)
+        out uint attachedLocalId,
+        out AttachmentPoint attachedAttachmentPoint)
     {
         attachedObjectId = UUID.Zero;
         attachedLocalId = 0;
+        attachedAttachmentPoint = AttachmentPoint.Default;
 
         var sim = client.Network.CurrentSim;
         if (sim == null)
@@ -6076,11 +6245,333 @@ internal sealed partial class BotSession
                 {
                     attachedObjectId = prim.ID;
                     attachedLocalId = prim.LocalID;
+                    attachedAttachmentPoint = prim.PrimData.AttachmentPoint;
                     return true;
                 }
             }
         }
 
+        return false;
+    }
+
+    private static bool TryFindAttachedObjectForInventoryItem(
+        GridClient client,
+        UUID inventoryItemId,
+        out UUID attachedObjectId,
+        out uint attachedLocalId)
+    {
+        return TryFindAttachedObjectSnapshotForInventoryItem(
+            client,
+            inventoryItemId,
+            out attachedObjectId,
+            out attachedLocalId,
+            out _);
+    }
+
+    public async Task<AvatarAppearanceStateResult> AvatarAppearanceListWornAsync(
+        string avatarId,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(avatarId, out var avatarUuid) || avatarUuid == UUID.Zero)
+        {
+            return AvatarAppearanceStateResult.FailResult("avatarId is not a valid non-zero UUID.");
+        }
+
+        return await ExecuteLockedAsync((client, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+
+            if (!TryFindAvatarInKnownSims(client, avatarUuid, out var avatar, out var avatarSimulator))
+            {
+                return Task.FromResult(AvatarAppearanceStateResult.FailResult(
+                    $"Avatar {avatarUuid} is not present in known simulator avatar cache."));
+            }
+
+            var knownAttachments = GetKnownAvatarAttachments(avatar, avatarSimulator);
+
+            var attachments = knownAttachments
+                .Select(attachment =>
+                {
+                    var localId = TryResolveAttachmentLocalId(client, attachment.AttachmentId, out var resolvedLocalId)
+                        ? resolvedLocalId
+                        : (uint?)null;
+                    return new AvatarAttachmentInfo(
+                        ((AttachmentPoint)attachment.AttachmentPoint).ToString(),
+                        attachment.AttachmentId.ToString(),
+                        localId);
+                })
+                .OrderBy(attachment => attachment.AttachmentPoint, StringComparer.Ordinal)
+                .ThenBy(attachment => attachment.ObjectId, StringComparer.Ordinal)
+                .ToList();
+
+            var regionName = avatarSimulator?.Name;
+            var avatarName = string.IsNullOrWhiteSpace(avatar.Name) ? null : avatar.Name;
+            var message = attachments.Count == 0
+                ? $"Avatar {avatarUuid} is present, but simulator cache currently reports no known attachments."
+                : $"Collected {attachments.Count} known attachment object(s) for avatar {avatarUuid} from simulator cache.";
+
+            return Task.FromResult(AvatarAppearanceStateResult.OkResult(
+                avatarUuid.ToString(),
+                avatarName,
+                regionName,
+                attachments,
+                message));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AvatarCacheListResult> AvatarCacheListAsync(CancellationToken cancellationToken)
+    {
+        return await ExecuteLockedAsync((client, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+
+            var entries = client.Network.Simulators
+                .SelectMany(simulator => simulator.ObjectsAvatars.Values
+                    .Where(avatar => avatar != null)
+                    .Select(avatar =>
+                    {
+                        var attachments = GetKnownAvatarAttachments(avatar, simulator)
+                            .Select(attachment => new AvatarCacheAttachmentInfo(
+                                attachment.AttachmentId.ToString(),
+                                attachment.AttachmentPoint,
+                                ((AttachmentPoint)attachment.AttachmentPoint).ToString()))
+                            .OrderBy(attachment => attachment.AttachmentPointRaw)
+                            .ThenBy(attachment => attachment.ObjectId, StringComparer.Ordinal)
+                            .ToList();
+
+                        return new AvatarCacheEntryInfo(
+                            avatar.ID.ToString(),
+                            string.IsNullOrWhiteSpace(avatar.Name) ? null : avatar.Name,
+                            simulator.Name,
+                            simulator.Handle,
+                            avatar.LocalID,
+                            attachments.Count,
+                            attachments);
+                    }))
+                .OrderBy(entry => entry.RegionName, StringComparer.Ordinal)
+                .ThenBy(entry => entry.LocalId)
+                .ThenBy(entry => entry.AvatarId, StringComparer.Ordinal)
+                .ToList();
+
+            var uniqueAvatarCount = entries
+                .Select(entry => entry.AvatarId)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+
+            var message = $"Collected {entries.Count} avatar cache entr{(entries.Count == 1 ? "y" : "ies")} across {client.Network.Simulators.Count} simulator(s); unique avatars: {uniqueAvatarCount}.";
+            return Task.FromResult(AvatarCacheListResult.OkResult(entries, message));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> AvatarAttachmentTouchAsync(
+        string avatarId,
+        string? attachmentPoint,
+        string? objectId,
+        int settleMs,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(avatarId, out var avatarUuid) || avatarUuid == UUID.Zero)
+        {
+            return BotToolResult.Fail("avatarId is not a valid non-zero UUID.");
+        }
+
+        if (settleMs < 0 || settleMs > 5000)
+        {
+            return BotToolResult.Fail("settleMs must be between 0 and 5000.");
+        }
+
+        var attachmentPointFilter = string.IsNullOrWhiteSpace(attachmentPoint) ? null : attachmentPoint.Trim();
+        var hasObjectFilter = !string.IsNullOrWhiteSpace(objectId);
+
+        UUID objectUuid = UUID.Zero;
+        if (hasObjectFilter && (!UUID.TryParse(objectId!.Trim(), out objectUuid) || objectUuid == UUID.Zero))
+        {
+            return BotToolResult.Fail("objectId is not a valid non-zero UUID.");
+        }
+
+        var attachmentPointValue = AttachmentPoint.Default;
+        if (!hasObjectFilter && attachmentPointFilter == null)
+        {
+            return BotToolResult.Fail("Provide either objectId or attachmentPoint.");
+        }
+
+        if (!hasObjectFilter && attachmentPointFilter != null
+            && !Enum.TryParse<AttachmentPoint>(attachmentPointFilter, true, out attachmentPointValue))
+        {
+            return BotToolResult.Fail($"attachmentPoint '{attachmentPoint}' is not valid.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+
+            var currentSim = client.Network.CurrentSim;
+            if (currentSim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            if (!TryFindAvatarInKnownSims(client, avatarUuid, out var avatar, out var avatarSimulator))
+            {
+                return BotToolResult.Fail($"Avatar {avatarUuid} is not present in known simulator avatar cache.");
+            }
+
+            if (avatarSimulator == null || avatarSimulator.Handle != currentSim.Handle)
+            {
+                var seenRegion = string.IsNullOrWhiteSpace(avatarSimulator?.Name) ? "another simulator" : $"region '{avatarSimulator!.Name}'";
+                return BotToolResult.Fail($"Avatar {avatarUuid} is currently known in {seenRegion}. Move bot to the same region before touching attachments.");
+            }
+
+            var attachments = GetKnownAvatarAttachments(avatar, avatarSimulator);
+
+            if (attachments.Count == 0)
+            {
+                return BotToolResult.Fail($"Avatar {avatarUuid} has no known attachments in simulator cache.");
+            }
+
+            IEnumerable<(UUID AttachmentId, byte AttachmentPoint)> candidates = attachments;
+            if (hasObjectFilter)
+            {
+                candidates = candidates.Where(attachment => attachment.AttachmentId == objectUuid);
+            }
+            else
+            {
+                var requestedPointByte = (byte)attachmentPointValue;
+                candidates = candidates.Where(attachment => attachment.AttachmentPoint == requestedPointByte);
+            }
+
+            var matched = candidates
+                .OrderBy(attachment => attachment.AttachmentId.ToString(), StringComparer.Ordinal)
+                .ToList();
+
+            if (matched.Count == 0)
+            {
+                if (hasObjectFilter)
+                {
+                    return BotToolResult.Fail($"Attachment object {objectUuid} is not known for avatar {avatarUuid} in current simulator cache.");
+                }
+
+                return BotToolResult.Fail($"No known attachment matches point '{attachmentPointValue}' for avatar {avatarUuid}.");
+            }
+
+            var selected = matched[0];
+            if (!TryResolveAttachmentLocalIdInSimulator(currentSim, selected.AttachmentId, out var localId))
+            {
+                return BotToolResult.Fail($"Attachment object {selected.AttachmentId} is known for avatar {avatarUuid}, but no local ID is available in current simulator cache.");
+            }
+
+            client.Self.Touch(localId);
+            if (settleMs > 0)
+            {
+                await Task.Delay(settleMs, token).ConfigureAwait(false);
+            }
+
+            var selectedPoint = ((AttachmentPoint)selected.AttachmentPoint).ToString();
+            var settleSuffix = settleMs > 0 ? $"; waited {settleMs}ms for settle" : string.Empty;
+            var disambiguation = matched.Count > 1
+                ? $" Matched {matched.Count} attachments; touched first by object UUID ordering. Provide objectId for strict targeting."
+                : string.Empty;
+
+            return BotToolResult.OkResult(
+                $"Touch request sent for avatar {avatarUuid} attachment {selected.AttachmentId} (point={selectedPoint}, localId={localId}){settleSuffix}.{disambiguation}");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static List<(UUID AttachmentId, byte AttachmentPoint)> GetKnownAvatarAttachments(Avatar avatar, Simulator? avatarSimulator)
+    {
+        var results = new List<(UUID AttachmentId, byte AttachmentPoint)>();
+        var seen = new HashSet<UUID>();
+
+        foreach (var attachment in avatar.Attachments ?? new List<Avatar.Attachment>())
+        {
+            if (attachment.AttachmentID == UUID.Zero)
+            {
+                continue;
+            }
+
+            if (seen.Add(attachment.AttachmentID))
+            {
+                results.Add((attachment.AttachmentID, attachment.AttachmentPoint));
+            }
+        }
+
+        if (avatarSimulator != null && avatar.LocalID != 0)
+        {
+            foreach (var prim in avatarSimulator.ObjectsPrimitives.Values)
+            {
+                if (prim == null || prim.ID == UUID.Zero || prim.ParentID != avatar.LocalID)
+                {
+                    continue;
+                }
+
+                if (seen.Add(prim.ID))
+                {
+                    results.Add((prim.ID, (byte)prim.PrimData.AttachmentPoint));
+                }
+            }
+        }
+
+        return results;
+    }
+
+    private static bool TryFindAvatarInKnownSims(
+        GridClient client,
+        UUID avatarId,
+        out Avatar avatar,
+        out Simulator? avatarSimulator)
+    {
+        foreach (var simulator in client.Network.Simulators)
+        {
+            var match = simulator.ObjectsAvatars.Values.FirstOrDefault(candidate => candidate != null && candidate.ID == avatarId);
+            if (match != null)
+            {
+                avatar = match;
+                avatarSimulator = simulator;
+                return true;
+            }
+        }
+
+        avatar = null!;
+        avatarSimulator = null;
+        return false;
+    }
+
+    private static bool TryResolveAttachmentLocalId(
+        GridClient client,
+        UUID attachmentObjectId,
+        out uint localId)
+    {
+        foreach (var simulator in client.Network.Simulators)
+        {
+            foreach (var prim in simulator.ObjectsPrimitives.Values)
+            {
+                if (prim != null && prim.ID == attachmentObjectId)
+                {
+                    localId = prim.LocalID;
+                    return true;
+                }
+            }
+        }
+
+        localId = 0;
+        return false;
+    }
+
+    private static bool TryResolveAttachmentLocalIdInSimulator(
+        Simulator simulator,
+        UUID attachmentObjectId,
+        out uint localId)
+    {
+        foreach (var prim in simulator.ObjectsPrimitives.Values)
+        {
+            if (prim != null && prim.ID == attachmentObjectId)
+            {
+                localId = prim.LocalID;
+                return true;
+            }
+        }
+
+        localId = 0;
         return false;
     }
 
@@ -6123,6 +6614,7 @@ internal sealed partial class BotSession
                 AssetType.Folder.ToString(),
                 InventoryType.Folder.ToString(),
                 null,
+                null,
                 null);
         }
 
@@ -6135,6 +6627,7 @@ internal sealed partial class BotSession
                 "item",
                 item.AssetType.ToString(),
                 item.InventoryType.ToString(),
+                item.AssetUUID == UUID.Zero ? null : item.AssetUUID.ToString(),
                 item.CreatorID == UUID.Zero ? null : item.CreatorID.ToString(),
                 item.CreationDate == default
                     ? null
@@ -6148,6 +6641,7 @@ internal sealed partial class BotSession
             "unknown",
             AssetType.Unknown.ToString(),
             InventoryType.Unknown.ToString(),
+            null,
             null,
             null);
     }
@@ -6466,7 +6960,9 @@ internal sealed partial class BotSession
         Base64,
         TempFile,
         Both
-    }    private async Task<WearableDirectControlResult> ExecuteLockedAsync(
+    }    
+    
+    private async Task<WearableDirectControlResult> ExecuteLockedAsync(
         Func<GridClient, CancellationToken, Task<WearableDirectControlResult>> action,
         CancellationToken cancellationToken)
     {
@@ -6594,6 +7090,7 @@ internal sealed record InventoryEntry(
     string Kind,
     string AssetType,
     string InventoryType,
+    string? AssetId,
     string? CreatorId,
     string? CreatedUtc);
 
@@ -6692,9 +7189,63 @@ internal sealed record InventoryOfferHistoryResult(bool Ok, string Message, IRea
         => new(false, message, Array.Empty<InventoryOfferEventInfo>());
 }
 
-internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType, string Source);
+internal sealed record WearableInfo(string ItemId, string? ItemName, string AssetId, string WearableType, string AssetType, string Source);
 
-internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint, string? ObjectId, uint? ObjectLocalId);
+internal sealed record AttachmentInfo(
+    string ItemId,
+    string? ItemName,
+    string AttachmentPoint,
+    int AttachmentPointRaw,
+    string? ObjectAttachmentPoint,
+    int? ObjectAttachmentPointRaw,
+    string? ObjectId,
+    uint? ObjectLocalId);
+
+internal sealed record AvatarAttachmentInfo(string AttachmentPoint, string ObjectId, uint? ObjectLocalId);
+
+internal sealed record AvatarCacheAttachmentInfo(string ObjectId, byte AttachmentPointRaw, string AttachmentPoint);
+
+internal sealed record AvatarCacheEntryInfo(
+    string AvatarId,
+    string? AvatarName,
+    string RegionName,
+    ulong RegionHandle,
+    uint LocalId,
+    int AttachmentCount,
+    IReadOnlyList<AvatarCacheAttachmentInfo> Attachments);
+
+internal sealed record AvatarCacheListResult(
+    bool Ok,
+    string Message,
+    int EntryCount,
+    IReadOnlyList<AvatarCacheEntryInfo> Avatars)
+{
+    public static AvatarCacheListResult OkResult(IReadOnlyList<AvatarCacheEntryInfo> avatars, string message)
+        => new(true, message, avatars.Count, avatars);
+
+    public static AvatarCacheListResult FailResult(string message)
+        => new(false, message, 0, Array.Empty<AvatarCacheEntryInfo>());
+}
+
+internal sealed record AvatarAppearanceStateResult(
+    bool Ok,
+    string Message,
+    string? AvatarId,
+    string? AvatarName,
+    string? RegionName,
+    IReadOnlyList<AvatarAttachmentInfo> Attachments)
+{
+    public static AvatarAppearanceStateResult OkResult(
+        string avatarId,
+        string? avatarName,
+        string? regionName,
+        IReadOnlyList<AvatarAttachmentInfo> attachments,
+        string message)
+        => new(true, message, avatarId, avatarName, regionName, attachments);
+
+    public static AvatarAppearanceStateResult FailResult(string message)
+        => new(false, message, null, null, null, Array.Empty<AvatarAttachmentInfo>());
+}
 
 internal sealed record WearAttachmentIniConfig(
     AttachmentPoint? AttachPoint,

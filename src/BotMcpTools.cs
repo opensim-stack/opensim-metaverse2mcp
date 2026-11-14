@@ -10,6 +10,25 @@ namespace Opensim.Metaverse2Mcp;
 [McpServerToolType]
 internal sealed class BotMcpTools
 {
+    // ...existing code...
+
+    [McpServerTool(Name = "signals_nearby"), Description("List nearby signal-capable objects discovered from object IAH broadcasts.")]
+    public Task<DataToolResult> SignalsNearby(
+        [Description("Optional owner/agent UUID filter. Only signal objects owned by this avatar are returned when provided.")] string? agentUuid = null,
+        [Description("Optional radius in meters from the bot position. When omitted, returns all matching cached objects in the current simulator.")] float? radius = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SignalsNearbyAsync(agentUuid, radius, cancellationToken);
+    }
+
+    [McpServerTool(Name = "signals_description"), Description("Fetch protocol/schema description for a discovered signal-capable object by sender UUID.")]
+    public Task<DataToolResult> SignalsDescription(
+        [Description("Object sender UUID as returned by signals_nearby.")] string objectSenderId,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SignalsDescriptionAsync(objectSenderId, cancellationToken);
+    }
+
     private readonly BotSession _bot;
     private readonly SpawnerClient _spawnerClient;
     private readonly AppOptions _options;
@@ -256,6 +275,36 @@ internal sealed class BotMcpTools
         CancellationToken cancellationToken = default)
     {
         return ChangeBotRunningStateAsync(first, last, "restart", cancellationToken);
+    }
+
+    [McpServerTool, Description("Set or clear local-user partnership via opensim-spawner. Both users must exist locally in the grid database. Provide partnerFirst and partnerLast to set both sides; omit both to clear only this user's partner (divorcing both users requires two calls). Partner status can be retrieved in the agent profile, although actual status may lag due to caching (assume status returned here is correct)")]
+    public Task<DataToolResult> SetPartner(
+        [Description("Primary local user's first name.")] string userFirst,
+        [Description("Primary local user's last name.")] string userLast,
+        [Description("Optional partner's local first name. Must be provided with partnerLast.")] string? partnerFirst = null,
+        [Description("Optional partner's local last name. Must be provided with partnerFirst.")] string? partnerLast = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _spawnerClient.SetPartnerAsync(userFirst, userLast, partnerFirst, partnerLast, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set the bot avatar's own display name using AgentManager.SetDisplayNameAsync. oldDisplayName is optional and defaults to the bot's current known name.")]
+    public Task<BotToolResult> SetDisplayName(
+        [Description("Requested new display name for this bot avatar.")] string newDisplayName,
+        [Description("Current display name expected by the simulator; optional but may be required by some grids.")] string? oldDisplayName = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SetDisplayNameAsync(newDisplayName, oldDisplayName, cancellationToken);
+    }
+
+    [McpServerTool, Description("Set the logged-in bot avatar profile About Text. Use empty string to clear.")]
+    public Task<BotToolResult> SetAboutText(
+        [Description("New AboutText for this bot avatar profile. Use empty string to clear.")] string aboutText,
+        [Description("Seconds to wait for current profile properties before submitting the update (1..30).")]
+        int waitForReplySeconds = 10,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.AvatarProfileSetAboutTextAsync(aboutText, waitForReplySeconds, cancellationToken);
     }
 
     private async Task<DataToolResult> ChangeBotRunningStateAsync(
@@ -859,6 +908,37 @@ internal sealed class BotMcpTools
         return _bot.EstateGetInfoAsync(cancellationToken);
     }
 
+    [McpServerTool, Description("Set estate region defaults (Region/Estate tab settings) for the current region.")]
+    public Task<BotToolResult> EstateSetInfo(
+        [Description("True to block terrain editing.")] bool blockTerraform,
+        [Description("True to disable flying.")] bool blockFly,
+        [Description("True to block fly-over entry.")] bool blockFlyOver,
+        [Description("True to allow damage.")] bool allowDamage,
+        [Description("True to allow land resell.")] bool allowLandResell,
+        [Description("True to restrict push object.")] bool restrictPushing,
+        [Description("True to allow parcel join/divide.")] bool allowParcelJoinDivide,
+        [Description("Agent limit for the region.")] float agentLimit,
+        [Description("Object/prim bonus multiplier.")] float objectBonus,
+        [Description("True to block parcel search.")] bool blockParcelSearch,
+        [Description("Maturity rating: General, Moderate, Adult (aliases: PG, Mature).")]
+        string maturity,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.EstateSetInfoAsync(
+            blockTerraform,
+            blockFly,
+            blockFlyOver,
+            allowDamage,
+            allowLandResell,
+            restrictPushing,
+            allowParcelJoinDivide,
+            agentLimit,
+            objectBonus,
+            blockParcelSearch,
+            maturity,
+            cancellationToken);
+    }
+
     [McpServerTool, Description("Fetch estate covenant metadata (covenant asset ID, owner, timestamp).")]
     public Task<DataToolResult> EstateGetCovenant(CancellationToken cancellationToken)
     {
@@ -1073,6 +1153,14 @@ internal sealed class BotMcpTools
         return LocateAgentByUuidAsync(targetId, null, null, cancellationToken);
     }
 
+    [McpServerTool, Description("Return adult-interaction eligibility plus denial reason details (if denied).")]
+    public Task<BotSession.AdultInteractionAllowanceResult> IsAdultInteractionAllowed(
+        [Description("Target agent UUID.")] string agentId,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.IsAdultInteractionAllowedAsync(agentId, cancellationToken);
+    }
+
     private async Task<DataToolResult> LocateAgentByUuidAsync(
         UUID targetId,
         string? firstName,
@@ -1155,7 +1243,7 @@ internal sealed class BotMcpTools
         return _bot.TeleportRequestsListAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("Accept or decline a pending teleport offer using requester and IM session IDs.")]
+    [McpServerTool, Description("Accept or decline a pending teleport offer (lure) using requester and IM session IDs. When accept=true, waits for the local or Hypergrid teleport to complete or fail and returns the outcome.")]
     public Task<BotToolResult> TeleportOfferRespond(
         [Description("Requester avatar UUID (sender of the offer)." )] string requesterAgentId,
         [Description("IM session UUID from the teleport offer message.")] string sessionId,
@@ -1544,23 +1632,40 @@ internal sealed class BotMcpTools
         return _bot.MoveToAsync(x, y, z, true, cancellationToken);
     }
 
-    [McpServerTool, Description("Teleport to a local position, optionally in a named region.")]
+    [McpServerTool, Description("Teleport to a local position, optionally in a named region or Hypergrid destination.")]
     public Task<BotToolResult> TeleportTo(
-        [Description("Local X coordinate (0..256).") ] float x,
-        [Description("Local Y coordinate (0..256).") ] float y,
+        [Description("Local X coordinate (0..256, or larger for varregions)." )] float x,
+        [Description("Local Y coordinate (0..256, or larger for varregions)." )] float y,
         [Description("Local Z coordinate.")] float z,
-        [Description("Optional destination region name. If omitted, current region is used.")] string? regionName = null,
+        [Description("Optional destination region name, hop:// URL, or host:port:RegionName Hypergrid address. If omitted, current region is used.")] string? regionName = null,
         CancellationToken cancellationToken = default)
     {
         return _bot.TeleportToAsync(x, y, z, regionName, cancellationToken);
     }
 
-    [McpServerTool, Description("Teleport to a region's default arrival/landing point without specifying XYZ coordinates.")]
+    [McpServerTool, Description("Teleport to a region's default arrival/landing point without specifying XYZ coordinates. Also accepts hop:// or Hypergrid region targets.")]
     public Task<BotToolResult> TeleportToLandingPoint(
-        [Description("Optional destination region name. If omitted, current region is used.")] string? regionName = null,
+        [Description("Optional destination region name, hop:// URL, or host:port:RegionName Hypergrid address. If omitted, current region is used.")] string? regionName = null,
         CancellationToken cancellationToken = default)
     {
         return _bot.TeleportToLandingPointAsync(regionName, cancellationToken);
+    }
+
+    [McpServerTool, Description("Teleport (hop) to a Hypergrid hop:// URL, x-grid-location-info:// URL, secondlife:// SLURL, hg:// URL, http(s):// region URL, or OpenSim host:port:RegionName address. Uses /x/y/z coordinates from the URL when present unless overridden.")]
+    public Task<BotToolResult> TeleportToUrl(
+        [Description("Destination URL or Hypergrid address (for example: hop://grid.example.com:8002/Region%20Name/128/128/25, hop://grid.example.com:8002/, secondlife://Region/128/128/25, or grid.example.com:8002:Region Name).")] string url,
+        [Description("Optional local X coordinate override.")] float? x = null,
+        [Description("Optional local Y coordinate override.")] float? y = null,
+        [Description("Optional local Z coordinate override.")] float? z = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.TeleportToUrlAsync(url, x, y, z, cancellationToken);
+    }
+
+    [McpServerTool, Description("Teleport back to the bot's configured home location on its home grid (works both locally and when visiting foreign Hypergrid regions).")]
+    public Task<BotToolResult> TeleportHome(CancellationToken cancellationToken = default)
+    {
+        return _bot.TeleportHomeAsync(cancellationToken);
     }
 
     [McpServerTool, Description("Teleport to a region handle and local position.")]
@@ -2238,20 +2343,20 @@ internal sealed class BotMcpTools
         return _bot.PayAsync(targetType, targetId, amount, description, cancellationToken);
     }
 
-    [McpServerTool, Description("Start listing inventory entries under a folder UUID/path (or root if omitted). This queues a background BotTask because large inventories, especially recursive queries, may take time. The completion event returns a deterministic resultHandle for InventoryListRetrieve and InventoryListClear, which also enables rudimentary caching by folder path plus recursion mode.")]
+    [McpServerTool, Description("Start listing inventory entries under a folder UUID/path (or root if omitted). This queues a background BotTask because large inventories, especially recursive queries, may take time. The returned BotTaskHandle includes resultHandle immediately, and completion events also include it for InventoryListRetrieve and InventoryListClear.")]
     public Task<BotTaskHandle> InventoryList(
-        [Description("True to recurse into subfolders.")] bool recursive = false,
         [Description("Optional inventory folder UUID or slash-separated path (e.g. 'My Folder/Sub Folder'). Leave empty for inventory root.")] string? folderIdOrPath = null,
+        [Description("True to recurse into subfolders.")] bool recursive = false,
         CancellationToken cancellationToken = default)
     {
-        return _bot.InventoryListAsync(folderIdOrPath, recursive, CancellationToken.None);
+        return _bot.InventoryListAsync(folderIdOrPath, recursive, cancellationToken);
     }
 
     [McpServerTool, Description("Retrieve materialized results using the InventoryList completion resultHandle. Call InventoryListClear when finished searching to release cached results.")]
     public Task<InventoryQueryResult> InventoryListRetrieve(
         [Description("InventoryList resultHandle returned by the completion event.")] string resultHandle,
-        [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults = 25,
-        [Description("Page size for this response (1..500).") ] int pageSize = 25,
+        [Description("Maximum matched results considered before pagination (1..10000).") ] int maxResults = 50,
+        [Description("Page size for this response (1..500).") ] int pageSize = 50,
         [Description("Optional case-insensitive substring filter applied to entry names.")] string? nameContains = null,
         [Description("Optional type filter (matches kind/assetType/inventoryType, case-insensitive).") ] string? type = null,
         [Description("Optional lower-bound creation timestamp (ISO-8601 UTC).") ] string? createdAfterUtc = null,
@@ -3040,13 +3145,38 @@ internal sealed class BotMcpTools
 
     [McpServerTool, Description("List currently worn wearables and attachments.")]
     public Task<AppearanceStateResult> AppearanceListWorn(
-        [Description("Include runtime appearance snapshot sources (`GetWearables` / `GetAttachmentsByItemId`).")]
-        bool includeAttachmentsAndWearables = true,
-        [Description("Include Current Outfit Folder (COF) link sources.")]
+        [Description("Include Current Outfit Folder (COF) link sources (preferred).")]
         bool includeCurrentOutfit = true,
+        [Description("Include runtime appearance snapshot sources (`GetWearables` / `GetAttachmentsByItemId`).")]
+        bool includeAttachmentsAndWearables = false,
         CancellationToken cancellationToken = default)
     {
         return _bot.AppearanceListWornAsync(includeAttachmentsAndWearables, includeCurrentOutfit, cancellationToken);
+    }
+
+    [McpServerTool, Description("List known worn attachments for another avatar UUID from simulator avatar/object cache data.")]
+    public Task<AvatarAppearanceStateResult> AvatarAppearanceListWorn(
+        [Description("Target avatar UUID.")] string avatarId,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.AvatarAppearanceListWornAsync(avatarId, cancellationToken);
+    }
+
+    [McpServerTool, Description("Diagnostic: list all avatar entries currently present in simulator ObjectAvatars caches.")]
+    public Task<AvatarCacheListResult> AvatarCacheList(CancellationToken cancellationToken = default)
+    {
+        return _bot.AvatarCacheListAsync(cancellationToken);
+    }
+
+    [McpServerTool, Description("Touch one attachment on another avatar using known simulator cache data. Provide objectId and/or attachmentPoint to target.")]
+    public Task<BotToolResult> AvatarAttachmentTouch(
+        [Description("Target avatar UUID.")] string avatarId,
+        [Description("Optional attachment point enum name (e.g. Chest, RightHand). Ignored when objectId is provided.")] string? attachmentPoint = null,
+        [Description("Optional attachment object UUID from AvatarAppearanceListWorn for precise targeting.")] string? objectId = null,
+        [Description("Optional settle delay in milliseconds after sending touch (0..5000).") ] int settleMs = 0,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.AvatarAttachmentTouchAsync(avatarId, attachmentPoint, objectId, settleMs, cancellationToken);
     }
 
     [McpServerTool, Description("Resolve current outfit name/UUID from Current Outfit Folder (COF) link metadata.")]

@@ -266,6 +266,7 @@ internal sealed partial class BotSession
             globalGateHeld = !routedText.StartsWith('*');
 
             TryBindRestoredOpencodeSessionToConversation(conversationKey);
+            await EnsureRestoredSessionPreflightAsync(conversationKey).ConfigureAwait(false);
             var sendOptions = await BuildSendOptions(conversationKey, senderAgentId, from).ConfigureAwait(false);
             using var requestCts = new CancellationTokenSource();
             inFlightRequestCts = requestCts;
@@ -516,6 +517,7 @@ internal sealed partial class BotSession
         }
 
         var text = e.Message?.Trim() ?? string.Empty;
+
         var isObject = e.SourceType == ChatSourceType.Object;
         if (string.IsNullOrWhiteSpace(text)
             || (e.SourceType != ChatSourceType.Agent && !isObject)
@@ -523,6 +525,8 @@ internal sealed partial class BotSession
         {
             return;
         }
+
+        TryProcessSignalsIngress(client, e, text);
 
         if (!_receiveChatAllowedTypes.Contains(e.Type))
         {
