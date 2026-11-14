@@ -265,6 +265,8 @@ internal sealed partial class BotSession : IDisposable
         }
 
         Console.WriteLine($"[chat] receive chat-type filter (local/group): {string.Join(", ", _receiveChatAllowedTypes.OrderBy(value => value.ToString(), StringComparer.OrdinalIgnoreCase))}");
+
+        StartSignalsMaintenanceLoop();
     }
 
     public string LastLoginMessage => _lastLoginMessage;
@@ -632,6 +634,7 @@ internal sealed partial class BotSession : IDisposable
         try { ClearBusyHoverText(); } catch { }
         try { DisposeVoiceSupport(); } catch { }
         try { ResetSharedCurrentOutfitFolder(); } catch { }
+        try { _signalsHttpClient.Dispose(); } catch { }
 
         try
         {
@@ -1596,7 +1599,8 @@ internal sealed partial class BotSession : IDisposable
                         && checkClient.Inventory?.Store != null)
                     {
                         ready = true;
-                        // ensure the variable used below references the field-backed client
+                        // ensure the variable used below references the field
+                        // backed client
                         client = checkClient;
                         break;
                     }

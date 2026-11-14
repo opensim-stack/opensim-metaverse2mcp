@@ -7,6 +7,8 @@ The server publishes tools including:
 - `GetStatus`
 - `DiagnosticThreadStackDump`
 - `DiagnosticThreadStackDumpBlocked`
+- `signals_nearby`
+- `signals_description`
 - `BotList`
 - `BotGet`
 - `BotCreate`
@@ -721,3 +723,5 @@ Tip: call `EnvGetRegion` or `EnvGetLegacy` first and use the returned `PayloadJs
 ## Health endpoint
 
 - `GET /healthz` returns runtime status plus bot location.
+
+````

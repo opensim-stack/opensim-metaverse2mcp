@@ -517,9 +517,14 @@ internal sealed partial class BotSession
         }
 
         var text = e.Message?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(text)
-            || e.SourceType != ChatSourceType.Agent
-            || e.SourceID == UUID.Zero)
+        if (string.IsNullOrWhiteSpace(text) || e.SourceID == UUID.Zero)
+        {
+            return;
+        }
+
+        TryProcessSignalsIngress(client, e, text);
+
+        if (e.SourceType != ChatSourceType.Agent)
         {
             return;
         }

@@ -10,6 +10,25 @@ namespace Opensim.Metaverse2Mcp;
 [McpServerToolType]
 internal sealed class BotMcpTools
 {
+    // ...existing code...
+
+    [McpServerTool(Name = "signals_nearby"), Description("List nearby signal-capable objects discovered from object IAH broadcasts.")]
+    public Task<DataToolResult> SignalsNearby(
+        [Description("Optional owner/agent UUID filter. Only signal objects owned by this avatar are returned when provided.")] string? agentUuid = null,
+        [Description("Optional radius in meters from the bot position. When omitted, returns all matching cached objects in the current simulator.")] float? radius = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SignalsNearbyAsync(agentUuid, radius, cancellationToken);
+    }
+
+    [McpServerTool(Name = "signals_description"), Description("Fetch protocol/schema description for a discovered signal-capable object by sender UUID.")]
+    public Task<DataToolResult> SignalsDescription(
+        [Description("Object sender UUID as returned by signals_nearby.")] string objectSenderId,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SignalsDescriptionAsync(objectSenderId, cancellationToken);
+    }
+
     private readonly BotSession _bot;
     private readonly SpawnerClient _spawnerClient;
     private readonly AppOptions _options;
