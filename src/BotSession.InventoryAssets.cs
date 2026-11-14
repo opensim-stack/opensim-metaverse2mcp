@@ -5394,7 +5394,7 @@ internal sealed partial class BotSession
             var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
             if (completed != tcs.Task)
             {
-                return null;@copilot resolve the merge conflicts in this pull request
+                return null;
             }
 
             return await tcs.Task.ConfigureAwait(false);
@@ -5457,7 +5457,7 @@ internal sealed partial class BotSession
             folderUuid = store.RootFolder.UUID;
             return true;
         }
-@copilot resolve the merge conflicts in this pull request
+
         var normalized = folderIdOrPath.Trim();
         if (UUID.TryParse(normalized, out var parsedFolderId))
         {
@@ -6271,6 +6271,7 @@ internal sealed partial class BotSession
             {
                 attachedObjectId = prim.ID;
                 attachedLocalId = prim.LocalID;
+                attachedAttachmentPoint = prim.PrimData.AttachmentPoint;
                 return true;
             }
         }
@@ -6341,9 +6342,6 @@ internal sealed partial class BotSession
                 if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out var parsed) && parsed != UUID.Zero)
                 {
                     itemId = parsed;
-                    attachedObjectId = prim.ID;
-                    attachedLocalId = prim.LocalID;
-                    attachedAttachmentPoint = prim.PrimData.AttachmentPoint;
                     return true;
                 }
             }
