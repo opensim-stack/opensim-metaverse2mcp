@@ -5,23 +5,8 @@ namespace Opensim.Metaverse2Mcp;
 internal sealed partial class BotSession
 {
     private const string BuiltInBridgePrompt =
-        "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n" +
-        "Environment basics:\n" +
-        "- Make sure you say 'I did ...' instead of 'You did ..' when you as the bot are affected by the action.\n" +
-        "- Avatars, regions, parcels, prim objects, inventory, scripts, and environment settings are stateful and shared.\n" +
-        "- Simulator/cache state may be stale; verify current state before mutating it.\n" +
-        "Tooling basics:\n" +
-        "- Use metaverse MCP tools for avatar/world operations (movement, prims, inventory, scripts, environment).\n" +
-        "Operating rules:\n" +
-        "- Prefer safe and reversible actions.\n" +
-        "- Confirm destructive or high-impact actions first (delete, bulk changes, ownership/permission changes, restarts).\n" +
-        "- Attachment and wearable controls are different: use attachment tools for attachments/objects and wearable tools for clothing/body layers.\n" +
-        "- If asked to 'detach/remove attachments', use appearance_detach_all_attachments_except (empty keep filters unless exclusions are requested), then re-check with appearance_list_attachment_point_mappings. Avoid item-by-item detach loops unless explicitly requested.\n" +
-        "- If asked to remove everything worn, use appearance_detach_and_remove_all_worn_deterministic, then re-check and report both attachment and wearable sections separately.\n" +
-        "- When requester identity metadata is provided for IM, resolve pronouns like 'me', 'my', and 'here' to that requester unless they explicitly override it.\n" +
-        "- Ask concise clarifying questions when instructions are ambiguous or missing required identifiers.\n" +
-        "- For multi-step tasks, inspect -> plan -> execute -> verify and report results clearly.\n" +
-        "- Respect handler and policy restrictions configured by the bridge.";
+        "You are an in-world assistant running through opensim-metaverse2mcp for OpenSimulator/Second Life style worlds.\n";
+    private bool _duplicatePromptSourceWarningLogged;
         
     private async Task<HarnessSendOptions?> BuildSendOptions(string conversationKey, UUID requesterAgentId = default, string? requesterName = null)
     {
@@ -56,8 +41,14 @@ internal sealed partial class BotSession
 
         if (_options.PromptProjectAgentsEnabled)
         {
-            var projectPath = ResolveProjectAgentsPromptPath();
-            sources.Add(projectPath == null ? "project(AGENTS.md:missing)" : $"project({projectPath})");
+            if (ShouldSuppressProjectAgentsPromptSource(out _, out var projectPath))
+            {
+                sources.Add($"project({projectPath}:disabled-duplicate)");
+            }
+            else
+            {
+                sources.Add(projectPath == null ? "project(AGENTS.md:missing)" : $"project({projectPath})");
+            }
         }
 
         lock (_promptStateLock)
@@ -88,10 +79,13 @@ internal sealed partial class BotSession
 
         if (_options.PromptProjectAgentsEnabled)
         {
-            var projectAgents = TryLoadProjectAgentsPromptText();
-            if (!string.IsNullOrWhiteSpace(projectAgents))
+            if (!ShouldSuppressProjectAgentsPromptSource(out _, out _))
             {
-                layers.Add("[project AGENTS.md]\n" + projectAgents);
+                var projectAgents = TryLoadProjectAgentsPromptText();
+                if (!string.IsNullOrWhiteSpace(projectAgents))
+                {
+                    layers.Add("[project AGENTS.md]\n" + projectAgents);
+                }
             }
         }
 
@@ -321,6 +315,35 @@ internal sealed partial class BotSession
         }
     }
 
+    private bool ShouldSuppressProjectAgentsPromptSource(out string? builtInPath, out string? projectPath)
+    {
+        builtInPath = _options.PromptBuiltInEnabled ? ResolveBuiltInBridgePromptOverridePath() : null;
+        projectPath = _options.PromptProjectAgentsEnabled ? ResolveProjectAgentsPromptPath() : null;
+
+        if (string.IsNullOrWhiteSpace(builtInPath) || string.IsNullOrWhiteSpace(projectPath))
+        {
+            return false;
+        }
+
+        var comparer = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!string.Equals(builtInPath, projectPath, comparer))
+        {
+            return false;
+        }
+
+        lock (_promptStateLock)
+        {
+            if (!_duplicatePromptSourceWarningLogged)
+            {
+                _duplicatePromptSourceWarningLogged = true;
+                Console.WriteLine(
+                    $"[prompt] built-in prompt override and project AGENTS prompt resolve to the same file '{projectPath}'. Project AGENTS prompt source is being disabled to avoid duplicate merge.");
+            }
+        }
+
+        return true;
+    }
+
     private string NormalizePromptText(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -390,5 +413,65 @@ internal sealed partial class BotSession
         const int maxPreviewChars = 2400;
         var preview = text.Length <= maxPreviewChars ? text : text[..maxPreviewChars] + "\n\n[prompt preview truncated]";
         return string.Join("\n", $"Prompt source: {sourceName}", preview);
+    }
+
+    internal string? GetLayeredPromptForMcp()
+    {
+        return BuildLayeredPromptText();
+    }
+
+    internal string GetBuiltInBridgePromptForMcp()
+    {
+        if (!_options.PromptHandlingEnabled || !_options.PromptBuiltInEnabled)
+        {
+            return "Built-in bridge prompt source is disabled.";
+        }
+
+        return ResolveBuiltInBridgePromptText();
+    }
+
+    internal string GetProjectAgentsPromptForMcp()
+    {
+        if (!_options.PromptHandlingEnabled || !_options.PromptProjectAgentsEnabled)
+        {
+            return "Project AGENTS.md prompt source is disabled.";
+        }
+
+        if (ShouldSuppressProjectAgentsPromptSource(out _, out var projectPath))
+        {
+            return $"Project AGENTS.md prompt source is disabled because it resolves to the same file as the built-in prompt override ({projectPath}).";
+        }
+
+        var projectPrompt = TryLoadProjectAgentsPromptText();
+        return string.IsNullOrWhiteSpace(projectPrompt)
+            ? "Project AGENTS.md prompt source is enabled, but no prompt text is currently available."
+            : projectPrompt;
+    }
+
+    internal string GetNotecardAgentsPromptForMcp()
+    {
+        if (!_options.PromptHandlingEnabled || !_options.PromptNotecardEnabled)
+        {
+            return "In-world AGENTS.md notecard prompt source is disabled.";
+        }
+
+        string? notecardPrompt;
+        string? notecardName;
+        string? notecardId;
+        lock (_promptStateLock)
+        {
+            notecardPrompt = _activeAgentsNotecardPrompt;
+            notecardName = _activeAgentsNotecardSourceName;
+            notecardId = _activeAgentsNotecardItemId;
+        }
+
+        if (string.IsNullOrWhiteSpace(notecardPrompt))
+        {
+            return "In-world AGENTS.md notecard prompt source is enabled, but no active notecard prompt is loaded.";
+        }
+
+        var source = string.IsNullOrWhiteSpace(notecardName) ? "unknown" : notecardName.Trim();
+        var itemId = string.IsNullOrWhiteSpace(notecardId) ? "n/a" : notecardId.Trim();
+        return $"[source: {source} ({itemId})]\n\n{notecardPrompt}";
     }
 }

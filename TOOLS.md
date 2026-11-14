@@ -7,6 +7,8 @@ The server publishes tools including:
 - `GetStatus`
 - `DiagnosticThreadStackDump`
 - `DiagnosticThreadStackDumpBlocked`
+- `signals_nearby`
+- `signals_description`
 - `BotList`
 - `BotGet`
 - `BotCreate`
@@ -14,6 +16,9 @@ The server publishes tools including:
 - `BotStop`
 - `BotRestart`
 - `BotDelete`
+- `SetPartner`
+- `SetDisplayName`
+- `AvatarProfileSetAboutText`
 - `Sit`
 - `SitOnPrim`
 - `SitOnPrimByName`
@@ -38,6 +43,8 @@ The server publishes tools including:
 - `FlyTo`
 - `TeleportTo`
 - `TeleportToLandingPoint`
+- `TeleportToUrl`
+- `TeleportHome`
 - `TeleportToRegionHandle`
 - `TeleportToLandmark`
 - `RegionUuid`
@@ -195,6 +202,11 @@ Social/friends notes:
 - `FriendSetRights` controls the three viewer switches: see online, locate on map, and edit/delete/take objects.
 - `FriendRightsGet` reports both sides of rights (`myRights` and `theirRights`) for one friend UUID.
 - Accepting a friendship offer from a configured handler auto-enables all three rights by default.
+- `SetPartner` updates local profile partnership data in the grid database (`userprofile.profilePartner`) for local users.
+- `SetPartner` with `partnerFirst` + `partnerLast` sets both sides in one call when both local users exist.
+- `SetPartner` with no partner parameters clears only the target user's partner; divorcing both users requires two calls.
+- `SetDisplayName` requests a display-name update for the logged-in bot avatar via capability `SetDisplayName`; some grids require `oldDisplayName` to match current server state.
+- `AvatarProfileSetAboutText` updates the logged-in bot avatar's profile `AboutText` (use empty string to clear). It first reads current profile properties so the update preserves other profile fields.
 - Incoming group invitations emit runtime event `groups.invite.received` on channel `friends`; use `groupId` (+ optional `sessionId`) with `GroupInviteRespond` to accept/decline.
 - Incoming scripted object dialogs emit runtime event `script.dialog.received` on channel `general`; use `pendingDialogHandle` with `ScriptDialogChoice` (`buttonIndex=-1` cancels without responding).
 - Scripted text-box prompts (for example `llTextBox`) can be answered with `ScriptDialogTextInput(pendingDialogHandle, text)` using the same pending dialog handle.
@@ -284,7 +296,10 @@ Movement notes:
 - `SitOnPrimByName` resolves nearest name match in current simulator cache, then performs the same object sit handshake.
 - `SitOnNearestSittablePrim` picks the nearest candidate prim in radius (prefers explicit sit targets by default ordering) and performs object sit handshake.
 - `WalkTo`/`FlyTo` use stepped autopilot waypoints for improved reliability over larger distances.
-- `TeleportTo` resolves named regions to handles before teleporting for stricter targeting.
+- `TeleportTo` resolves named regions on the active simulator before teleporting, and also accepts Hypergrid `hop://` URLs or `host:port:RegionName` destinations.
+- `TeleportToUrl(url, x?, y?, z?)` parses and hops to `hop://`, `hops://`, `hg://`, `x-grid-location-info://`, `secondlife://`, `http(s)://` region SLURLs, and OpenSim `host:port:RegionName` Hypergrid addresses (including default-region URLs like `hop://grid.example.com:8002/`). Coordinates in `/x/y/z` or `(x,y,z)` are used unless overridden.
+- `TeleportHome()` teleports the bot back to its home location on its home grid (works from both local regions and foreign Hypergrid sims via OpenSim `HGEntityTransferModule.TeleportHome`).
+- `TeleportOfferRespond(requesterAgentId, sessionId, accept)` ensures the simulator EventQueue is running when `accept=true`, awaits actual teleport completion or failure (`TeleportFinish` / `TeleportFailed` / `AgentAlertMessage`), and returns diagnostic details if a lure is rejected or ignored.
 - `RegionUuid(globalX, globalY)` converts global map coordinates to a region handle using `PositionHelper.RegionHandleFromGlobal`, and returns region origin plus derived local coordinates.
 - `Map(regionHandle="0", itemType="AgentLocations", layerType="Objects")` queries map items via `Grid.MapItemsAsync`; when `regionHandle=0` the current simulator region is used.
 - `Map` returns per-item typed JSON payload rows (for example `MapAgentLocation`, `MapLandForSale`, `MapPGEvent`) including shared coordinates and each subclass-specific fields.
@@ -293,8 +308,8 @@ Movement notes:
 - Optional external presence fallback is disabled by default; set `AGENT_MONITOR_EXTERNAL_FALLBACK=true` to probe spawner/friend-map (throttled) only when the target is otherwise lost.
 
 Agent lookup notes:
-- `AgentNameToUUID(first,last)` resolves avatar names via `AvatarManager.RequestAvatarNameSearch` (`AvatarPickerReply`) and returns the matched UUID.
-- `AgentFind(first,last)` uses the same AvatarPicker-based name resolution before running a short-lived monitor snapshot.
+- `AgentNameToUUID(first,last)` checks nearby simulator avatars (including Hypergrid visitor names rewritten as `First.Last @host:port`) and the friend list first, then falls back to `AvatarManager.RequestAvatarNameSearch` (`AvatarPickerReply`).
+- `AgentFind(first,last)` uses the same Hypergrid-aware name resolution before running a short-lived monitor snapshot.
 
 Animation notes:
 - `AnimationStart`/`AnimationStop` accept either a built-in animation name (e.g. `DANCE1`, `WAVE`, `CLAP`, `SIT`) or a raw animation UUID.
@@ -370,6 +385,9 @@ Appearance and script notes:
 - `AppearanceBakeDiagnostics` returns baked texture slot IDs and optional cache-probe latency diagnostics.
 - `ScriptUploadAgent`/`ScriptUploadTask` return compile status and compiler messages when the grid reports them.
 - `ScriptSetTaskRunning` can verify state by requesting `ScriptRunningReply` after sending the state change.
+
+Inventory notes:
+- `InventoryListRetrieve` returns `assetId` on item rows (folders return `null`), so you can pass that UUID directly to `AssetDownload`.
 
 ## Common workflows
 
@@ -705,3 +723,5 @@ Tip: call `EnvGetRegion` or `EnvGetLegacy` first and use the returned `PayloadJs
 ## Health endpoint
 
 - `GET /healthz` returns runtime status plus bot location.
+
+````

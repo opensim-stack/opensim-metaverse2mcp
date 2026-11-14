@@ -100,7 +100,8 @@ internal sealed partial class BotSession
             var attachments = mappings
                 .Select(a =>
                 {
-                    if (!TryFindAttachedObjectForInventoryItem(client, a.Key, out var objectId, out var localId))
+                    var itemName = TryResolveInventoryItemName(client.Inventory.Store, a.Key);
+                    if (!TryFindAttachedObjectSnapshotForInventoryItem(client, a.Key, out var objectId, out var localId, out var objectAttachmentPoint))
                     {
                         if (unidentifiedOwnAttachmentPrims > 0)
                         {
@@ -113,14 +114,26 @@ internal sealed partial class BotSession
 
                         return new AttachmentInfo(
                             a.Key.ToString(),
+                            itemName,
                             a.Value.ToString(),
+                            (int)a.Value,
+                            null,
+                            null,
                             null,
                             null);
                     }
 
+                    var effectiveAttachmentPoint = a.Value == AttachmentPoint.Default && objectAttachmentPoint != AttachmentPoint.Default
+                        ? objectAttachmentPoint
+                        : a.Value;
+
                     return new AttachmentInfo(
                         a.Key.ToString(),
-                        a.Value.ToString(),
+                        itemName,
+                        effectiveAttachmentPoint.ToString(),
+                        (int)effectiveAttachmentPoint,
+                        objectAttachmentPoint.ToString(),
+                        (int)objectAttachmentPoint,
                         objectId.ToString(),
                         localId);
                 })
@@ -488,6 +501,17 @@ internal sealed partial class BotSession
                 await cofManager.AddToOutfitAsync(targetItems, replace: true, cancellationToken: token).ConfigureAwait(false);
                 Console.WriteLine($"[appearance-wear-outfit] AddToOutfitAsync completed targetCount={targetItems.Count} elapsedMs={addStopwatch.ElapsedMilliseconds}");
 
+                // COF relink updates can be observed by the simulator before attachment objects are fully rezzed.
+                // Explicitly issue a wear/apply request for this exact target set so first-pass outfit wear
+                // does not depend on eventual propagation from COF inventory changes alone.
+                var wearApplyStopwatch = Stopwatch.StartNew();
+                await client.Appearance
+                    .WearOutfitAsync(targetItems.Cast<InventoryBase>().ToList(), replaceItems: true)
+                    .ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                await client.Appearance.RequestSetAppearance(forceRebake: false).ConfigureAwait(false);
+                Console.WriteLine($"[appearance-wear-outfit] immediate wear/apply request completed targetCount={targetItems.Count} elapsedMs={wearApplyStopwatch.ElapsedMilliseconds}");
+
                 var pruneStopwatch = Stopwatch.StartNew();
                 var linksBeforePrune = await cofManager.GetCurrentOutfitLinksAsync(token).ConfigureAwait(false);
                 var folderLinks = linksBeforePrune.Where(IsCurrentOutfitFolderLink).ToList();
@@ -610,8 +634,8 @@ internal sealed partial class BotSession
                     wearableCandidateCount: targetItems.Count,
                     categoryResolutions: Array.Empty<OutfitCategoryResolutionInfo>(),
                     message: folderLinkConfirmed
-                        ? $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount})."
-                        : $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}). COF outfit folder-link create was requested but not confirmed yet." );
+                        ? $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links and requesting immediate wear/apply (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount})."
+                        : $"Applied outfit '{match.Name}' ({match.UUID}) by rebuilding COF wearable/object links and requesting immediate wear/apply (targets={targetItems.Count}, removedWearables={clear.RemovedWearableCount}, detachedAttachments={clear.DetachedAttachmentCount}). COF outfit folder-link create was requested but not confirmed yet." );
             }, cancellationToken).ConfigureAwait(false);
 
             Console.WriteLine($"[appearance-wear-outfit] end ok={result.Ok} elapsedMs={overallStopwatch.ElapsedMilliseconds} message='{result.Message}'");
@@ -2569,17 +2593,17 @@ internal sealed partial class BotSession
         bool recursive,
         CancellationToken cancellationToken)
     {
-        var resultHandle = BuildInventoryListResultHandle(folderIdOrPath, recursive);
         var description = recursive
             ? $"Inventory list folder '{folderIdOrPath ?? "<root>"}' recursively."
             : $"Inventory list folder '{folderIdOrPath ?? "<root>"}'.";
-            
-        Console.WriteLine($"[inventory-list] start handle='{resultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
 
-        return Task.FromResult(StartBotTask(
+        var taskHandle = StartBotTask(
             description,
             async (taskHandle, taskCancellationToken) =>
             {
+                var resultHandle = BuildInventoryListResultHandleForTask(taskHandle.Handle);
+                taskHandle.ResultHandle = resultHandle;
+
                 try
                 {
                     RegisterInventoryListTaskHandle(taskHandle.Handle, resultHandle);
@@ -2620,7 +2644,11 @@ internal sealed partial class BotSession
                     Console.WriteLine($"[inventory-list] retrieval failed for folder '{folderIdOrPath ?? "<root>"}' recursive={recursive}: {ex.GetType().Name}: {ex.Message}");
                     EmitInventoryListCompleteEvent(taskHandle.Handle, resultHandle, false, $"Inventory list task failed: {ex.Message}");
                 }
-            }));
+            });
+
+        taskHandle.ResultHandle = BuildInventoryListResultHandleForTask(taskHandle.Handle);
+        Console.WriteLine($"[inventory-list] start taskHandle='{taskHandle.Handle}' resultHandle='{taskHandle.ResultHandle}' recursive={recursive} canceled={cancellationToken.IsCancellationRequested}");
+        return Task.FromResult(taskHandle);
     }
 
     public Task<InventoryQueryResult> InventoryListRetrieveAsync(
@@ -2683,6 +2711,12 @@ internal sealed partial class BotSession
 
             if (!TryGetInventoryListResult(normalizedResultHandle, out var storedResult, out var storeError))
             {
+                if (TryDescribePendingInventoryListResult(normalizedResultHandle, out var pendingMessage))
+                {
+                    Console.WriteLine($"[inventory-list-retrieve] pending handle='{normalizedResultHandle}': {pendingMessage}");
+                    return Task.FromResult(InventoryQueryResult.FailResult(pendingMessage));
+                }
+
                 Console.WriteLine($"[inventory-list-retrieve] lookup failed handle='{normalizedResultHandle}': {storeError}");
                 return Task.FromResult(InventoryQueryResult.FailResult(storeError));
             }
@@ -2880,7 +2914,7 @@ internal sealed partial class BotSession
             return await ExecuteLockedAsync(async (client, token) =>
             {
                 var lockStopwatch = Stopwatch.StartNew();
-                Console.WriteLine("[inventory-list] execute-locked begin");
+                Console.WriteLine($"[inventory-list] execute-locked begin waitMs={overallStopwatch.ElapsedMilliseconds}");
 
                 var store = client.Inventory.Store;
                 var root = store?.RootFolder;
@@ -2907,7 +2941,6 @@ internal sealed partial class BotSession
                 }
 
                 Console.WriteLine($"[inventory-list] folder found in local store folder={folderUuid} name='{folder.Name}'");
-                entries.Add(folder);
 
                 if (recursive)
                 {
@@ -2922,11 +2955,59 @@ internal sealed partial class BotSession
                 else
                 {
                     Console.WriteLine($"[inventory-list] performing non-recursive inventory fetch for folder={folderUuid}");
-                    var contents = await client.Inventory
-                        .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, token)
-                        .ConfigureAwait(false);
-                    entries.AddRange(contents);
-                    Console.WriteLine($"[inventory-list] folder contents fetch completed children={contents.Count} totalEntries={entries.Count}");
+                    List<InventoryBase>? cachedContents = null;
+                    try
+                    {
+                        cachedContents = store.GetContents(folderUuid);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[inventory-list] local cache read failed for folder={folderUuid}: {ex.GetType().Name}: {ex.Message}");
+                    }
+
+                    var cachedDirectChildren = cachedContents?
+                        .Where(entry => entry.ParentUUID == folderUuid && entry.UUID != folderUuid)
+                        .ToList();
+
+                    // DescendentCount can be stale/zero before a folder has been explicitly hydrated,
+                    // so treat an empty direct-child cache as incomplete and refresh from server.
+                    var shouldFetchFromServer = cachedContents == null
+                        || cachedDirectChildren == null
+                        || cachedDirectChildren.Count == 0;
+
+                    if (!shouldFetchFromServer)
+                    {
+                        entries.AddRange(cachedDirectChildren!);
+                        Console.WriteLine(
+                            $"[inventory-list] using local cache rawChildren={cachedContents!.Count} directChildren={cachedDirectChildren!.Count} descendentCountHint={folder.DescendentCount} totalEntries={entries.Count}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[inventory-list] local cache appears incomplete for folder={folderUuid}; requesting server refresh");
+                        using var nonRecursiveTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        nonRecursiveTimeoutCts.CancelAfter(TimeSpan.FromSeconds(90));
+
+                        IReadOnlyList<InventoryBase> contents;
+                        try
+                        {
+                            contents = await client.Inventory
+                                .FolderContentsAsync(folderUuid, owner, true, true, InventorySortOrder.ByName, nonRecursiveTimeoutCts.Token)
+                                .ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                        {
+                            return InventoryQueryResult.FailResult(
+                                $"Timed out waiting for folder contents for {folderUuid}. The simulator did not answer within 90 seconds.");
+                        }
+
+                        var directChildren = contents
+                            .Where(entry => entry.ParentUUID == folderUuid && entry.UUID != folderUuid)
+                            .ToList();
+
+                        entries.AddRange(directChildren);
+                        Console.WriteLine(
+                            $"[inventory-list] folder contents fetch completed rawChildren={contents.Count} directChildren={directChildren.Count} totalEntries={entries.Count}");
+                    }
                 }
 
                 var materialized = new List<InventoryEntry>(entries.Count);
@@ -3097,13 +3178,34 @@ internal sealed partial class BotSession
         }
     }
 
-    private static string BuildInventoryListResultHandle(string? folderIdOrPath, bool recursive)
+    private bool TryDescribePendingInventoryListResult(string handle, out string message)
     {
-        var normalizedFolder = string.IsNullOrWhiteSpace(folderIdOrPath)
-            ? "<root>"
-            : folderIdOrPath.Trim().Replace('\\', '/');
+        lock (_inventoryListResultLock)
+        {
+            if (_inventoryListResultHandleByTaskHandle.TryGetValue(handle, out var canonicalByTask)
+                && !_inventoryListResultsByHandle.ContainsKey(canonicalByTask))
+            {
+                message = $"Inventory list task '{handle}' is still running. Retry with resultHandle '{canonicalByTask}' after receiving inventory.list.complete.";
+                return true;
+            }
 
-        var signature = $"{normalizedFolder}|recursive={recursive.ToString().ToLowerInvariant()}";
+            var matchingTask = _inventoryListResultHandleByTaskHandle
+                .FirstOrDefault(pair => string.Equals(pair.Value, handle, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(matchingTask.Key)
+                && !_inventoryListResultsByHandle.ContainsKey(handle))
+            {
+                message = $"Inventory list result '{handle}' is not materialized yet (task '{matchingTask.Key}' still in progress).";
+                return true;
+            }
+        }
+
+        message = string.Empty;
+        return false;
+    }
+
+    private static string BuildInventoryListResultHandleForTask(string taskHandle)
+    {
+        var signature = $"task={taskHandle.Trim()}";
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(signature));
         return $"inventory-list:{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
@@ -4223,7 +4325,13 @@ internal sealed partial class BotSession
                 return AssetDownloadResult.FailResult($"Unable to download asset {assetUuid} as type {parsedAssetType}.");
             }
 
-            var payload = await BuildDownloadPayloadAsync(_options.ResolveWorkspaceDir(), asset.AssetData, mode, fileNameHint, parsedAssetType, token).ConfigureAwait(false);
+            var workspaceDir = _options.ResolveWorkspaceDir();
+            if (string.IsNullOrWhiteSpace(workspaceDir))
+            {
+                return AssetDownloadResult.FailResult("Workspace directory is not configured.");
+            }
+
+            var payload = await BuildDownloadPayloadAsync(workspaceDir, asset.AssetData, mode, fileNameHint, parsedAssetType, token).ConfigureAwait(false);
             return AssetDownloadResult.OkResult(
                 payload.Base64,
                 payload.FilePath,
@@ -4258,7 +4366,13 @@ internal sealed partial class BotSession
                 return AssetDownloadResult.FailResult($"Unable to download texture {textureUuid}.");
             }
 
-            var payload = await BuildDownloadPayloadAsync(_options.ResolveWorkspaceDir(),texture.AssetData, mode, fileNameHint, AssetType.Texture, token).ConfigureAwait(false);
+            var workspaceDir = _options.ResolveWorkspaceDir();
+            if (string.IsNullOrWhiteSpace(workspaceDir))
+            {
+                return AssetDownloadResult.FailResult("Workspace directory is not configured.");
+            }
+
+            var payload = await BuildDownloadPayloadAsync(workspaceDir, texture.AssetData, mode, fileNameHint, AssetType.Texture, token).ConfigureAwait(false);
             return AssetDownloadResult.OkResult(
                 payload.Base64,
                 payload.FilePath,
@@ -5280,7 +5394,7 @@ internal sealed partial class BotSession
             var completed = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
             if (completed != tcs.Task)
             {
-                return null;
+                return null;@copilot resolve the merge conflicts in this pull request
             }
 
             return await tcs.Task.ConfigureAwait(false);
@@ -5343,7 +5457,7 @@ internal sealed partial class BotSession
             folderUuid = store.RootFolder.UUID;
             return true;
         }
-
+@copilot resolve the merge conflicts in this pull request
         var normalized = folderIdOrPath.Trim();
         if (UUID.TryParse(normalized, out var parsedFolderId))
         {
@@ -5922,6 +6036,7 @@ internal sealed partial class BotSession
             {
                 AddWearable(new WearableInfo(
                     wearable.ItemID.ToString(),
+                    TryResolveInventoryItemName(client.Inventory.Store, wearable.ItemID),
                     wearable.AssetID.ToString(),
                     wearable.WearableType.ToString(),
                     wearable.AssetType.ToString(),
@@ -5946,6 +6061,7 @@ internal sealed partial class BotSession
                     {
                         AddWearable(new WearableInfo(
                             wearable.UUID.ToString(),
+                            wearable.Name,
                             wearable.AssetUUID.ToString(),
                             wearable.WearableType.ToString(),
                             wearable.AssetType.ToString(),
@@ -5960,6 +6076,7 @@ internal sealed partial class BotSession
 
                     AddWearable(new WearableInfo(
                         link.ResolvedItemID.ToString(),
+                        link.Name,
                         string.Empty,
                         "unknown",
                         "unknown",
@@ -6113,14 +6230,26 @@ internal sealed partial class BotSession
         return item;
     }
 
-    private static bool TryFindAttachedObjectForInventoryItem(
+    private static string? TryResolveInventoryItemName(Inventory? store, UUID itemId)
+    {
+        if (itemId == UUID.Zero || store == null || !store.TryGetValue(itemId, out var entry) || entry is not InventoryItem item)
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(item.Name) ? null : item.Name;
+    }
+
+    private static bool TryFindAttachedObjectSnapshotForInventoryItem(
         GridClient client,
         UUID inventoryItemId,
         out UUID attachedObjectId,
-        out uint attachedLocalId)
+        out uint attachedLocalId,
+        out AttachmentPoint attachedAttachmentPoint)
     {
         attachedObjectId = UUID.Zero;
         attachedLocalId = 0;
+        attachedAttachmentPoint = AttachmentPoint.Default;
 
         var sim = client.Network.CurrentSim;
         if (sim == null)
@@ -6212,6 +6341,9 @@ internal sealed partial class BotSession
                 if (!string.IsNullOrWhiteSpace(raw) && UUID.TryParse(raw, out var parsed) && parsed != UUID.Zero)
                 {
                     itemId = parsed;
+                    attachedObjectId = prim.ID;
+                    attachedLocalId = prim.LocalID;
+                    attachedAttachmentPoint = prim.PrimData.AttachmentPoint;
                     return true;
                 }
             }
@@ -6228,6 +6360,20 @@ internal sealed partial class BotSession
         }
 
         return false;
+    }
+
+    private static bool TryFindAttachedObjectForInventoryItem(
+        GridClient client,
+        UUID inventoryItemId,
+        out UUID attachedObjectId,
+        out uint attachedLocalId)
+    {
+        return TryFindAttachedObjectSnapshotForInventoryItem(
+            client,
+            inventoryItemId,
+            out attachedObjectId,
+            out attachedLocalId,
+            out _);
     }
 
     public async Task<AvatarAppearanceStateResult> AvatarAppearanceListWornAsync(
@@ -6693,6 +6839,7 @@ internal sealed partial class BotSession
                 AssetType.Folder.ToString(),
                 InventoryType.Folder.ToString(),
                 null,
+                null,
                 null);
         }
 
@@ -6705,6 +6852,7 @@ internal sealed partial class BotSession
                 "item",
                 item.AssetType.ToString(),
                 item.InventoryType.ToString(),
+                item.AssetUUID == UUID.Zero ? null : item.AssetUUID.ToString(),
                 item.CreatorID == UUID.Zero ? null : item.CreatorID.ToString(),
                 item.CreationDate == default
                     ? null
@@ -6718,6 +6866,7 @@ internal sealed partial class BotSession
             "unknown",
             AssetType.Unknown.ToString(),
             InventoryType.Unknown.ToString(),
+            null,
             null,
             null);
     }
@@ -7166,6 +7315,7 @@ internal sealed record InventoryEntry(
     string Kind,
     string AssetType,
     string InventoryType,
+    string? AssetId,
     string? CreatorId,
     string? CreatedUtc);
 
@@ -7264,9 +7414,17 @@ internal sealed record InventoryOfferHistoryResult(bool Ok, string Message, IRea
         => new(false, message, Array.Empty<InventoryOfferEventInfo>());
 }
 
-internal sealed record WearableInfo(string ItemId, string AssetId, string WearableType, string AssetType, string Source);
+internal sealed record WearableInfo(string ItemId, string? ItemName, string AssetId, string WearableType, string AssetType, string Source);
 
-internal sealed record AttachmentInfo(string ItemId, string AttachmentPoint, string? ObjectId, uint? ObjectLocalId);
+internal sealed record AttachmentInfo(
+    string ItemId,
+    string? ItemName,
+    string AttachmentPoint,
+    int AttachmentPointRaw,
+    string? ObjectAttachmentPoint,
+    int? ObjectAttachmentPointRaw,
+    string? ObjectId,
+    uint? ObjectLocalId);
 
 internal sealed record AvatarAttachmentInfo(string AttachmentPoint, string ObjectId, uint? ObjectLocalId);
 

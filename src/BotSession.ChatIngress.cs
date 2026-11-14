@@ -266,6 +266,7 @@ internal sealed partial class BotSession
             globalGateHeld = !routedText.StartsWith('*');
 
             TryBindRestoredOpencodeSessionToConversation(conversationKey);
+            await EnsureRestoredSessionPreflightAsync(conversationKey).ConfigureAwait(false);
             var sendOptions = await BuildSendOptions(conversationKey, senderAgentId, from).ConfigureAwait(false);
             using var requestCts = new CancellationTokenSource();
             inFlightRequestCts = requestCts;
@@ -516,12 +517,16 @@ internal sealed partial class BotSession
         }
 
         var text = e.Message?.Trim() ?? string.Empty;
+
+        var isObject = e.SourceType == ChatSourceType.Object;
         if (string.IsNullOrWhiteSpace(text)
-            || e.SourceType != ChatSourceType.Agent
+            || (e.SourceType != ChatSourceType.Agent && !isObject)
             || e.SourceID == UUID.Zero)
         {
             return;
         }
+
+        TryProcessSignalsIngress(client, e, text);
 
         if (!_receiveChatAllowedTypes.Contains(e.Type))
         {
@@ -530,6 +535,33 @@ internal sealed partial class BotSession
         }
 
         var from = string.IsNullOrWhiteSpace(e.FromName) ? e.SourceID.ToString() : e.FromName.Trim();
+        if (isObject)
+        {
+            // Scripted-object chat (llSay/llShout/llWhisper) is surfaced to MCP
+            // observers only. It never registers a conversation route or reaches
+            // the opencode brain, so bots with opencode enabled don't start
+            // answering objects.
+            Console.WriteLine($"[local] ({e.SourceType}/{e.Type}) {from} [{e.SourceID}]: {SanitizeImLogText(text)}");
+            EmitRuntimeEvent(
+                "general",
+                "chat.local.received",
+                "opensim",
+                $"Local chat received from object {from}.",
+                new Dictionary<string, string?>
+                {
+                    ["fromAgentId"] = UUID.Zero.ToString(),
+                    ["fromName"] = from,
+                    ["chatType"] = e.Type.ToString(),
+                    ["sourceType"] = e.SourceType.ToString(),
+                    ["isObject"] = "True",
+                    ["objectId"] = e.SourceID.ToString(),
+                    ["objectName"] = from,
+                    ["ownerId"] = e.OwnerID.ToString(),
+                    ["text"] = SanitizeImLogText(text)
+                });
+            return;
+        }
+
         RegisterConversationRoute(
             LocalChatConversationKey,
             ConversationChannel.Local,
@@ -555,6 +587,7 @@ internal sealed partial class BotSession
                 ["fromName"] = from,
                 ["chatType"] = e.Type.ToString(),
                 ["sourceType"] = e.SourceType.ToString(),
+                ["isObject"] = "False",
                 ["text"] = SanitizeImLogText(text)
             });
         _ = Task.Run(() => HandleIncomingConversationMessageAsync(

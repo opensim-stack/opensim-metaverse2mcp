@@ -5,6 +5,8 @@ namespace Opensim.Metaverse2Mcp;
 
 internal sealed partial class BotSession
 {
+    private readonly HashSet<UUID> _knownHandlerAgentIds = new();
+
     private bool IsHandlerRestricted()
     {
         return GetConfiguredHandlerNames().Count > 0
@@ -18,15 +20,16 @@ internal sealed partial class BotSession
             return false;
         }
 
-        UUID handlerAgentId;
-        lock (_controlGroupStateLock)
+        if (agentId != UUID.Zero)
         {
-            handlerAgentId = _handlerAgentId;
-        }
-
-        if (handlerAgentId != UUID.Zero && agentId != UUID.Zero && handlerAgentId == agentId)
-        {
-            return true;
+            lock (_controlGroupStateLock)
+            {
+                if ((_handlerAgentId != UUID.Zero && _handlerAgentId == agentId)
+                    || _knownHandlerAgentIds.Contains(agentId))
+                {
+                    return true;
+                }
+            }
         }
 
         if (!IsHandlerAvatar(avatarName))
@@ -38,11 +41,69 @@ internal sealed partial class BotSession
         {
             lock (_controlGroupStateLock)
             {
-                _handlerAgentId = agentId;
+                if (_handlerAgentId == UUID.Zero)
+                {
+                    _handlerAgentId = agentId;
+                }
+
+                _knownHandlerAgentIds.Add(agentId);
             }
         }
 
         return true;
+    }
+
+    private void StartHandlerIdentityWarmup()
+    {
+        if (!IsHandlerRestricted())
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), _lifecycleCts.Token).ConfigureAwait(false);
+                var namesToResolve = new HashSet<string>(GetConfiguredHandlerNames(), StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(_parentFullName))
+                {
+                    namesToResolve.Add(_parentFullName);
+                }
+
+                foreach (var handlerName in namesToResolve)
+                {
+                    if (_lifecycleCts.IsCancellationRequested || !_connected)
+                    {
+                        return;
+                    }
+
+                    var resolved = await _agentLocator.ResolveAgentIdByNameAsync(handlerName, _lifecycleCts.Token).ConfigureAwait(false);
+                    if (resolved.Ok && resolved.AgentId != UUID.Zero)
+                    {
+                        lock (_controlGroupStateLock)
+                        {
+                            if (_handlerAgentId == UUID.Zero)
+                            {
+                                _handlerAgentId = resolved.AgentId;
+                            }
+
+                            _knownHandlerAgentIds.Add(resolved.AgentId);
+                            _handlerAgentIdByName[handlerName] = resolved.AgentId;
+                        }
+
+                        Console.WriteLine($"[handler-config] cached handler UUID on home grid: '{handlerName}' -> {resolved.AgentId}");
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[handler-config] handler UUID warmup error: {ex.Message}");
+            }
+        });
     }
 
     private bool IsControlGroupId(UUID groupId)
@@ -161,13 +222,87 @@ internal sealed partial class BotSession
         }
 
         var normalized = NormalizeAvatarName(avatarName);
-        if (handlers.Contains(normalized))
+        if (MatchesConfiguredHandlerOrParent(normalized, handlers))
+        {
+            return true;
+        }
+
+        // On foreign Hypergrid sims, OpenSim's GatekeeperService rewrites visiting avatar names
+        // to "First.Last @<homeGridAuthority>". Only accept this fallback when the authority
+        // matches our configured home grid host so cross-grid name spoofing is not possible.
+        if (TryExtractHypergridVisitorIdentity(avatarName, out var hgBaseName, out var hgAuthority)
+            && IsTrustedHomeGridAuthority(hgAuthority))
+        {
+            return MatchesConfiguredHandlerOrParent(hgBaseName, handlers);
+        }
+
+        return false;
+    }
+
+    private bool MatchesConfiguredHandlerOrParent(string normalizedName, HashSet<string> handlers)
+    {
+        if (handlers.Contains(normalizedName))
         {
             return true;
         }
 
         return !string.IsNullOrWhiteSpace(_parentFullName)
-            && normalized.Equals(_parentFullName, StringComparison.OrdinalIgnoreCase);
+            && normalizedName.Equals(_parentFullName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsTrustedHomeGridAuthority(string authority)
+    {
+        if (string.IsNullOrWhiteSpace(authority))
+        {
+            return false;
+        }
+
+        var candidateHost = ExtractHostOnly(authority);
+        if (string.IsNullOrWhiteSpace(candidateHost))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_options.BotLoginUri)
+            && Uri.TryCreate(_options.BotLoginUri, UriKind.Absolute, out var loginUri)
+            && string.Equals(loginUri.Host, candidateHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var envHostname = Environment.GetEnvironmentVariable("OPENSIM_HOSTNAME")?.Trim();
+        if (!string.IsNullOrWhiteSpace(envHostname)
+            && string.Equals(ExtractHostOnly(envHostname), candidateHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string ExtractHostOnly(string authorityOrHost)
+    {
+        var s = authorityOrHost.Trim();
+        var schemeIdx = s.IndexOf("://", StringComparison.Ordinal);
+        if (schemeIdx >= 0)
+        {
+            s = s[(schemeIdx + 3)..];
+        }
+
+        var slashIdx = s.IndexOf('/');
+        if (slashIdx >= 0)
+        {
+            s = s[..slashIdx];
+        }
+
+        if (s.StartsWith('['))
+        {
+            var closeBracket = s.IndexOf(']');
+            return closeBracket > 0 ? s[..(closeBracket + 1)] : s;
+        }
+
+        var colonIdx = s.IndexOf(':');
+        return colonIdx >= 0 ? s[..colonIdx].Trim() : s.Trim();
     }
 
     private HashSet<string> GetConfiguredHandlerNames()

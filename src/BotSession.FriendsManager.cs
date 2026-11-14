@@ -10,6 +10,8 @@ internal sealed partial class BotSession
         UUID FromAgentId,
         string FromAgentName,
         UUID SessionId,
+        UUID RegionId,
+        Vector3 Position,
         string Message,
         InstantMessageDialog Dialog,
         DateTimeOffset ReceivedAtUtc);
@@ -28,6 +30,7 @@ internal sealed partial class BotSession
         DateTimeOffset ReceivedAtUtc);
 
     private readonly ConcurrentDictionary<UUID, PendingTeleportMessage> _pendingTeleportOffersByAgent = new();
+    private readonly ConcurrentDictionary<UUID, PendingTeleportMessage> _pendingTeleportOffersBySession = new();
     private readonly ConcurrentDictionary<UUID, PendingTeleportMessage> _pendingTeleportRequestsByAgent = new();
     private readonly ConcurrentDictionary<UUID, PendingFriendOfferMessage> _pendingFriendOffersByAgent = new();
     private readonly ConcurrentDictionary<UUID, PendingGroupInviteMessage> _pendingGroupInvitesByGroupId = new();
@@ -440,6 +443,8 @@ internal sealed partial class BotSession
                 ? $"Join me in {client.Network.CurrentSim?.Name ?? "unknown"}!"
                 : message.Trim();
 
+            Console.WriteLine($"[teleport] Sending teleport offer (StartLure) to {targetAgentUuid} from {DescribeSimulator(client.Network.CurrentSim)}: \"{text}\"");
+
             // Primary path: standard teleport lure packet.
             client.Self.SendTeleportLure(targetAgentUuid, text);
 
@@ -478,6 +483,8 @@ internal sealed partial class BotSession
         {
             EnsureSocialImHookRegistered(client);
 
+            Console.WriteLine($"[teleport] Sending teleport lure request to {targetAgentUuid} from {DescribeSimulator(client.Network.CurrentSim)}.");
+
             if (string.IsNullOrWhiteSpace(message))
             {
                 client.Self.SendTeleportLureRequest(targetAgentUuid);
@@ -504,6 +511,9 @@ internal sealed partial class BotSession
                     fromAgentId = x.FromAgentId.ToString(),
                     fromAgentName = x.FromAgentName,
                     sessionId = x.SessionId.ToString(),
+                    regionId = x.RegionId == UUID.Zero ? null : x.RegionId.ToString(),
+                    position = FormatVector(x.Position),
+                    gatekeeperUrl = ExtractLureGatekeeperUrl(x.Message),
                     message = x.Message,
                     dialog = x.Dialog.ToString(),
                     receivedAtUtc = x.ReceivedAtUtc
@@ -571,26 +581,51 @@ internal sealed partial class BotSession
             return BotToolResult.Fail("sessionId must be a valid UUID.");
         }
 
-        return await ExecuteLockedAsync((client, token) =>
+        return await ExecuteLockedAsync(async (client, token) =>
         {
             EnsureSocialImHookRegistered(client);
 
-            client.Self.TeleportLureRespond(requesterAgentUuid, sessionUuid, accept);
-            if (_pendingTeleportOffersByAgent.TryGetValue(requesterAgentUuid, out var pending)
-                && pending.SessionId == sessionUuid)
+            _pendingTeleportOffersBySession.TryGetValue(sessionUuid, out var matchedOffer);
+            _pendingTeleportOffersByAgent.TryGetValue(requesterAgentUuid, out var latestOfferFromRequester);
+            if (matchedOffer == null && latestOfferFromRequester != null && latestOfferFromRequester.SessionId == sessionUuid)
             {
-                _pendingTeleportOffersByAgent.TryRemove(requesterAgentUuid, out var _removed);
+                matchedOffer = latestOfferFromRequester;
             }
 
-            if (_pendingTeleportRequestsByAgent.TryGetValue(requesterAgentUuid, out var pendingRequest)
-                && pendingRequest.SessionId == sessionUuid)
+            if (accept)
             {
-                _pendingTeleportRequestsByAgent.TryRemove(requesterAgentUuid, out var _removed);
+                return await AcceptTeleportLureAndWaitAsync(
+                    client,
+                    requesterAgentUuid,
+                    sessionUuid,
+                    matchedOffer,
+                    latestOfferFromRequester,
+                    token).ConfigureAwait(false);
             }
 
-            var action = accept ? "accepted" : "declined";
-            return Task.FromResult(BotToolResult.OkResult($"Teleport offer {action} for requester {requesterAgentUuid}."));
+            Console.WriteLine($"[teleport] Declining teleport offer sessionId={sessionUuid} for requester={requesterAgentUuid}.");
+            client.Self.TeleportLureRespond(requesterAgentUuid, sessionUuid, false);
+            RemoveConsumedPendingOffer(requesterAgentUuid, sessionUuid);
+
+            return BotToolResult.OkResult($"Teleport offer declined for requester {requesterAgentUuid}.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private void RemoveConsumedPendingOffer(UUID requesterAgentUuid, UUID sessionUuid)
+    {
+        _pendingTeleportOffersBySession.TryRemove(sessionUuid, out _);
+
+        if (_pendingTeleportOffersByAgent.TryGetValue(requesterAgentUuid, out var pending)
+            && pending.SessionId == sessionUuid)
+        {
+            _pendingTeleportOffersByAgent.TryRemove(requesterAgentUuid, out _);
+        }
+
+        if (_pendingTeleportRequestsByAgent.TryGetValue(requesterAgentUuid, out var pendingRequest)
+            && pendingRequest.SessionId == sessionUuid)
+        {
+            _pendingTeleportRequestsByAgent.TryRemove(requesterAgentUuid, out _);
+        }
     }
 
     private void EnsureSocialImHookRegistered(GridClient client)
@@ -620,6 +655,8 @@ internal sealed partial class BotSession
             im.FromAgentID,
             im.FromAgentName,
             im.IMSessionID,
+            im.RegionID,
+            im.Position,
             message,
             im.Dialog,
             DateTimeOffset.UtcNow);
@@ -628,7 +665,31 @@ internal sealed partial class BotSession
         {
             case InstantMessageDialog.RequestTeleport:
             case InstantMessageDialog.GodLikeRequestTeleport:
+                var selfAgentId = _client?.Self.AgentID ?? UUID.Zero;
+                var isSyntheticMirror = selfAgentId != UUID.Zero
+                    && im.IMSessionID == selfAgentId
+                    && im.RegionID == UUID.Zero;
+
+                if (isSyntheticMirror
+                    && _pendingTeleportOffersByAgent.TryGetValue(im.FromAgentID, out var existingOffer)
+                    && existingOffer.SessionId != selfAgentId
+                    && (entry.ReceivedAtUtc - existingOffer.ReceivedAtUtc) <= TimeSpan.FromSeconds(10))
+                {
+                    Console.WriteLine(
+                        $"[teleport] Ignoring synthetic compatibility IM offer mirror from {im.FromAgentName} ({im.FromAgentID}) so real lure session {existingOffer.SessionId} is preserved.");
+                    break;
+                }
+
                 _pendingTeleportOffersByAgent[im.FromAgentID] = entry;
+                if (im.IMSessionID != UUID.Zero && !isSyntheticMirror)
+                {
+                    _pendingTeleportOffersBySession[im.IMSessionID] = entry;
+                }
+
+                var gatekeeperUrl = ExtractLureGatekeeperUrl(message);
+                Console.WriteLine(
+                    $"[teleport] Offer received from {(string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName)} ({im.FromAgentID}): sessionId={im.IMSessionID} dialog={im.Dialog} regionId={im.RegionID} pos={FormatVector(im.Position)} gatekeeper={(gatekeeperUrl ?? "(local/none)")} currentSim={DescribeSimulator(_client?.Network.CurrentSim)} message=\"{message}\"");
+
                 EmitRuntimeEvent(
                     "teleport",
                     "teleport.offer.received",
@@ -639,12 +700,17 @@ internal sealed partial class BotSession
                         ["fromAgentId"] = im.FromAgentID.ToString(),
                         ["fromAgentName"] = string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName,
                         ["sessionId"] = im.IMSessionID.ToString(),
+                        ["regionId"] = im.RegionID == UUID.Zero ? null : im.RegionID.ToString(),
+                        ["position"] = FormatVector(im.Position),
+                        ["gatekeeperUrl"] = gatekeeperUrl,
                         ["dialog"] = im.Dialog.ToString(),
                         ["message"] = message
                     });
                 break;
             case InstantMessageDialog.RequestLure:
                 _pendingTeleportRequestsByAgent[im.FromAgentID] = entry;
+                Console.WriteLine(
+                    $"[teleport] Teleport request received from {(string.IsNullOrWhiteSpace(im.FromAgentName) ? "(unknown)" : im.FromAgentName)} ({im.FromAgentID}): sessionId={im.IMSessionID} message=\"{message}\"");
                 EmitRuntimeEvent(
                     "teleport",
                     "teleport.request.received",

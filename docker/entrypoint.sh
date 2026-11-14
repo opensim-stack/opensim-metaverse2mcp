@@ -46,10 +46,6 @@ if [ "${OPENSIM_CACHE_ENABLED:-true}" = "false" ]; then
   set -- "$@" --no-cache
 fi
 
-if [ -n "${OPENCODE_SERVER_USERNAME:-}" ]; then
-  set -- "$@" --opencode-username "${OPENCODE_SERVER_USERNAME}"
-fi
-
 if [ -n "${OPENCODE_SERVER_PASSWORD:-}" ]; then
   set -- "$@" --opencode-password "${OPENCODE_SERVER_PASSWORD}"
 fi
