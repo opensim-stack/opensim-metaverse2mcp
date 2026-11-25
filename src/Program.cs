@@ -158,6 +158,25 @@ app.MapGet("/healthz", () => Results.Ok(new
     bot = botSession.GetStatus()
 }));
 
+// Loopback-only administrative shutdown so a local supervisor can rebuild and
+// relaunch without a human at the console. The bot logs out during disposal.
+app.MapPost("/shutdown", (HttpContext context, IHostApplicationLifetime lifetime) =>
+{
+    var remote = context.Connection.RemoteIpAddress;
+    if (remote == null || !System.Net.IPAddress.IsLoopback(remote))
+    {
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    }
+
+    Console.WriteLine("[admin] shutdown requested via POST /shutdown");
+    _ = Task.Run(async () =>
+    {
+        await Task.Delay(TimeSpan.FromMilliseconds(250)).ConfigureAwait(false);
+        lifetime.StopApplication();
+    });
+    return Results.Ok(new { ok = true, message = "Shutting down; the bot is logging out." });
+});
+
 app.MapMcp(options.McpHttpEndpoint);
 
 Console.WriteLine($"MCP streamable endpoint ready at http://{options.McpHost}:{options.McpPort}{options.McpHttpEndpoint}");
