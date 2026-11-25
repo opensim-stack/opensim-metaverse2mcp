@@ -1822,8 +1822,8 @@ internal sealed class BotMcpTools
     [McpServerTool, Description("Set prim texture by local ID, optionally for an individual face.")]
     public Task<BotToolResult> PrimSetTexture(
         [Description("Prim local ID.")] uint localId,
-        [Description("Texture UUID.")] string textureId,
-        [Description("Face index (0..44), or -1 for default texture.")] int faceIndex,
+        [Description("Texture asset UUID (the assetId of a texture inventory item, not its item id).")] string textureId,
+        [Description("Face index (0..44), or -1 for every face of the prim.")] int faceIndex,
         CancellationToken cancellationToken)
     {
         return _bot.SetPrimTextureAsync(localId, textureId, faceIndex, cancellationToken);

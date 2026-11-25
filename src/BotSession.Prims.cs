@@ -7,6 +7,42 @@ namespace Opensim.Metaverse2Mcp;
 internal sealed partial class BotSession
 {
     private readonly ConcurrentDictionary<UUID, DateTimeOffset> _primPropertiesRefreshedAtByObjectId = new();
+
+    // Texture edits are read-modify-write on the cached texture entry, and that cache only
+    // catches up when the simulator echoes the change back. Build on our own last edit
+    // while it is still fresh, so two quick edits do not overwrite each other.
+    private static readonly TimeSpan RecentTextureEditWindow = TimeSpan.FromSeconds(5);
+    private readonly ConcurrentDictionary<uint, (Primitive.TextureEntry Entry, DateTime AtUtc)> _recentTextureEdits = new();
+
+    private Primitive.TextureEntry GetEditableTextureEntry(Simulator sim, uint localId)
+    {
+        if (_recentTextureEdits.TryGetValue(localId, out var recent)
+            && DateTime.UtcNow - recent.AtUtc < RecentTextureEditWindow)
+        {
+            return new Primitive.TextureEntry(recent.Entry);
+        }
+
+        if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
+        {
+            return new Primitive.TextureEntry(prim.Textures);
+        }
+
+        return new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
+    }
+
+    private void RememberTextureEdit(uint localId, Primitive.TextureEntry entry)
+    {
+        var now = DateTime.UtcNow;
+        if (_recentTextureEdits.Count > 256)
+        {
+            foreach (var stale in _recentTextureEdits.Where(pair => now - pair.Value.AtUtc >= RecentTextureEditWindow).ToList())
+            {
+                _recentTextureEdits.TryRemove(stale.Key, out _);
+            }
+        }
+
+        _recentTextureEdits[localId] = (entry, now);
+    }
     
     public async Task<PrimCreateResult> CreatePrimAsync(
         string shape,
@@ -137,22 +173,26 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("No current simulator available."));
             }
 
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
+            var te = GetEditableTextureEntry(sim, localId);
 
             if (faceIndex < 0)
             {
                 te.DefaultTexture ??= new Primitive.TextureEntryFace(null);
                 te.DefaultTexture.TextureID = textureUuid;
+
+                // Faces that already carry their own entry do not follow the default, so
+                // "the whole prim" has to update those as well.
+                foreach (var explicitFace in te.FaceTextures)
+                {
+                    if (explicitFace != null)
+                    {
+                        explicitFace.TextureID = textureUuid;
+                    }
+                }
+
                 client.Objects.SetTextures(sim, localId, te);
-                return Task.FromResult(BotToolResult.OkResult($"Set default texture on prim {localId} to {textureUuid}."));
+                RememberTextureEdit(localId, te);
+                return Task.FromResult(BotToolResult.OkResult($"Set texture on all faces of prim {localId} to {textureUuid}."));
             }
 
             if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
@@ -163,6 +203,7 @@ internal sealed partial class BotSession
             var face = te.CreateFace((uint)faceIndex);
             face.TextureID = textureUuid;
             client.Objects.SetTextures(sim, localId, te);
+            RememberTextureEdit(localId, te);
             return Task.FromResult(BotToolResult.OkResult($"Set texture on prim {localId} face {faceIndex} to {textureUuid}."));
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -193,15 +234,7 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("No current simulator available."));
             }
 
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
+            var te = GetEditableTextureEntry(sim, localId);
 
             Primitive.TextureEntryFace face;
             var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
@@ -286,6 +319,7 @@ internal sealed partial class BotSession
             }
 
             client.Objects.SetTextures(sim, localId, te);
+            RememberTextureEdit(localId, te);
             return Task.FromResult(BotToolResult.OkResult($"Updated {faceLabel} parameters on prim {localId}."));
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -317,15 +351,7 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("No current simulator available."));
             }
 
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
+            var te = GetEditableTextureEntry(sim, localId);
 
             Primitive.TextureEntryFace face;
             var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
@@ -370,6 +396,7 @@ internal sealed partial class BotSession
             }
 
             client.Objects.SetTextures(sim, localId, te);
+            RememberTextureEdit(localId, te);
             return Task.FromResult(BotToolResult.OkResult($"Nudged UV parameters on {faceLabel} of prim {localId}."));
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -395,15 +422,7 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("No current simulator available."));
             }
 
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
+            var te = GetEditableTextureEntry(sim, localId);
 
             Primitive.TextureEntryFace face;
             var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
@@ -464,6 +483,7 @@ internal sealed partial class BotSession
             }
 
             client.Objects.SetTextures(sim, localId, te);
+            RememberTextureEdit(localId, te);
             return Task.FromResult(BotToolResult.OkResult($"Applied UV preset '{preset}' to {faceLabel} of prim {localId}."));
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -487,15 +507,7 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("No current simulator available."));
             }
 
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
+            var te = GetEditableTextureEntry(sim, localId);
 
             Primitive.TextureEntryFace face;
             var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
@@ -518,6 +530,7 @@ internal sealed partial class BotSession
             face.RepeatV = repeat;
 
             client.Objects.SetTextures(sim, localId, te);
+            RememberTextureEdit(localId, te);
             return Task.FromResult(BotToolResult.OkResult($"Set tiling to {repeat:F2}x{repeat:F2} on {faceLabel} of prim {localId}."));
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -542,15 +555,7 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("No current simulator available."));
             }
 
-            Primitive.TextureEntry te;
-            if (sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim.Textures != null)
-            {
-                te = new Primitive.TextureEntry(prim.Textures);
-            }
-            else
-            {
-                te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
-            }
+            var te = GetEditableTextureEntry(sim, localId);
 
             Primitive.TextureEntryFace face;
             var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
@@ -573,6 +578,7 @@ internal sealed partial class BotSession
             face.RepeatV = repeatV;
 
             client.Objects.SetTextures(sim, localId, te);
+            RememberTextureEdit(localId, te);
             return Task.FromResult(BotToolResult.OkResult($"Set tiling to U={repeatU:F2}, V={repeatV:F2} on {faceLabel} of prim {localId}."));
         }, cancellationToken).ConfigureAwait(false);
     }
