@@ -4319,7 +4319,10 @@ internal sealed partial class BotSession
 
         return await ExecuteLockedAsync(async (client, token) =>
         {
-            var asset = await client.Assets.RequestAssetAsync(assetUuid, parsedAssetType, true, token).ConfigureAwait(false);
+            // Meshes are only served by the mesh capability, not by the generic asset request.
+            Asset? asset = parsedAssetType == AssetType.Mesh
+                ? await client.Assets.RequestMeshAsync(assetUuid, token).ConfigureAwait(false)
+                : await client.Assets.RequestAssetAsync(assetUuid, parsedAssetType, true, token).ConfigureAwait(false);
             if (asset?.AssetData == null)
             {
                 return AssetDownloadResult.FailResult($"Unable to download asset {assetUuid} as type {parsedAssetType}.");
