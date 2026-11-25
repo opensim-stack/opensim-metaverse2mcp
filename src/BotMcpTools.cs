@@ -2054,7 +2054,7 @@ internal sealed class BotMcpTools
         return _bot.ClonePrimAsync(sourceLocalId, offsetX, offsetY, offsetZ, copyTextures, copyName, copyDescription, cancellationToken);
     }
 
-    [McpServerTool, Description("Inspect a prim from local simulator cache by local ID.")]
+    [McpServerTool, Description("Inspect a prim from local simulator cache by local ID. With includeFaceTextures, each face lists its texture entry and, when the face has a PBR (glTF) material, a pbr object with the material's base colour texture, factors, alpha mode and texture transform; that is what a viewer draws instead of the texture entry.")]
     public Task<PrimInspectResult> PrimInspect(
         [Description("Prim local ID.")] uint localId,
         [Description("Include explicit per-face texture overrides in the response.")] bool includeFaceTextures,

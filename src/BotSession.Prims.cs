@@ -579,17 +579,22 @@ internal sealed partial class BotSession
 
     public async Task<PrimInspectResult> InspectPrimAsync(uint localId, bool includeFaceTextures, CancellationToken cancellationToken)
     {
-        return await ExecuteLockedAsync((client, _) =>
+        return await ExecuteLockedAsync(async (client, token) =>
         {
             var sim = client.Network.CurrentSim;
             if (sim == null)
             {
-                return Task.FromResult(PrimInspectResult.FailResult("No current simulator available."));
+                return PrimInspectResult.FailResult("No current simulator available.");
             }
 
             if (!sim.ObjectsPrimitives.TryGetValue(localId, out var prim))
             {
-                return Task.FromResult(PrimInspectResult.FailResult($"Prim {localId} not found in current simulator cache."));
+                return PrimInspectResult.FailResult($"Prim {localId} not found in current simulator cache.");
+            }
+
+            if (includeFaceTextures)
+            {
+                await EnsureRenderMaterialAssetsAsync(client, sim, new[] { prim }, token).ConfigureAwait(false);
             }
 
             var info = BuildPrimInfo(
@@ -598,9 +603,10 @@ internal sealed partial class BotSession
                 refreshRequested: false,
                 refreshReceived: false,
                 refreshDetail: "Using simulator cache only (no explicit property refresh requested).",
-                refreshedAtUtc: null);
+                refreshedAtUtc: null,
+                sim);
 
-            return Task.FromResult(PrimInspectResult.OkResult(info));
+            return PrimInspectResult.OkResult(info);
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -635,13 +641,19 @@ internal sealed partial class BotSession
                 TimeSpan.FromSeconds(waitTimeoutSeconds),
                 token).ConfigureAwait(false);
 
+            if (includeFaceTextures)
+            {
+                await EnsureRenderMaterialAssetsAsync(client, sim, new[] { prim }, token).ConfigureAwait(false);
+            }
+
             var info = BuildPrimInfo(
                 prim,
                 includeFaceTextures,
                 refreshRequested: true,
                 refreshReceived: refresh.Received,
                 refreshDetail: refresh.Detail,
-                refreshedAtUtc: refresh.RefreshedAtUtc);
+                refreshedAtUtc: refresh.RefreshedAtUtc,
+                sim);
 
             var message = refresh.Received
                 ? $"Fetched refreshed prim properties for localId={localId}."
@@ -727,7 +739,7 @@ internal sealed partial class BotSession
         }
     }
 
-    private static PrimFaceTextureInfo BuildFaceTextureInfo(int faceIndex, Primitive.TextureEntryFace face)
+    private static PrimFaceTextureInfo BuildFaceTextureInfo(int faceIndex, Primitive.TextureEntryFace face, PrimFacePbrInfo? pbr = null)
     {
         return new PrimFaceTextureInfo(
             faceIndex,
@@ -742,7 +754,8 @@ internal sealed partial class BotSession
             face.RGBA.B,
             face.RGBA.A,
             face.Glow,
-            face.Fullbright);
+            face.Fullbright,
+            pbr);
     }
 
     private PrimInfo BuildPrimInfo(
@@ -751,7 +764,8 @@ internal sealed partial class BotSession
         bool refreshRequested,
         bool refreshReceived,
         string refreshDetail,
-        DateTimeOffset? refreshedAtUtc)
+        DateTimeOffset? refreshedAtUtc,
+        Simulator? sim = null)
     {
         var faceTextures = new List<PrimFaceTextureInfo>();
         string? defaultTextureId = null;
@@ -771,13 +785,16 @@ internal sealed partial class BotSession
 
             for (var i = 0; i < Primitive.TextureEntry.MAX_FACES; i++)
             {
-                var face = prim.Textures.FaceTextures[i];
+                // A face with a PBR material is listed even when it has no texture entry of
+                // its own; it then shows the default entry next to the material.
+                var pbr = BuildFacePbrInfo(sim, prim, i);
+                var face = prim.Textures.FaceTextures[i] ?? (pbr != null ? prim.Textures.DefaultTexture : null);
                 if (face == null)
                 {
                     continue;
                 }
 
-                faceTextures.Add(BuildFaceTextureInfo(i, face));
+                faceTextures.Add(BuildFaceTextureInfo(i, face, pbr));
             }
         }
 
@@ -1540,7 +1557,8 @@ internal sealed record PrimFaceTextureInfo(
     float ColorB,
     float Alpha,
     float Glow,
-    bool Fullbright);
+    bool Fullbright,
+    PrimFacePbrInfo? Pbr = null);
 
 internal sealed record PrimSummary(
     uint LocalId,
