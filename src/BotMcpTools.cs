@@ -506,10 +506,13 @@ internal sealed class BotMcpTools
         return _bot.AnimationsListAsync(cancellationToken);
     }
 
-    [McpServerTool, Description("List currently active/signaled animations for the bot.")]
-    public Task<AnimationListResult> ActiveAnimations(CancellationToken cancellationToken)
+    [McpServerTool, Description("List the animations currently playing on the bot, or on another avatar. Built-in animations are named; custom ones (poses from furniture, AOs, HUDs) carry no name on the wire and are listed by asset UUID together with the object that started them.")]
+    public Task<AnimationListResult> ActiveAnimations(
+        [Description("Optional avatar UUID. Omit for the bot itself.")] string? agentId = null,
+        [Description("Look inside the objects that started custom animations to find their names (works for objects the bot owns or can modify; cached for 5 minutes).")] bool resolveNames = true,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.ActiveAnimationsAsync(cancellationToken);
+        return _bot.ActiveAnimationsAsync(agentId, resolveNames, cancellationToken);
     }
 
     [McpServerTool, Description("Send a local chat message.")]
@@ -2272,13 +2275,47 @@ internal sealed class BotMcpTools
         return _bot.FindPrimsByNameAsync(name, maxResults, caseSensitive, cancellationToken);
     }
 
-    [McpServerTool, Description("List nearby prims around the bot in the current simulator cache.")]
+    [McpServerTool, Description("List nearby prims around the bot, nearest first. Each entry carries name, description, hoverText (floating text) and isAttachment; names are fetched from the simulator when the cache lacks them.")]
     public Task<PrimQueryResult> PrimListNearby(
         [Description("Radius in meters.")] float radiusMeters,
         [Description("Maximum number of results (1..500).") ] int maxResults,
-        CancellationToken cancellationToken)
+        [Description("Include worn attachments (the bot's and other avatars'); their distance is reported as 0.")] bool includeAttachments = false,
+        [Description("Only root prims (skip child prims of linksets).")] bool rootsOnly = false,
+        [Description("Optional case-insensitive filter on name, description or hover text.")] string? nameContains = null,
+        [Description("Ask the simulator for names and descriptions the cache does not have yet (waits up to about 2.5 s the first time). False = answer from the cache only.")] bool loadNames = true,
+        CancellationToken cancellationToken = default)
     {
-        return _bot.ListNearbyPrimsAsync(radiusMeters, maxResults, cancellationToken);
+        return _bot.ListNearbyPrimsAsync(radiusMeters, maxResults, includeAttachments, rootsOnly, nameContains, loadNames, cancellationToken);
+    }
+
+    [McpServerTool, Description("List the child prims of an object (or the attachments of an avatar) by parent local ID, from the simulator cache. Works for HUD roots and linksets.")]
+    public Task<PrimQueryResult> PrimChildren(
+        [Description("Parent local ID: a linkset root, a HUD root, or an avatar local ID (see avatars_nearby selfLocalId).")] uint localId,
+        [Description("Also include grandchildren and deeper.")] bool recursive = false,
+        [Description("Maximum number of results (1..2000).")] int maxResults = 500,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ListPrimChildrenAsync(localId, recursive, maxResults, cancellationToken);
+    }
+
+    [McpServerTool, Description("List avatars in the current region near the bot with names, local IDs, positions, distances and sitting state. Includes the bot itself (isSelf) so its avatar local ID is known.")]
+    public Task<DataToolResult> AvatarsNearby(
+        [Description("Radius in meters.")] float radiusMeters = 96,
+        [Description("Maximum number of results (1..500).")] int maxResults = 50,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.ListNearbyAvatarsAsync(radiusMeters, maxResults, cancellationToken);
+    }
+
+    [McpServerTool, Description("Instant case-insensitive name search over the inventory already cached by the client (no simulator round trips). Folders never listed yet are skipped; the result says how many.")]
+    public Task<DataToolResult> InventorySearch(
+        [Description("Substring to look for in item or folder names.")] string nameContains,
+        [Description("Maximum results (1..2000).")] int maxResults = 50,
+        [Description("Optional asset or inventory type filter, e.g. Object, LSLText, Notecard, Texture, Folder.")] string? type = null,
+        [Description("Optional folder UUID or slash path to search under (default: whole inventory).")] string? folderIdOrPath = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.SearchInventoryCacheAsync(nameContains, maxResults, type, folderIdOrPath, cancellationToken);
     }
 
     [McpServerTool, Description("Discover objects by parcel and ownership/status filters (owner, scripted, physical).")]
