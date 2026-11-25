@@ -4031,6 +4031,12 @@ internal sealed partial class BotSession
                     .ConfigureAwait(false);
             }
 
+            if (parsedAssetType == AssetType.Notecard || parsedInventoryType == InventoryType.Notecard)
+            {
+                return await UploadNotecardInventoryItemAsync(client, data, name, description ?? string.Empty, folderUuid, token)
+                    .ConfigureAwait(false);
+            }
+
             var result = await client.Inventory
                 .RequestCreateItemFromAssetAsync(
                     data,
@@ -4054,6 +4060,67 @@ internal sealed partial class BotSession
                 data.Length,
                 $"Uploaded {data.Length} bytes as {parsedAssetType}/{parsedInventoryType} into folder {folderUuid}.");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Notecards are not accepted by the generic new-file upload: like a viewer, create an
+    // empty notecard item first and then upload its body through the notecard capability.
+    private static async Task<AssetTransferResult> UploadNotecardInventoryItemAsync(
+        GridClient client,
+        byte[] data,
+        string name,
+        string description,
+        UUID folderUuid,
+        CancellationToken cancellationToken)
+    {
+        // Plain text is wrapped in the Linden notecard container; a source that already is
+        // one ("Linden text version ...") is uploaded as it is.
+        const string lindenHeader = "Linden text version";
+        var isLindenNotecard = data.Length >= lindenHeader.Length
+            && Encoding.ASCII.GetString(data, 0, lindenHeader.Length) == lindenHeader;
+        if (!isLindenNotecard)
+        {
+            var text = Encoding.UTF8.GetString(data);
+            if (text.Length > 0 && text[0] == '﻿')
+            {
+                text = text[1..];
+            }
+
+            var notecard = new AssetNotecard { BodyText = text.Replace("\r\n", "\n") };
+            notecard.Encode();
+            data = notecard.AssetData;
+        }
+
+        var createdItem = await client.Inventory
+            .CreateItemAsync(
+                folderUuid,
+                name,
+                description,
+                AssetType.Notecard,
+                UUID.Zero,
+                InventoryType.Notecard,
+                PermissionMask.All,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (createdItem == null || createdItem.UUID == UUID.Zero)
+        {
+            return AssetTransferResult.FailResult("Notecard item creation failed before upload.");
+        }
+
+        var upload = await client.Inventory
+            .RequestUploadNotecardAssetAsync(data, createdItem.UUID, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!upload.success)
+        {
+            return AssetTransferResult.FailResult($"Notecard upload failed for created item {createdItem.UUID}: {upload.status}");
+        }
+
+        return AssetTransferResult.OkResult(
+            createdItem.UUID.ToString(),
+            upload.assetID.ToString(),
+            data.Length,
+            $"Uploaded {data.Length} bytes as notecard into folder {folderUuid} (item={createdItem.UUID}, status='{upload.status}').");
     }
 
     private static async Task<AssetTransferResult> UploadScriptInventoryItemAsync(
