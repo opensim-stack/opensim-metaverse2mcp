@@ -1868,7 +1868,7 @@ internal sealed partial class BotSession
         return merged;
     }
 
-    public async Task<BotToolResult> AppearanceAttachItemAsync(string itemId, string? attachmentPoint, bool replace, CancellationToken cancellationToken)
+    public async Task<BotToolResult> AppearanceAttachItemAsync(string itemId, string? attachmentPoint, bool replace, bool persist, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(itemId, out var itemUuid))
         {
@@ -1896,22 +1896,42 @@ internal sealed partial class BotSession
                 point = invAttachment.AttachmentPoint;
             }
 
+            if (persist)
+            {
+                // Going through the Current Outfit Folder records a link, so the
+                // attachment survives relogin like one made from a viewer.
+                var cof = GetSharedCurrentOutfitFolder(client);
+                await cof.AttachAsync(item, point, replace, token).ConfigureAwait(false);
+                return BotToolResult.OkResult($"Attach request sent for item {item.UUID} on point {point} (replace={replace}) via Current Outfit Folder; it will persist across relogin.");
+            }
+
             client.Appearance.Attach(item, point, replace);
-            return BotToolResult.OkResult($"Attach request sent for item {item.UUID} on point {point} (replace={replace}).");
+            return BotToolResult.OkResult($"Attach request sent for item {item.UUID} on point {point} (replace={replace}); not recorded in the outfit, so it drops on relogin.");
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BotToolResult> AppearanceDetachItemAsync(string itemId, CancellationToken cancellationToken)
+    public async Task<BotToolResult> AppearanceDetachItemAsync(string itemId, bool persist, CancellationToken cancellationToken)
     {
         if (!UUID.TryParse(itemId, out var itemUuid))
         {
             return BotToolResult.Fail("itemId is not a valid UUID.");
         }
 
-        return await ExecuteLockedAsync((client, _) =>
+        return await ExecuteLockedAsync(async (client, token) =>
         {
+            if (persist)
+            {
+                var item = await ResolveInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+                if (item != null)
+                {
+                    var cof = GetSharedCurrentOutfitFolder(client);
+                    await cof.DetachAsync(item, token).ConfigureAwait(false);
+                    return BotToolResult.OkResult($"Detach request sent for item {itemUuid} via Current Outfit Folder (outfit link removed).");
+                }
+            }
+
             client.Appearance.Detach(itemUuid);
-            return Task.FromResult(BotToolResult.OkResult($"Detach request sent for item {itemUuid}."));
+            return BotToolResult.OkResult($"Detach request sent for item {itemUuid}.");
         }, cancellationToken).ConfigureAwait(false);
     }
 
