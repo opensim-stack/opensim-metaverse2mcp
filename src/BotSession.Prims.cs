@@ -912,7 +912,9 @@ internal sealed partial class BotSession
             flexible,
             light,
             sculpt,
-            freshness);
+            freshness,
+            string.IsNullOrWhiteSpace(prim.Text) ? null : prim.Text,
+            prim.IsAttachment);
     }
 
     public async Task<BotToolResult> SelectPrimAsync(uint localId, bool automaticDeselect, CancellationToken cancellationToken)
@@ -1109,7 +1111,13 @@ internal sealed partial class BotSession
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<PrimQueryResult> ListNearbyPrimsAsync(float radiusMeters, int maxResults, CancellationToken cancellationToken)
+    public async Task<PrimQueryResult> ListNearbyPrimsAsync(
+        float radiusMeters,
+        int maxResults,
+        bool includeAttachments,
+        bool rootsOnly,
+        string? nameContains,
+        CancellationToken cancellationToken)
     {
         if (radiusMeters <= 0f)
         {
@@ -1128,9 +1136,18 @@ internal sealed partial class BotSession
             var radius = Math.Clamp(radiusMeters, 0.1f, 4096f);
             var at = client.Self.SimPosition;
 
+            var needle = string.IsNullOrWhiteSpace(nameContains) ? null : nameContains.Trim();
             var prims = sim.ObjectsPrimitives.Values
-                .Select(p => ToPrimSummary(p, at))
+                .Where(p => p != null)
+                // Attachments carry positions relative to their wearer, so they never pass a
+                // distance filter; include them explicitly when asked (distance reported as 0).
+                .Where(p => includeAttachments || !p.IsAttachment)
+                .Where(p => !rootsOnly || p.ParentID == 0 || p.IsAttachment)
+                .Select(p => p.IsAttachment ? ToPrimSummary(p, p.Position) : ToPrimSummary(p, at))
                 .Where(p => p.DistanceMeters <= radius)
+                .Where(p => needle == null
+                            || (p.Name?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false)
+                            || (p.HoverText?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false))
                 .OrderBy(p => p.DistanceMeters)
                 .ThenBy(p => p.LocalId)
                 .Take(limit)
@@ -1391,7 +1408,9 @@ internal sealed partial class BotSession
             prim.Position.X,
             prim.Position.Y,
             prim.Position.Z,
-            Vector3.Distance(at, prim.Position));
+            Vector3.Distance(at, prim.Position),
+            prim.IsAttachment,
+            string.IsNullOrWhiteSpace(prim.Text) ? null : prim.Text);
     }
 
     private async Task<Primitive?> WaitForCreatedPrimAsync(
@@ -1551,7 +1570,9 @@ internal sealed record PrimSummary(
     float PositionX,
     float PositionY,
     float PositionZ,
-    float DistanceMeters);
+    float DistanceMeters,
+    bool IsAttachment = false,
+    string? HoverText = null);
 
 internal sealed record PrimInfo(
     uint LocalId,
@@ -1584,7 +1605,9 @@ internal sealed record PrimInfo(
     PrimFlexibleInfo? Flexible,
     PrimLightInfo? Light,
     PrimSculptInfo? Sculpt,
-    PrimPropertyFreshnessInfo Freshness);
+    PrimPropertyFreshnessInfo Freshness,
+    string? HoverText = null,
+    bool IsAttachment = false);
 
 internal sealed record PrimShapeDetail(
     string PathCurve,
