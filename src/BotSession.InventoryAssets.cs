@@ -2443,6 +2443,117 @@ internal sealed partial class BotSession
             cancellationToken).ConfigureAwait(false);
     }
 
+    private static readonly JsonSerializerOptions ReadTextJsonOptions = new(JsonSerializerDefaults.Web);
+
+    // Notecards and scripts cannot be fetched by asset id alone; the simulator serves them
+    // against the inventory item (and the containing object, for task inventory).
+    public async Task<DataToolResult> InventoryReadTextAsync(
+        string itemId,
+        uint objectLocalId,
+        string? objectId,
+        int maxChars,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(itemId, out var itemUuid))
+        {
+            return DataToolResult.FailResult("itemId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            InventoryItem? item;
+            var taskUuid = UUID.Zero;
+            var inObject = objectLocalId != 0 || !string.IsNullOrWhiteSpace(objectId);
+            if (inObject)
+            {
+                var sim = client.Network.CurrentSim;
+                if (sim == null)
+                {
+                    return DataToolResult.FailResult("No current simulator available.");
+                }
+
+                if (!TryResolveTaskInventoryObject(sim, objectLocalId, objectId, out taskUuid, out var localId, out var resolveError))
+                {
+                    return DataToolResult.FailResult(resolveError ?? "Unable to resolve object reference.");
+                }
+
+                var taskEntries = await client.Inventory
+                    .GetTaskInventoryAsync(taskUuid, localId, sim, token)
+                    .ConfigureAwait(false);
+                item = taskEntries.OfType<InventoryItem>().FirstOrDefault(i => i.UUID == itemUuid);
+                if (item == null)
+                {
+                    return DataToolResult.FailResult($"Task inventory item {itemUuid} was not found on object localId={localId}, objectId={taskUuid}.");
+                }
+            }
+            else
+            {
+                item = await ResolveInventoryItemAsync(client, itemUuid, token).ConfigureAwait(false);
+                if (item == null)
+                {
+                    return DataToolResult.FailResult($"Inventory item {itemUuid} was not found.");
+                }
+            }
+
+            if (item.AssetType != AssetType.Notecard && item.AssetType != AssetType.LSLText)
+            {
+                return DataToolResult.FailResult($"Item '{item.Name}' is {item.AssetType}; only notecards and scripts can be read as text.");
+            }
+
+            var asset = await client.Assets.RequestInventoryAssetAsync(
+                item.AssetUUID,
+                item.UUID,
+                taskUuid,
+                inObject ? item.OwnerID : client.Self.AgentID,
+                item.AssetType,
+                true,
+                UUID.Random(),
+                token).ConfigureAwait(false);
+
+            if (asset?.AssetData == null || asset.AssetData.Length == 0)
+            {
+                return DataToolResult.FailResult(
+                    $"Could not download the contents of '{item.Name}' ({item.AssetType}). The simulator refuses when the item is not readable by this avatar (for example a no-modify script).");
+            }
+
+            string text;
+            var embeddedItems = 0;
+            if (item.AssetType == AssetType.Notecard)
+            {
+                var notecard = new AssetNotecard(item.AssetUUID, asset.AssetData);
+                if (!notecard.Decode())
+                {
+                    return DataToolResult.FailResult($"Notecard '{item.Name}' was downloaded but could not be decoded.");
+                }
+
+                text = notecard.BodyText ?? string.Empty;
+                embeddedItems = notecard.EmbeddedItems?.Count ?? 0;
+            }
+            else
+            {
+                text = Encoding.UTF8.GetString(asset.AssetData).TrimEnd('\0');
+            }
+
+            var limit = Math.Clamp(maxChars, 1, 1_000_000);
+            var truncated = text.Length > limit;
+            var payload = JsonSerializer.Serialize(new
+            {
+                itemId = item.UUID.ToString(),
+                name = item.Name,
+                assetType = item.AssetType.ToString(),
+                objectId = inObject ? taskUuid.ToString() : null,
+                length = text.Length,
+                truncated,
+                embeddedItems,
+                text = truncated ? text[..limit] : text
+            }, ReadTextJsonOptions);
+
+            return DataToolResult.OkResult(
+                $"Read {text.Length} character(s) from {item.AssetType} '{item.Name}'" + (truncated ? $" (returned the first {limit})." : "."),
+                payload);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<BotToolResult> CopyInventoryItemToTaskAsync(
         uint objectLocalId,
         string inventoryItemId,

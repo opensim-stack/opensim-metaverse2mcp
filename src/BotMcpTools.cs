@@ -2943,6 +2943,17 @@ internal sealed class BotMcpTools
         return _bot.TaskInventoryTakeAsync(objectLocalId, taskItemId, destinationFolderIdOrPath, objectId, cancellationToken);
     }
 
+    [McpServerTool, Description("Read the text of a notecard or script. With only itemId it reads from agent inventory; with objectLocalId or objectId it reads an item inside that object's contents (itemId is then the task item UUID from task_inventory_list). Scripts need modify rights.")]
+    public Task<DataToolResult> InventoryReadText(
+        [Description("Inventory item UUID, or task-inventory item UUID when an object is given.")] string itemId,
+        [Description("Object local ID when reading from an object's contents (0 = agent inventory, unless objectId is set).")] uint objectLocalId = 0,
+        [Description("Optional object UUID, used when the local ID is omitted or stale.")] string? objectId = null,
+        [Description("Maximum characters of text to return (1..1000000).")] int maxChars = 60000,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.InventoryReadTextAsync(itemId, objectLocalId, objectId, maxChars, cancellationToken);
+    }
+
     [McpServerTool, Description("Upload a local file path or HTTP/HTTPS URL as a new inventory item asset.")]
     public Task<AssetTransferResult> AssetUploadInventory(
         [Description("Source path or URL.")] string source,
