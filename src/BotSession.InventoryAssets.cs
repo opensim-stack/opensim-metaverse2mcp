@@ -2443,17 +2443,81 @@ internal sealed partial class BotSession
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<BotToolResult> TaskInventoryAddAsync(
+        uint objectLocalId,
+        string inventoryItemId,
+        bool enableScript,
+        bool forceOverwrite,
+        bool allowMoveNoCopy,
+        CancellationToken cancellationToken)
+    {
+        return await CopyInventoryItemToTaskAsync(
+            objectLocalId,
+            inventoryItemId,
+            expectedKind: AnyTaskInventoryKind,
+            enableScript,
+            forceOverwrite,
+            cancellationToken,
+            allowMoveNoCopy).ConfigureAwait(false);
+    }
+
+    public async Task<BotToolResult> TaskInventoryRemoveAsync(
+        uint objectLocalId,
+        string taskItemId,
+        string? objectId,
+        CancellationToken cancellationToken)
+    {
+        if (!UUID.TryParse(taskItemId, out var taskItemUuid))
+        {
+            return BotToolResult.Fail("taskItemId is not a valid UUID.");
+        }
+
+        return await ExecuteLockedAsync(async (client, token) =>
+        {
+            var sim = client.Network.CurrentSim;
+            if (sim == null)
+            {
+                return BotToolResult.Fail("No current simulator available.");
+            }
+
+            if (!TryResolveTaskInventoryObject(sim, objectLocalId, objectId, out var objectUuid, out var localId, out var resolveError))
+            {
+                return BotToolResult.Fail(resolveError ?? "Unable to resolve object reference.");
+            }
+
+            var taskEntries = await client.Inventory
+                .GetTaskInventoryAsync(objectUuid, localId, sim, token)
+                .ConfigureAwait(false);
+
+            var taskItem = taskEntries.OfType<InventoryItem>().FirstOrDefault(i => i.UUID == taskItemUuid);
+            if (taskItem == null)
+            {
+                return BotToolResult.Fail($"Task inventory item {taskItemUuid} was not found on object localId={localId}, objectId={objectUuid}.");
+            }
+
+            client.Inventory.RemoveTaskInventory(localId, taskItem.UUID, sim);
+            return BotToolResult.OkResult(
+                $"Requested removal of task-inventory item '{taskItem.Name}' ({taskItem.UUID}, {taskItem.AssetType}) from object localId={localId}, objectId={objectUuid}. The item is deleted, not returned to agent inventory.");
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private const string AnyTaskInventoryKind = "any";
+
     private async Task<BotToolResult> CopyInventoryItemToTaskAsync(
         uint objectLocalId,
         string inventoryItemId,
         string expectedKind,
         bool enableScript,
         bool forceOverwrite,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowMoveNoCopy = true)
     {
+        var anyKind = expectedKind == AnyTaskInventoryKind;
         if (!UUID.TryParse(inventoryItemId, out var inventoryItemUuid))
         {
-            return BotToolResult.Fail(expectedKind == "script"
+            return BotToolResult.Fail(anyKind
+                ? "inventoryItemId is not a valid UUID."
+                : expectedKind == "script"
                 ? "inventoryScriptItemId is not a valid UUID."
                 : "inventoryNotecardItemId is not a valid UUID.");
         }
@@ -2479,9 +2543,23 @@ internal sealed partial class BotSession
 
             var isScript = item.AssetType == AssetType.LSLText && item.InventoryType == InventoryType.LSL;
             var isNotecard = item.AssetType == AssetType.Notecard && item.InventoryType == InventoryType.Notecard;
-            var kind = isScript ? "script" : isNotecard ? "notecard" : "unsupported";
+            var kind = isScript ? "script" : isNotecard ? "notecard" : anyKind ? item.AssetType.ToString() : "unsupported";
 
-            if (!string.Equals(kind, expectedKind, StringComparison.Ordinal))
+            if (anyKind)
+            {
+                if (item.AssetType is AssetType.Link or AssetType.LinkFolder)
+                {
+                    return BotToolResult.Fail($"Inventory item {item.UUID} is a link; pass the item it points to.");
+                }
+
+                // Dropping a no-copy item into an object moves it out of agent inventory.
+                if (!allowMoveNoCopy && (item.Permissions.OwnerMask & PermissionMask.Copy) == 0)
+                {
+                    return BotToolResult.Fail(
+                        $"Inventory item '{item.Name}' ({item.UUID}) is no-copy: adding it would move the only copy into the object. Pass allowMoveNoCopy=true to do that.");
+                }
+            }
+            else if (!string.Equals(kind, expectedKind, StringComparison.Ordinal))
             {
                 return BotToolResult.Fail(
                     expectedKind == "script"
@@ -2518,7 +2596,7 @@ internal sealed partial class BotSession
                 : client.Inventory.UpdateTaskInventory(objectLocalId, item, sim, only_mod_meta: true);
 
             return BotToolResult.OkResult(
-                $"Requested {kind} copy to object {objectLocalId}; transactionId={transaction}, forceOverwrite={forceOverwrite}, removed={removedCount}" +
+                $"Requested {kind} copy{(anyKind ? $" of '{item.Name}'" : string.Empty)} to object {objectLocalId}; transactionId={transaction}, forceOverwrite={forceOverwrite}, removed={removedCount}" +
                 (kind == "script" ? $", enableScript={enableScript}." : "."));
         }, cancellationToken).ConfigureAwait(false);
     }

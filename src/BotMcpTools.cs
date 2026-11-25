@@ -2943,6 +2943,28 @@ internal sealed class BotMcpTools
         return _bot.TaskInventoryTakeAsync(objectLocalId, taskItemId, destinationFolderIdOrPath, objectId, cancellationToken);
     }
 
+    [McpServerTool, Description("Copy any agent inventory item (texture, animation, sound, notecard, script, object, landmark, clothing...) into an object's task inventory (its Contents), like dragging it into the Contents tab. Needs modify rights on the object.")]
+    public Task<BotToolResult> TaskInventoryAdd(
+        [Description("Target object local ID.")] uint objectLocalId,
+        [Description("Agent inventory item UUID to add.")] string inventoryItemId,
+        [Description("For script items: true to start the script after the copy.")] bool enableScript = true,
+        [Description("True to remove same-name, same-type entries from the object before the copy.")] bool forceOverwrite = false,
+        [Description("No-copy items are moved out of agent inventory into the object. Refused unless this is true.")] bool allowMoveNoCopy = false,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.TaskInventoryAddAsync(objectLocalId, inventoryItemId, enableScript, forceOverwrite, allowMoveNoCopy, cancellationToken);
+    }
+
+    [McpServerTool, Description("Delete an item from an object's task inventory (its Contents). The item is destroyed, not returned to agent inventory; use task_inventory_take first to keep it. Provide objectLocalId, objectId, or both.")]
+    public Task<BotToolResult> TaskInventoryRemove(
+        [Description("Object local ID in current simulator (0 allowed when objectId is provided).") ] uint objectLocalId,
+        [Description("Task-inventory item UUID on the object (from task_inventory_list).")] string taskItemId,
+        [Description("Optional object UUID; when local ID is omitted or stale, this is used to resolve the current local ID from simulator cache.")] string? objectId = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _bot.TaskInventoryRemoveAsync(objectLocalId, taskItemId, objectId, cancellationToken);
+    }
+
     [McpServerTool, Description("Upload a local file path or HTTP/HTTPS URL as a new inventory item asset.")]
     public Task<AssetTransferResult> AssetUploadInventory(
         [Description("Source path or URL.")] string source,
