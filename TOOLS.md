@@ -355,6 +355,7 @@ RLV notes:
 Inventory and asset notes:
 - `AssetUploadInventory` accepts either a local file path or an `http/https` URL as `source`.
 - `AssetUploadInventory` accepts `assetType`/`inventoryType` as explicit values or `auto` (inferred from source/name extension such as `.lsl`, `.txt`, `.jp2`, `.ogg`, `.bvh`).
+- `PrimInspect` reports a prim's floating text as `hoverText` and its colour as `hoverTextColor` (`r`, `g`, `b`, `a`, each 0..1; only when there is text).
 - `AssetDownload` and `TextureDownload` use `outputMode`: `both` (default), `base64`, or `tempfile`.
 - `MeshInspectGltf` preflights `.glb`/`.gltf` content and reports what can upload, what will be skipped, and texture ingest/transcode diagnostics.
 - `MeshUploadGltf` uploads mesh assets from local paths or HTTP sources and returns created inventory/asset IDs plus conversion warnings when present.
