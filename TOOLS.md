@@ -355,6 +355,7 @@ RLV notes:
 Inventory and asset notes:
 - `AssetUploadInventory` accepts either a local file path or an `http/https` URL as `source`.
 - `AssetUploadInventory` accepts `assetType`/`inventoryType` as explicit values or `auto` (inferred from source/name extension such as `.lsl`, `.txt`, `.jp2`, `.ogg`, `.bvh`).
+- `AssetUploadInventory` with a texture type converts image files (PNG, JPEG, TGA...) to JPEG 2000 before uploading, resized to powers of two of at most 1024 with the alpha channel kept; a source that already is JPEG 2000 (`.jp2`, `.j2c`, or a codestream) is uploaded as it is. The new item gets full next-owner permissions. On Second Life a texture upload costs L$.
 - `AssetDownload` and `TextureDownload` use `outputMode`: `both` (default), `base64`, or `tempfile`.
 - `MeshInspectGltf` preflights `.glb`/`.gltf` content and reports what can upload, what will be skipped, and texture ingest/transcode diagnostics.
 - `MeshUploadGltf` uploads mesh assets from local paths or HTTP sources and returns created inventory/asset IDs plus conversion warnings when present.

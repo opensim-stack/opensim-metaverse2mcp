@@ -564,7 +564,7 @@ internal sealed partial class BotSession
 
             ResizeForTextureUpload(decoded);
             textureStats.Converted++;
-            return CompleteConfigurationPresets.Streaming.WithFileFormat(false).Encode(decoded);
+            return EncodeJ2k(decoded);
         }
         catch (Exception ex)
         {
@@ -659,6 +659,74 @@ internal sealed partial class BotSession
 
         var lowered = descriptor.ToLowerInvariant();
         return lowered.EndsWith(".tga") || lowered.EndsWith(".targa");
+    }
+
+    // A texture has to reach the simulator as a JPEG 2000 codestream; anything else is
+    // refused by the upload with a bare "failure". Returns the bytes to upload: the source
+    // itself when it already is JPEG 2000, otherwise the image (PNG, JPEG, TGA...) decoded,
+    // resized to what the grid accepts (powers of two, at most 1024) and encoded, alpha kept.
+    private static byte[] EncodeTextureForUpload(byte[] source, string sourceName, out string note)
+    {
+        var isCodestream = source.Length >= 4 && source[0] == 0xFF && source[1] == 0x4F && source[2] == 0xFF && source[3] == 0x51;
+        if (isCodestream || LooksLikeJ2k(sourceName, null))
+        {
+            note = "JPEG 2000 source uploaded as it is";
+            return source;
+        }
+
+        ManagedImage decoded;
+        using (var stream = new MemoryStream(source, writable: false))
+        {
+            decoded = LooksLikeTga(sourceName, null)
+                ? Targa.DecodeToManagedImage(stream)
+                : GltfTextureCodec.Decode(stream);
+        }
+
+        ResizeForTextureUpload(decoded);
+        note = $"converted to JPEG 2000 at {decoded.Width}x{decoded.Height}";
+        return EncodeJ2k(decoded);
+    }
+
+    // The JPEG 2000 encoder does not know ManagedImage (handed one, it fails with "Image
+    // source cannot be null"), so the pixels go in as plain component arrays: red, green,
+    // blue and, when the image has one, alpha. The encoder wants 8-bit samples centred on
+    // zero (value - 128); fed 0..255 it clips the upper half, which wrecks the alpha.
+    private static byte[] EncodeJ2k(ManagedImage image)
+    {
+        var pixels = image.Width * image.Height;
+        var channels = new List<byte[]>();
+        if (image.Red != null && image.Green != null && image.Blue != null)
+        {
+            channels.Add(image.Red);
+            channels.Add(image.Green);
+            channels.Add(image.Blue);
+        }
+        else
+        {
+            throw new InvalidOperationException("The image has no colour channels.");
+        }
+
+        if ((image.Channels & ManagedImage.ImageChannels.Alpha) != 0 && image.Alpha != null)
+        {
+            channels.Add(image.Alpha);
+        }
+
+        var components = new int[channels.Count][];
+        for (var c = 0; c < channels.Count; c++)
+        {
+            var from = channels[c];
+            var to = new int[pixels];
+            for (var i = 0; i < pixels; i++)
+            {
+                to[i] = from[i] - 128;
+            }
+
+            components[c] = to;
+        }
+
+        var source = new CoreJ2K.Util.InterleavedImageSource(
+            image.Width, image.Height, components.Length, 8, new bool[components.Length], components);
+        return CompleteConfigurationPresets.Streaming.WithFileFormat(false).Encode(source);
     }
 
     private static void ResizeForTextureUpload(ManagedImage image)
