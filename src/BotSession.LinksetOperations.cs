@@ -48,47 +48,88 @@ internal sealed partial class BotSession
 
     public async Task<BotToolResult> SetLinksetRootAsync(uint localId, uint newRootLocalId, CancellationToken cancellationToken)
     {
-        return await ExecuteLockedAsync((client, _) =>
+        return await ExecuteLockedAsync(async (client, token) =>
         {
             var sim = client.Network.CurrentSim;
             if (sim == null)
             {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+                return BotToolResult.Fail("No current simulator available.");
             }
 
             if (!TryGetLinksetMembers(sim, localId, out var currentRootLocalId, out var members, out var error))
             {
-                return Task.FromResult(BotToolResult.Fail(error));
+                return BotToolResult.Fail(error);
             }
 
             if (members.Count <= 1)
             {
-                return Task.FromResult(BotToolResult.Fail("Cannot set root on an unlinked/single prim object."));
+                return BotToolResult.Fail("Cannot set root on an unlinked/single prim object.");
             }
 
             if (!members.Any(p => p.LocalID == newRootLocalId))
             {
-                return Task.FromResult(BotToolResult.Fail($"newRootLocalId {newRootLocalId} is not a member of this linkset."));
+                return BotToolResult.Fail($"newRootLocalId {newRootLocalId} is not a member of this linkset.");
             }
 
             if (newRootLocalId == currentRootLocalId)
             {
-                return Task.FromResult(BotToolResult.OkResult($"Prim {newRootLocalId} is already the root prim."));
+                return BotToolResult.OkResult($"Prim {newRootLocalId} is already the root prim.");
             }
 
+            // The simulator makes the first prim of a link request the root.
             var ordered = members
                 .Select(p => p.LocalID)
                 .Where(id => id != newRootLocalId)
                 .ToList();
-            ordered.Add(newRootLocalId);
+            ordered.Insert(0, newRootLocalId);
 
-            var allIds = members.Select(p => p.LocalID).ToList();
-            client.Objects.DelinkPrims(sim, allIds);
-            client.Objects.LinkPrims(sim, ordered);
+            var relinkError = await RelinkInOrderAsync(client, sim, members, ordered, token).ConfigureAwait(false);
+            if (relinkError != null)
+            {
+                return BotToolResult.Fail(relinkError);
+            }
 
-            return Task.FromResult(BotToolResult.OkResult(
-                $"Re-link request sent to set root {newRootLocalId} (previous root {currentRootLocalId}). Link order={string.Join(",", ordered)} (root is last)."));
+            return BotToolResult.OkResult(
+                $"Re-linked to set root {newRootLocalId} (previous root {currentRootLocalId}). Link order={string.Join(",", ordered)} (root is first).");
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Unlinks a linkset and links it again in the given order (root first), waiting in
+    // between until every prim has become an object of its own. Sent back to back, the
+    // link request can reach the simulator before the unlink is through; a prim caught
+    // like that came out of the relink with its region position as its offset from the
+    // root, about 1500 m away from it. Returns null on success, or what went wrong.
+    private static async Task<string?> RelinkInOrderAsync(
+        GridClient client,
+        Simulator sim,
+        IReadOnlyList<Primitive> members,
+        List<uint> ordered,
+        CancellationToken cancellationToken)
+    {
+        var allIds = members.Select(p => p.LocalID).ToList();
+        client.Objects.DelinkPrims(sim, allIds);
+
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (true)
+        {
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+            var stillLinked = allIds.Count(id => sim.ObjectsPrimitives.TryGetValue(id, out var prim) && prim != null && prim.ParentID != 0);
+            if (stillLinked == 0)
+            {
+                break;
+            }
+
+            if (DateTime.UtcNow > deadline)
+            {
+                return $"The linkset was unlinked, but {stillLinked} prim(s) did not report as unlinked within 8 s, so it was NOT linked again. "
+                    + $"Check the object, then link it with prim_link \"{string.Join(",", ordered)}\".";
+            }
+        }
+
+        // One more beat: the cache hears about the unlink a little before the simulator is done with it.
+        await Task.Delay(1000, cancellationToken).ConfigureAwait(false);
+        client.Objects.LinkPrims(sim, ordered);
+        return null;
     }
 
     public async Task<BotToolResult> ReorderLinksetAsync(
@@ -102,45 +143,48 @@ internal sealed partial class BotSession
             return BotToolResult.Fail(parseError);
         }
 
-        return await ExecuteLockedAsync((client, _) =>
+        return await ExecuteLockedAsync(async (client, token) =>
         {
             var sim = client.Network.CurrentSim;
             if (sim == null)
             {
-                return Task.FromResult(BotToolResult.Fail("No current simulator available."));
+                return BotToolResult.Fail("No current simulator available.");
             }
 
             if (!TryGetLinksetMembers(sim, localId, out var currentRootLocalId, out var members, out var error))
             {
-                return Task.FromResult(BotToolResult.Fail(error));
+                return BotToolResult.Fail(error);
             }
 
             if (members.Count <= 1)
             {
-                return Task.FromResult(BotToolResult.Fail("Cannot reorder an unlinked/single prim object."));
+                return BotToolResult.Fail("Cannot reorder an unlinked/single prim object.");
             }
 
             var linksetIds = members.Select(p => p.LocalID).OrderBy(id => id).ToList();
             var requestedIds = orderedIds.OrderBy(id => id).ToList();
             if (!linksetIds.SequenceEqual(requestedIds))
             {
-                return Task.FromResult(BotToolResult.Fail(
-                    "orderedLocalIdsCsv must contain exactly all prim local IDs in this linkset (no extras or missing IDs)."));
+                return BotToolResult.Fail(
+                    "orderedLocalIdsCsv must contain exactly all prim local IDs in this linkset (no extras or missing IDs).");
             }
 
             if (!orderedIds.Contains(rootLocalId))
             {
-                return Task.FromResult(BotToolResult.Fail($"rootLocalId {rootLocalId} must be included in orderedLocalIdsCsv."));
+                return BotToolResult.Fail($"rootLocalId {rootLocalId} must be included in orderedLocalIdsCsv.");
             }
 
             var ordered = orderedIds.Where(id => id != rootLocalId).ToList();
-            ordered.Add(rootLocalId);
+            ordered.Insert(0, rootLocalId);
 
-            client.Objects.DelinkPrims(sim, linksetIds);
-            client.Objects.LinkPrims(sim, ordered);
+            var relinkError = await RelinkInOrderAsync(client, sim, members, ordered, token).ConfigureAwait(false);
+            if (relinkError != null)
+            {
+                return BotToolResult.Fail(relinkError);
+            }
 
-            return Task.FromResult(BotToolResult.OkResult(
-                $"Re-link request sent. Root {rootLocalId} (was {currentRootLocalId}), ordered links={string.Join(",", ordered)} (root is last)."));
+            return BotToolResult.OkResult(
+                $"Re-linked. Root {rootLocalId} (was {currentRootLocalId}), ordered links={string.Join(",", ordered)} (root is first).");
         }, cancellationToken).ConfigureAwait(false);
     }
 

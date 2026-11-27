@@ -80,9 +80,14 @@ internal sealed partial class BotSession
                 return Task.FromResult(BotToolResult.Fail("No current simulator available."));
             }
 
-            var position = ClampLocalPosition(new Vector3(x, y, z));
-            client.Objects.SetPosition(sim, localId, position, childOnly);
-            return Task.FromResult(BotToolResult.OkResult($"Set prim {localId} position to {FormatVector(position)}."));
+            // A child prim's position is an offset from its root (small, often negative), not a
+            // region coordinate, so the region bounds do not apply to it.
+            var isChild = sim.ObjectsPrimitives.TryGetValue(localId, out var prim) && prim != null && prim.ParentID != 0 && !prim.IsAttachment;
+            var position = isChild ? new Vector3(x, y, z) : ClampLocalPosition(new Vector3(x, y, z));
+            client.Objects.SetPosition(sim, localId, position, childOnly || isChild);
+            return Task.FromResult(BotToolResult.OkResult(isChild
+                ? $"Set child prim {localId} to offset {FormatVector(position)} from its root."
+                : $"Set prim {localId} position to {FormatVector(position)}."));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -203,86 +208,105 @@ internal sealed partial class BotSession
                 te = new Primitive.TextureEntry(Primitive.TextureEntry.WHITE_TEXTURE);
             }
 
-            Primitive.TextureEntryFace face;
-            var faceLabel = faceIndex < 0 ? "default" : $"face {faceIndex}";
+            // -1 means the whole prim: the default entry and every face that has its own entry
+            // (those do not follow the default).
+            var faces = new List<Primitive.TextureEntryFace>();
+            var faceLabel = faceIndex < 0 ? "all faces" : $"face {faceIndex}";
             if (faceIndex < 0)
             {
-                face = te.DefaultTexture ?? new Primitive.TextureEntryFace(null);
-                te.DefaultTexture = face;
+                te.DefaultTexture ??= new Primitive.TextureEntryFace(null);
+                faces.Add(te.DefaultTexture);
+                faces.AddRange(te.FaceTextures.Where(explicitFace => explicitFace != null));
             }
             else
             {
                 if (faceIndex >= Primitive.TextureEntry.MAX_FACES)
                 {
-                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for default."));
+                    return Task.FromResult(BotToolResult.Fail($"faceIndex must be between 0 and {Primitive.TextureEntry.MAX_FACES - 1}, or -1 for all faces."));
                 }
 
-                face = te.CreateFace((uint)faceIndex);
+                faces.Add(te.CreateFace((uint)faceIndex));
             }
 
-            if (red.HasValue || green.HasValue || blue.HasValue || alpha.HasValue)
-            {
-                var rgba = face.RGBA;
-                var r = Math.Clamp(red ?? rgba.R, 0f, 1f);
-                var g = Math.Clamp(green ?? rgba.G, 0f, 1f);
-                var b = Math.Clamp(blue ?? rgba.B, 0f, 1f);
-                var a = Math.Clamp(alpha ?? rgba.A, 0f, 1f);
-                face.RGBA = new Color4(r, g, b, a);
-            }
-
-            if (repeatU.HasValue)
-            {
-                face.RepeatU = repeatU.Value;
-            }
-
-            if (repeatV.HasValue)
-            {
-                face.RepeatV = repeatV.Value;
-            }
-
-            if (offsetU.HasValue)
-            {
-                face.OffsetU = Math.Clamp(offsetU.Value, -1f, 1f);
-            }
-
-            if (offsetV.HasValue)
-            {
-                face.OffsetV = Math.Clamp(offsetV.Value, -1f, 1f);
-            }
-
-            if (rotationRadians.HasValue)
-            {
-                face.Rotation = rotationRadians.Value;
-            }
-
-            if (glow.HasValue)
-            {
-                face.Glow = Math.Clamp(glow.Value, 0f, 1f);
-            }
-
-            if (fullbright.HasValue)
-            {
-                face.Fullbright = fullbright.Value;
-            }
-
+            Shininess? shinyValue = null;
             if (!string.IsNullOrWhiteSpace(shiny))
             {
-                if (!Enum.TryParse<Shininess>(shiny, true, out var shinyValue))
+                if (!Enum.TryParse<Shininess>(shiny, true, out var parsedShiny))
                 {
                     return Task.FromResult(BotToolResult.Fail("Invalid shiny value. Use: None, Low, Medium, High."));
                 }
 
-                face.Shiny = shinyValue;
+                shinyValue = parsedShiny;
             }
 
+            Bumpiness? bumpValue = null;
             if (!string.IsNullOrWhiteSpace(bump))
             {
-                if (!Enum.TryParse<Bumpiness>(bump, true, out var bumpValue))
+                if (!Enum.TryParse<Bumpiness>(bump, true, out var parsedBump))
                 {
                     return Task.FromResult(BotToolResult.Fail("Invalid bump value. Use values from Bumpiness enum (e.g. None, Brightness, Darkness, Woodgrain)."));
                 }
 
-                face.Bump = bumpValue;
+                bumpValue = parsedBump;
+            }
+
+            foreach (var face in faces)
+            {
+
+                if (red.HasValue || green.HasValue || blue.HasValue || alpha.HasValue)
+                {
+                    var rgba = face.RGBA;
+                    var r = Math.Clamp(red ?? rgba.R, 0f, 1f);
+                    var g = Math.Clamp(green ?? rgba.G, 0f, 1f);
+                    var b = Math.Clamp(blue ?? rgba.B, 0f, 1f);
+                    var a = Math.Clamp(alpha ?? rgba.A, 0f, 1f);
+                    face.RGBA = new Color4(r, g, b, a);
+                }
+
+                if (repeatU.HasValue)
+                {
+                    face.RepeatU = repeatU.Value;
+                }
+
+                if (repeatV.HasValue)
+                {
+                    face.RepeatV = repeatV.Value;
+                }
+
+                if (offsetU.HasValue)
+                {
+                    face.OffsetU = Math.Clamp(offsetU.Value, -1f, 1f);
+                }
+
+                if (offsetV.HasValue)
+                {
+                    face.OffsetV = Math.Clamp(offsetV.Value, -1f, 1f);
+                }
+
+                if (rotationRadians.HasValue)
+                {
+                    face.Rotation = rotationRadians.Value;
+                }
+
+                if (glow.HasValue)
+                {
+                    face.Glow = Math.Clamp(glow.Value, 0f, 1f);
+                }
+
+                if (fullbright.HasValue)
+                {
+                    face.Fullbright = fullbright.Value;
+                }
+
+                if (shinyValue.HasValue)
+                {
+                    face.Shiny = shinyValue.Value;
+                }
+
+                if (bumpValue.HasValue)
+                {
+                    face.Bump = bumpValue.Value;
+                }
             }
 
             client.Objects.SetTextures(sim, localId, te);
@@ -1201,7 +1225,7 @@ internal sealed partial class BotSession
             }
 
             client.Objects.LinkPrims(sim, localIds);
-            return Task.FromResult(BotToolResult.OkResult($"Link request sent for prims: {string.Join(",", localIds)}."));
+            return Task.FromResult(BotToolResult.OkResult($"Link request sent for prims: {string.Join(",", localIds)} (the first one is the root)."));
         }, cancellationToken).ConfigureAwait(false);
     }
 

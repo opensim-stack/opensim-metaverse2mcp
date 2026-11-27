@@ -1788,7 +1788,7 @@ internal sealed class BotMcpTools
         [Description("Position X.")] float x,
         [Description("Position Y.")] float y,
         [Description("Position Z.")] float z,
-        [Description("True to move only this child prim; false to move linked set.")] bool childOnly,
+        [Description("True to move only this prim; false to move the linked set. For a child prim the coordinates are an offset from its root, and only that child moves.")] bool childOnly,
         CancellationToken cancellationToken)
     {
         return _bot.SetPrimPositionAsync(localId, x, y, z, childOnly, cancellationToken);
@@ -1829,10 +1829,10 @@ internal sealed class BotMcpTools
         return _bot.SetPrimTextureAsync(localId, textureId, faceIndex, cancellationToken);
     }
 
-    [McpServerTool, Description("Set detailed texture/material parameters on a prim face or default face.")]
+    [McpServerTool, Description("Set detailed texture/material parameters (colour, alpha, repeats, offsets, rotation, glow, fullbright, shiny, bump) on one face of a prim, or on every face with faceIndex -1.")]
     public Task<BotToolResult> PrimSetFaceParams(
         [Description("Prim local ID.")] uint localId,
-        [Description("Face index (0..44), or -1 for default face.")] int faceIndex,
+        [Description("Face index (0..44), or -1 for every face.")] int faceIndex,
         [Description("Optional red tint (0..1).") ] float? red = null,
         [Description("Optional green tint (0..1).") ] float? green = null,
         [Description("Optional blue tint (0..1).") ] float? blue = null,
@@ -1938,9 +1938,9 @@ internal sealed class BotMcpTools
         return _bot.SetPrimDescriptionAsync(localId, description, cancellationToken);
     }
 
-    [McpServerTool, Description("Link multiple prims into a linkset using comma-separated local IDs.")]
+    [McpServerTool, Description("Link prims or whole objects into one linkset using comma-separated local IDs. To add a prim to an existing object, pass that object's root first and the new prim after it.")]
     public Task<BotToolResult> PrimLink(
-        [Description("Comma-separated local IDs; last ID becomes root.")] string localIdsCsv,
+        [Description("Comma-separated root local IDs; the first ID becomes the root of the result.")] string localIdsCsv,
         CancellationToken cancellationToken)
     {
         return _bot.LinkPrimsAsync(localIdsCsv, cancellationToken);
@@ -1962,7 +1962,7 @@ internal sealed class BotMcpTools
         return _bot.InspectLinksetAsync(localId, cancellationToken);
     }
 
-    [McpServerTool, Description("Set a new root prim for a linkset by relinking members with the requested root last.")]
+    [McpServerTool, Description("Set a new root prim for a linkset by unlinking every prim and relinking with the requested root first. Unlinking renumbers links and can upset scripts that address prims by link number.")]
     public Task<BotToolResult> PrimSetLinksetRoot(
         [Description("Any local ID in the target linkset (root or child).") ] uint localId,
         [Description("Local ID of the prim that should become root.")] uint newRootLocalId,
